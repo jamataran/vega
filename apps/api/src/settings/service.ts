@@ -1,0 +1,147 @@
+import { eq } from 'drizzle-orm';
+import type { AppSettings, UpdateSettingsRequest } from '@vega/shared';
+import { schema } from '../db/client.js';
+import type { AppContext } from '../context.js';
+
+/**
+ * Ajustes editables desde la aplicación.
+ *
+ * Viven en `app_settings` (clave/valor) y **mandan sobre el `.env`**: el
+ * fichero de entorno es sólo el valor de arranque de una instalación nueva.
+ * Así el administrador cambia el modelo o la frecuencia del proceso sin
+ * redesplegar el contenedor.
+ *
+ * Los secretos se marcan con `is_secret` y NUNCA salen por la API: sólo se
+ * informa de si están configurados.
+ */
+
+const SECRET_KEYS = new Set(['anthropic.apiKey', 'moodle.token', 'smtp.password']);
+
+type SettingsMap = Map<string, { value: string; isSecret: boolean }>;
+
+async function readAll(ctx: AppContext): Promise<SettingsMap> {
+  const rows = await ctx.db.select().from(schema.appSettings);
+  return new Map(rows.map((row) => [row.key, { value: row.value, isSecret: row.isSecret }]));
+}
+
+const str = (map: SettingsMap, key: string, fallback: string): string =>
+  map.get(key)?.value ?? fallback;
+
+const int = (map: SettingsMap, key: string, fallback: number): number => {
+  const raw = map.get(key)?.value;
+  if (raw === undefined || raw === '') return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const bool = (map: SettingsMap, key: string, fallback: boolean): boolean => {
+  const raw = map.get(key)?.value;
+  return raw === undefined || raw === '' ? fallback : raw === 'true';
+};
+
+const configured = (map: SettingsMap, key: string): boolean => (map.get(key)?.value ?? '') !== '';
+
+export async function getSettings(ctx: AppContext): Promise<AppSettings> {
+  const map = await readAll(ctx);
+  const { config } = ctx;
+
+  const everyMinutes = int(map, 'schedule.everyMinutes', 60);
+  const lastRunRaw = str(map, 'schedule.lastRunAt', '');
+  const lastRunAt = lastRunRaw === '' ? null : lastRunRaw;
+  const enabled = bool(map, 'schedule.enabled', false);
+
+  return {
+    anthropic: {
+      // El `.env` cuenta como configurado: es lo que usa una instalación nueva.
+      apiKeyConfigured: configured(map, 'anthropic.apiKey') || Boolean(config.ANTHROPIC_API_KEY),
+      transcriptionModel: str(map, 'anthropic.transcriptionModel', config.AI_MODEL_TRANSCRIPTION),
+      gradingModel: str(map, 'anthropic.gradingModel', config.AI_MODEL_GRADING),
+      maxTokens: int(map, 'anthropic.maxTokens', 8192),
+      provider: str(map, 'anthropic.provider', config.AI_PROVIDER) as 'mock' | 'anthropic',
+    },
+    moodle: {
+      baseUrl: str(map, 'moodle.baseUrl', config.MOODLE_BASE_URL ?? ''),
+      tokenConfigured: configured(map, 'moodle.token') || Boolean(config.MOODLE_TOKEN),
+      connector: str(map, 'moodle.connector', config.LMS_CONNECTOR) as
+        | 'mock'
+        | 'filesystem'
+        | 'moodle3',
+    },
+    smtp: {
+      host: str(map, 'smtp.host', ''),
+      port: int(map, 'smtp.port', 587),
+      user: str(map, 'smtp.user', ''),
+      passwordConfigured: configured(map, 'smtp.password'),
+      from: str(map, 'smtp.from', ''),
+    },
+    schedule: {
+      enabled,
+      everyMinutes,
+      lastRunAt,
+      nextRunAt:
+        enabled && lastRunAt !== null
+          ? new Date(new Date(lastRunAt).getTime() + everyMinutes * 60_000).toISOString()
+          : null,
+    },
+    branding: { name: str(map, 'branding.name', config.BRAND_NAME) },
+  };
+}
+
+/** Aplana `{ anthropic: { apiKey } }` a `anthropic.apiKey`, saltando lo no enviado. */
+function flatten(patch: UpdateSettingsRequest): Map<string, string | null> {
+  const flat = new Map<string, string | null>();
+  for (const [group, values] of Object.entries(patch)) {
+    if (values === undefined) continue;
+    for (const [name, value] of Object.entries(values as Record<string, unknown>)) {
+      if (value === undefined) continue;
+      flat.set(`${group}.${name}`, value === null ? null : String(value));
+    }
+  }
+  return flat;
+}
+
+export async function updateSettings(
+  ctx: AppContext,
+  patch: UpdateSettingsRequest,
+  userId: string,
+): Promise<AppSettings> {
+  const flat = flatten(patch);
+
+  await ctx.db.transaction(async (tx) => {
+    for (const [key, value] of flat) {
+      // `null` en un secreto lo borra; en el resto guarda cadena vacía.
+      const stored = value ?? '';
+      await tx
+        .insert(schema.appSettings)
+        .values({ key, value: stored, isSecret: SECRET_KEYS.has(key), updatedBy: userId })
+        .onConflictDoUpdate({
+          target: schema.appSettings.key,
+          set: { value: stored, updatedBy: userId, updatedAt: new Date() },
+        });
+    }
+  });
+
+  return getSettings(ctx);
+}
+
+/** Deja constancia de cuándo corrió el proceso, para calcular el siguiente. */
+export async function markScheduleRun(ctx: AppContext, when: Date): Promise<void> {
+  await ctx.db
+    .insert(schema.appSettings)
+    .values({ key: 'schedule.lastRunAt', value: when.toISOString() })
+    .onConflictDoUpdate({
+      target: schema.appSettings.key,
+      set: { value: when.toISOString(), updatedAt: new Date() },
+    });
+}
+
+/** Lee un secreto para uso interno. Nunca debe cruzar la frontera HTTP. */
+export async function readSecret(ctx: AppContext, key: string): Promise<string | undefined> {
+  const [row] = await ctx.db
+    .select()
+    .from(schema.appSettings)
+    .where(eq(schema.appSettings.key, key))
+    .limit(1);
+  const value = row?.value ?? '';
+  return value === '' ? undefined : value;
+}

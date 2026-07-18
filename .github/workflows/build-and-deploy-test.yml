@@ -1,0 +1,227 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  Build & deploy a TEST
+#
+#  Push a main  →  construye y publica vega-api y vega-web en GHCR con dos
+#                  tags: `sha-<short>` (inmutable) y `test` (flotante)
+#               →  escribe VEGA_IMAGE_TAG=sha-<short> en deploy/test/stack.env
+#                  y lo commitea con [skip ci]
+#               →  dispara el webhook del Portainer de test
+#
+#  Producción NO se toca aquí: se promociona con promote-to-prod.yml, que
+#  re-etiqueta este mismo artefacto sin reconstruirlo.
+# ─────────────────────────────────────────────────────────────────────────────
+name: Build & deploy (test)
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      # Cambios que no alteran ninguna imagen: no gastamos un build entero.
+      - 'docs/**'
+      - '**/*.md'
+      - 'LICENSE'
+  workflow_dispatch:
+
+permissions:
+  contents: write # commitear el tag desplegado en deploy/test/stack.env
+  packages: write # publicar en GHCR
+
+# Sin cancel-in-progress: cancelar a mitad dejaría el commit del tag y el
+# webhook desincronizados. Los despliegues se encolan y salen en orden.
+concurrency:
+  group: deploy-test
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAMESPACE: jamataran
+
+jobs:
+  # ── Metadatos compartidos ─────────────────────────────────────────────────
+  # El sha corto se calcula una sola vez para que las dos imágenes de la matriz
+  # y el commit del stack.env hablen exactamente del mismo tag.
+  meta:
+    name: Calcular tag
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.vars.outputs.image_tag }}
+    steps:
+      - name: Derivar sha-<short>
+        id: vars
+        run: |
+          set -euo pipefail
+          short="${GITHUB_SHA::7}"
+          echo "image_tag=sha-${short}" >> "$GITHUB_OUTPUT"
+          echo "Tag de esta build: sha-${short}" >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Construcción y publicación ────────────────────────────────────────────
+  build:
+    name: Build ${{ matrix.app }}
+    needs: meta
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: true # si el API no compila, no queremos publicar sólo la web
+      matrix:
+        include:
+          - app: api
+            image: vega-api
+            dockerfile: apps/api/Dockerfile
+          - app: web
+            image: vega-web
+            dockerfile: apps/web/Dockerfile
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Necesario para los heredocs y COPY --parents de los Dockerfiles, y para
+      # poder usar el caché de tipo gha.
+      - name: Preparar Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login en GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          # GITHUB_TOKEN basta gracias a `permissions: packages: write`;
+          # no hace falta un PAT mientras el paquete viva en este mismo repo.
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Calcular tags y etiquetas OCI
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}
+          tags: |
+            type=raw,value=${{ needs.meta.outputs.image_tag }}
+            type=raw,value=test
+          labels: |
+            org.opencontainers.image.title=${{ matrix.image }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Build y push
+        uses: docker/build-push-action@v6
+        with:
+          # El contexto es la raíz del monorepo: los Dockerfiles necesitan el
+          # lockfile y los package.json de todos los workspaces.
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          provenance: false # attestations sueltan tags extra que ensucian GHCR
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Caché por imagen (scope distinto): si compartieran scope, api y web
+          # se pisarían las capas mutuamente en cada ejecución.
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,scope=${{ matrix.image }},mode=max
+          build-args: |
+            VITE_APP_VERSION=${{ needs.meta.outputs.image_tag }}
+
+  # ── Registro del tag en git + despliegue ──────────────────────────────────
+  deploy-test:
+    name: Desplegar en test
+    needs: [meta, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Hace falta el token con permiso de escritura para poder empujar el
+          # commit del tag desplegado.
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Escribir el tag desplegado en deploy/test/stack.env
+        env:
+          IMAGE_TAG: ${{ needs.meta.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+
+          # stack.env es el registro legible y versionado de qué hay desplegado.
+          cat > deploy/test/stack.env <<EOF
+          # Fichero GESTIONADO POR LA CI — no lo edites salvo para hacer rollback.
+          # Lo reescribe .github/workflows/build-and-deploy-test.yml en cada push a main.
+          #
+          # Commit desplegado: ${GITHUB_SHA}
+          VEGA_IMAGE_TAG=${IMAGE_TAG}
+          EOF
+
+          # .env es el espejo que Docker Compose sí lee automáticamente al
+          # interpolar `image:` (busca un fichero llamado exactamente `.env`
+          # junto al compose). Está en .gitignore, de ahí el `git add -f`.
+          cat > deploy/test/.env <<EOF
+          # Espejo de stack.env — GESTIONADO POR LA CI, no lo edites.
+          VEGA_IMAGE_TAG=${IMAGE_TAG}
+          EOF
+
+      - name: Commitear y empujar
+        env:
+          IMAGE_TAG: ${{ needs.meta.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          git add deploy/test/stack.env
+          git add -f deploy/test/.env
+
+          # Si el tag no ha cambiado (re-run manual del workflow) no hay nada
+          # que commitear y `git commit` fallaría; salimos limpiamente.
+          if git diff --cached --quiet; then
+            echo "El tag ya estaba registrado; nada que commitear."
+            exit 0
+          fi
+
+          # [skip ci] evita que este commit vuelva a disparar CI y build en
+          # bucle: es un commit de metadatos, no de código.
+          git commit -m "chore(deploy): test -> ${IMAGE_TAG} [skip ci]"
+
+          # Rebase antes de empujar por si otro push a main llegó entretanto.
+          git pull --rebase --autostash origin main
+          git push origin HEAD:main
+
+      - name: Disparar el webhook del Portainer de test
+        env:
+          PORTAINER_WEBHOOK: ${{ secrets.PORTAINER_TEST_WEBHOOK }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PORTAINER_WEBHOOK:-}" ]; then
+            # Degradación elegante: la imagen ya está publicada y el tag
+            # registrado en git, así que el despliegue se puede lanzar a mano
+            # desde Portainer. Avisamos, pero no tumbamos el workflow.
+            echo "::warning title=Webhook no configurado::El secreto PORTAINER_TEST_WEBHOOK no existe. La imagen está en GHCR y el tag commiteado, pero hay que redesplegar el stack manualmente desde Portainer."
+            exit 0
+          fi
+
+          # pullimage=true fuerza a Portainer a bajar la imagen del tag nuevo
+          # en vez de reutilizar la que ya tuviera cacheada el demonio.
+          codigo=$(curl -sS -o /tmp/portainer.out -w '%{http_code}' \
+            -X POST "${PORTAINER_WEBHOOK}?pullimage=true" || echo '000')
+
+          echo "Respuesta de Portainer: HTTP ${codigo}"
+          cat /tmp/portainer.out || true
+
+          case "${codigo}" in
+            2*) echo "Redespliegue de test solicitado correctamente." ;;
+            *)  echo "::error title=Webhook fallido::Portainer devolvió HTTP ${codigo}."; exit 1 ;;
+          esac
+
+      - name: Resumen
+        env:
+          IMAGE_TAG: ${{ needs.meta.outputs.image_tag }}
+        run: |
+          {
+            echo "### Desplegado en test"
+            echo
+            echo "| Campo | Valor |"
+            echo "|---|---|"
+            echo "| Tag | \`${IMAGE_TAG}\` |"
+            echo "| Imágenes | \`ghcr.io/${IMAGE_NAMESPACE}/vega-api\`, \`ghcr.io/${IMAGE_NAMESPACE}/vega-web\` |"
+            echo "| Commit | \`${GITHUB_SHA}\` |"
+            echo
+            echo "Para promocionar a producción, lanza **Promote to prod** con \`image_tag=${IMAGE_TAG}\`."
+          } >> "$GITHUB_STEP_SUMMARY"

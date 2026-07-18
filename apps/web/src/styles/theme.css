@@ -1,0 +1,122 @@
+/*
+ * Puente entre los tokens de marca (`styles/tokens.css`, copia literal de
+ * `brand/tokens.css`) y el convenio de nombres de shadcn/ui.
+ *
+ * Los colores se escriben como tripletas RGB y no como hexadecimales porque
+ * Tailwind necesita los canales sueltos para resolver `<alpha-value>`
+ * (`bg-primary/10`). Cada tripleta lleva al lado el token de marca que
+ * reproduce; `tokens.css` sigue siendo la fuente de verdad y el único sitio
+ * donde se cambia un color de Vega.
+ *
+ * Claro y oscuro son dos temas completos, no un filtro sobre uno solo, y el
+ * selector es `[data-theme="dark"]` — el mismo que usa `brand/tokens.css`.
+ */
+
+:root {
+  /* Las familias de Fontsource se llaman «… Variable»; el resto de la pila la
+     hereda el token de marca. */
+  --font-vega-display: 'Space Grotesk Variable', 'Space Grotesk', 'Inter Variable', system-ui,
+    sans-serif;
+  --font-vega-ui: 'Inter Variable', 'Inter', system-ui, -apple-system, BlinkMacSystemFont,
+    'Segoe UI', sans-serif;
+
+  /* ── Superficies ──────────────────────────────────────────────────────── */
+  --background: 247 249 252; /* --vega-cloud-50  #F7F9FC */
+  --foreground: 11 16 32; /* --vega-ink-900   #0B1020 */
+  --card: 255 255 255; /* --vega-white     #FFFFFF */
+  --card-foreground: 11 16 32; /* --vega-ink-900 */
+  --popover: 255 255 255; /* --vega-white */
+  --popover-foreground: 11 16 32; /* --vega-ink-900 */
+
+  /* Superficie elevada neutra: interpolación entre cloud-50 y slate-200.
+     No existe en `tokens.css`; es el único gris que añade la aplicación. */
+  --muted: 239 242 247; /* #EFF2F7 */
+  --muted-foreground: 102 112 133; /* --vega-slate-500 #667085 */
+  --secondary: 239 242 247; /* = --muted */
+  --secondary-foreground: 11 16 32; /* --vega-ink-900 */
+  /* `accent` en shadcn es la superficie de hover de menús y listas, no el
+     acento de marca. El acento de marca es `primary`. */
+  --accent: 239 242 247; /* = --muted */
+  --accent-foreground: 11 16 32; /* --vega-ink-900 */
+
+  --border: 234 236 240; /* --vega-slate-200 #EAECF0 */
+  --border-strong: 208 213 221; /* --vega-slate-300 #D0D5DD */
+  --input: 234 236 240; /* --vega-slate-200 */
+  --ring: 39 123 255; /* --color-focus = --vega-blue-500 #277BFF */
+
+  /* ── Marca ────────────────────────────────────────────────────────────── */
+  --primary: 91 57 255; /* --color-primary = --vega-violet-600 #5B39FF */
+  --primary-foreground: 255 255 255; /* blanco sobre violeta 600 → 6,0:1 */
+  --primary-hover: 78 46 229; /* --color-primary-hover #4E2EE5 */
+  /* Violeta legible como texto o icono sobre superficies claras. */
+  --primary-ink: 91 57 255; /* --vega-violet-600 */
+  --primary-soft: 238 234 255; /* #EEEAFF */
+
+  /* ── Estados ──────────────────────────────────────────────────────────── */
+  /* Semántica propia: ningún estado usa violeta. `*-ink` es la variante
+     legible como texto; el valor plano se reserva a rellenos e indicadores. */
+  --success: 22 163 106; /* --vega-success-600 #16A36A */
+  --success-foreground: 8 11 20; /* --vega-ink-950 */
+  --success-ink: 15 122 79; /* #0F7A4F */
+  --success-soft: 231 246 238; /* #E7F6EE */
+
+  --warning: 217 119 6; /* --vega-warning-600 #D97706 */
+  --warning-foreground: 8 11 20; /* --vega-ink-950 */
+  --warning-ink: 180 83 9; /* #B45309 */
+  --warning-soft: 253 242 227; /* #FDF2E3 */
+
+  --destructive: 220 38 38; /* --vega-danger-600 #DC2626 */
+  --destructive-foreground: 255 255 255;
+  --destructive-ink: 180 35 24; /* #B42318 */
+  --destructive-soft: 253 236 236; /* #FDECEC */
+
+  --info: 37 99 235; /* --vega-info-600 #2563EB */
+  --info-foreground: 255 255 255;
+  --info-ink: 29 78 186; /* #1D4EBA */
+  --info-soft: 232 240 254; /* #E8F0FE */
+
+  color-scheme: light;
+}
+
+[data-theme='dark'] {
+  --background: 8 11 20; /* --vega-ink-950     #080B14 */
+  --foreground: 247 249 252; /* --vega-cloud-50    #F7F9FC */
+  --card: 15 20 36; /* --vega-surface-dark #0F1424 */
+  --card-foreground: 247 249 252;
+  --popover: 15 20 36;
+  --popover-foreground: 247 249 252;
+
+  --muted: 24 30 48; /* #181E30 */
+  --muted-foreground: 152 162 179; /* --vega-slate-400 #98A2B3 */
+  --secondary: 24 30 48;
+  --secondary-foreground: 247 249 252;
+  --accent: 24 30 48;
+  --accent-foreground: 247 249 252;
+
+  --border: 37 43 61; /* #252B3D, el borde oscuro de `tokens.css` */
+  --border-strong: 55 63 84; /* #373F54 */
+  --input: 37 43 61;
+  --ring: 39 123 255; /* --vega-blue-500 */
+
+  /* En oscuro el primario es violeta 500 (así lo fija `tokens.css`). Sobre él
+     el blanco sólo alcanza 4,1:1, de modo que el texto va en tinta. */
+  --primary: 138 92 255; /* --vega-violet-500 #8A5CFF */
+  --primary-foreground: 8 11 20; /* --vega-ink-950 → 4,8:1 */
+  --primary-hover: 185 140 255; /* --vega-violet-400 #B98CFF */
+  --primary-ink: 185 140 255; /* --vega-violet-400 */
+  --primary-soft: 30 26 61; /* #1E1A3D */
+
+  --success-ink: 63 214 155; /* #3FD69B */
+  --success-soft: 14 42 31; /* #0E2A1F */
+
+  --warning-ink: 245 165 36; /* #F5A524 */
+  --warning-soft: 46 31 10; /* #2E1F0A */
+
+  --destructive-ink: 248 113 113; /* #F87171 */
+  --destructive-soft: 46 20 20; /* #2E1414 */
+
+  --info-ink: 96 165 250; /* #60A5FA */
+  --info-soft: 16 32 62; /* #10203E */
+
+  color-scheme: dark;
+}

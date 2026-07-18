@@ -1,0 +1,152 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  Vega · stack de PRODUCCIÓN (Portainer de producción)
+#
+#  Este fichero lo consume el stack git-backed del Portainer de producción. El
+#  tag desplegado vive en stack.env y lo escribe el workflow promote-to-prod,
+#  que RE-ETIQUETA la imagen ya validada en test — nunca reconstruye.
+#  Ver deploy/README.md.
+#
+#  Diferencias deliberadas frente a test:
+#    · puertos publicados 1800x (test usa 1808x)
+#    · más CPU y memoria, logs en info, NODE_ENV=production
+#    · restart: always → tras reiniciar el host el stack vuelve solo, aunque
+#      alguien hubiera parado un contenedor a mano
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: vega-prod
+
+services:
+  # ── Base de datos ─────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: always
+    # Sin `ports:`: la base de datos no se publica jamás al exterior.
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-vega}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?define POSTGRES_PASSWORD en las variables del stack de Portainer}
+      POSTGRES_DB: ${POSTGRES_DB:-vega}
+      POSTGRES_INITDB_ARGS: '--encoding=UTF8 --locale=C'
+    volumes:
+      - vega-prod-pgdata:/var/lib/postgresql/data
+      # Punto de montaje para los volcados de pg_dump del cron de backup.
+      - vega-prod-backups:/backups
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-vega} -d ${POSTGRES_DB:-vega}']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    # Con datos reales conviene subir el shm: Postgres lo usa para los hash
+    # joins y ordenaciones grandes de los informes de métricas.
+    shm_size: 256mb
+    networks: [vega-prod]
+    deploy:
+      resources:
+        limits:
+          cpus: '1.50'
+          memory: 2G
+        reservations:
+          memory: 512M
+    logging:
+      driver: json-file
+      options:
+        max-size: '20m'
+        max-file: '5'
+
+  # ── API ───────────────────────────────────────────────────────────────────
+  api:
+    # Tag inmutable sha-<short>: exactamente el mismo artefacto que se validó
+    # en test, sólo que además re-etiquetado como `prod` y `vX.Y.Z` en GHCR.
+    image: ghcr.io/jamataran/vega-api:${VEGA_IMAGE_TAG:?falta VEGA_IMAGE_TAG (lo escribe promote-to-prod en deploy/prod/stack.env)}
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Al arrancar, la imagen aplica de forma idempotente las migraciones SQL
+      # que viajan dentro de ella. No hay paso manual de migración en el deploy.
+      DATABASE_URL: postgres://${POSTGRES_USER:-vega}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-vega}
+      NODE_ENV: ${NODE_ENV:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      API_HOST: 0.0.0.0
+      API_PORT: '3000'
+      JWT_SECRET: ${JWT_SECRET:?define JWT_SECRET en las variables del stack de Portainer}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-12h}
+      WEB_ORIGIN: ${WEB_ORIGIN:?define WEB_ORIGIN (p. ej. https://vega.ejemplo.es)}
+      # En producción se llama a la API de Anthropic de verdad.
+      AI_PROVIDER: ${AI_PROVIDER:-anthropic}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?define ANTHROPIC_API_KEY en las variables del stack de Portainer}
+      AI_MODEL_TRANSCRIPTION: ${AI_MODEL_TRANSCRIPTION:-claude-opus-4-8}
+      AI_MODEL_GRADING: ${AI_MODEL_GRADING:-claude-opus-4-8}
+      LMS_CONNECTOR: ${LMS_CONNECTOR:-moodle3}
+      LMS_FILESYSTEM_ROOT: /app/data/entregas
+      MOODLE_BASE_URL: ${MOODLE_BASE_URL:-}
+      MOODLE_TOKEN: ${MOODLE_TOKEN:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      BRAND_NAME: ${BRAND_NAME:-Vega}
+    ports:
+      - '${VEGA_API_PORT:-18000}:3000'
+    volumes:
+      - vega-prod-contexts:/app/contexts
+      - vega-prod-data:/app/data
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    stop_grace_period: 30s
+    networks: [vega-prod]
+    deploy:
+      resources:
+        limits:
+          cpus: '2.00'
+          memory: 2G
+        reservations:
+          memory: 512M
+    logging:
+      driver: json-file
+      options:
+        max-size: '20m'
+        max-file: '5'
+
+  # ── PWA ───────────────────────────────────────────────────────────────────
+  web:
+    image: ghcr.io/jamataran/vega-web:${VEGA_IMAGE_TAG:?falta VEGA_IMAGE_TAG (lo escribe promote-to-prod en deploy/prod/stack.env)}
+    restart: always
+    depends_on:
+      - api
+    ports:
+      - '${VEGA_WEB_PORT:-18080}:8080'
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '--spider', 'http://127.0.0.1:8080/health.txt']
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    networks: [vega-prod]
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: '20m'
+        max-file: '5'
+
+networks:
+  vega-prod:
+    driver: bridge
+
+volumes:
+  # Volúmenes propios del entorno: nunca compartidos con test.
+  vega-prod-pgdata:
+  vega-prod-contexts:
+  vega-prod-data:
+  vega-prod-backups:

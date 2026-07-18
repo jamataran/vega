@@ -1,0 +1,133 @@
+/* Tipografías autoalojadas: la CSP de producción (ver `nginx.conf`) es
+   `default-src 'self'` y no puede pedir recursos a Google Fonts. */
+@import '@fontsource-variable/inter/index.css';
+@import '@fontsource-variable/space-grotesk/index.css';
+@import 'katex/dist/katex.min.css';
+
+/* Copia literal de `brand/tokens.css` (`pnpm sync:brand` la regenera). */
+@import './styles/tokens.css';
+/* Traducción de esos tokens al convenio de nombres de shadcn/ui. */
+@import './styles/theme.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    @apply bg-background font-sans text-base text-foreground antialiased;
+    -webkit-tap-highlight-color: transparent;
+    overscroll-behavior-y: none;
+    /* Las cifras se comparan en vertical por toda la aplicación. */
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Títulos y métricas en Space Grotesk; el resto hereda Inter del body. */
+  h1,
+  h2,
+  h3 {
+    @apply font-display font-medium;
+  }
+
+  /* Foco inequívoco y separado del control, en el azul de foco de la marca. */
+  :focus-visible {
+    @apply outline-none ring-2 ring-ring ring-offset-2 ring-offset-background;
+  }
+
+  /* El navegador ya nos da un foco visible; evitamos el doble anillo. */
+  :focus:not(:focus-visible) {
+    outline: none;
+  }
+
+  ::selection {
+    @apply bg-primary-soft text-foreground;
+  }
+
+  input,
+  textarea,
+  select,
+  button {
+    font: inherit;
+    font-variant-numeric: inherit;
+  }
+
+  /* Evita el zoom automático de iOS al enfocar un campo. */
+  @supports (-webkit-touch-callout: none) {
+    input,
+    textarea,
+    select {
+      font-size: max(1rem, 0.9375rem);
+    }
+  }
+}
+
+@layer components {
+  /* Rótulo de sección: 12 px, el mínimo que admite la marca. */
+  .eyebrow {
+    @apply font-display text-micro font-semibold uppercase text-muted-foreground;
+  }
+
+  /* Ancla de scroll para las columnas largas dentro de la pantalla de entrega. */
+  .scroll-pane {
+    @apply overflow-y-auto overscroll-contain;
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
+@layer utilities {
+  .pb-safe {
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
+  .bottom-safe {
+    bottom: env(safe-area-inset-bottom, 0px);
+  }
+
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
+  .no-scrollbar {
+    scrollbar-width: none;
+  }
+}
+
+/* ── KaTeX ──────────────────────────────────────────────────────────────── */
+
+.katex {
+  font-size: 1.05em;
+  color: inherit;
+}
+
+/* Las fórmulas largas se desplazan dentro de su caja, nunca rompen la página. */
+.katex-display {
+  @apply my-2 overflow-x-auto overflow-y-hidden py-1;
+}
+
+.katex-display > .katex {
+  text-align: left;
+}
+
+/* Fórmula con error de sintaxis: no rompemos la vista, la señalamos. */
+.katex .katex-error {
+  @apply text-destructive-ink;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

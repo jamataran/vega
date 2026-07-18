@@ -1,0 +1,7 @@
+packages:
+  - 'apps/*'
+  - 'packages/*'
+  - 'connectors/*'
+# esbuild compila su binario nativo al instalar; lo necesitan Vite y tsx.
+allowBuilds:
+  esbuild: true

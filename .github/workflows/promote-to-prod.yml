@@ -1,0 +1,235 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  Promoción a PRODUCCIÓN — sin reconstruir
+#
+#  Se despliega EL MISMO artefacto que se validó en test. No hay build aquí:
+#  `docker buildx imagetools create` sólo escribe manifiestos nuevos en GHCR
+#  apuntando a las capas que ya existen, así que `prod` y `vX.Y.Z` acaban
+#  señalando byte a byte a la imagen que probaste. Reconstruir sería otra
+#  imagen distinta y la validación de test no valdría nada.
+#
+#  Disparadores:
+#    · workflow_dispatch  → indicas el sha-<short> ya probado en test
+#    · push de un tag v*  → promociona el commit etiquetado y publica vX.Y.Z
+#
+#  El job usa `environment: production`, que es lo que permite exigir
+#  aprobación manual (Settings → Environments → production → required reviewers).
+# ─────────────────────────────────────────────────────────────────────────────
+name: Promote to prod
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Tag inmutable ya validado en test (formato sha-1a2b3c4)'
+        required: true
+        type: string
+      version:
+        description: 'Versión semántica a publicar, opcional (p. ej. v1.4.0)'
+        required: false
+        type: string
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write # commitear el tag desplegado en deploy/prod/stack.env
+  packages: write # re-etiquetar en GHCR
+
+# Nunca dos promociones a la vez, y sin cancelar la que ya esté en curso.
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAMESPACE: jamataran
+
+jobs:
+  promote:
+    name: Promocionar a producción
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # `environment: production` es lo que habilita la aprobación manual:
+    # Settings → Environments → production → Required reviewers.
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          # En un push de tag, el checkout apunta al commit etiquetado; nos hace
+          # falta el historial completo para poder empujar después sobre main.
+          fetch-depth: 0
+
+      # ── Resolver qué se promociona ──────────────────────────────────────
+      - name: Resolver tag de origen y versión
+        id: vars
+        env:
+          INPUT_TAG: ${{ inputs.image_tag }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          if [ "${GITHUB_EVENT_NAME}" = 'push' ]; then
+            # Un tag v* apunta a un commit de main que ya pasó por build-and-
+            # deploy-test, así que su imagen existe como sha-<short>.
+            origen="sha-${GITHUB_SHA::7}"
+            version="${GITHUB_REF_NAME}"
+          else
+            origen="${INPUT_TAG}"
+            version="${INPUT_VERSION}"
+          fi
+
+          # Normalizamos la versión a vX.Y.Z: es habitual teclearla sin la v.
+          if [ -n "${version}" ] && [ "${version#v}" = "${version}" ]; then
+            version="v${version}"
+          fi
+
+          # Un tag mal escrito re-etiquetaría una imagen que no es la validada.
+          if ! printf '%s' "${origen}" | grep -Eq '^sha-[0-9a-f]{7,40}$'; then
+            echo "::error title=Tag inválido::'${origen}' no tiene el formato sha-<short>. Sólo se promocionan imágenes construidas por la CI."
+            exit 1
+          fi
+
+          {
+            echo "source_tag=${origen}"
+            echo "version=${version}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Preparar Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login en GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── Comprobar que existe lo que vamos a promocionar ─────────────────
+      - name: Verificar que las imágenes de origen existen en GHCR
+        env:
+          SOURCE_TAG: ${{ steps.vars.outputs.source_tag }}
+        run: |
+          set -euo pipefail
+          for imagen in vega-api vega-web; do
+            ref="${REGISTRY}/${IMAGE_NAMESPACE}/${imagen}:${SOURCE_TAG}"
+            echo "Comprobando ${ref}…"
+            if ! docker buildx imagetools inspect "${ref}" > /dev/null 2>&1; then
+              echo "::error title=Imagen inexistente::No existe ${ref}. Revisa el sha-<short> en el resumen del workflow de test."
+              exit 1
+            fi
+          done
+
+      # ── Re-etiquetado (sin rebuild) ─────────────────────────────────────
+      - name: Re-etiquetar como prod y como versión
+        env:
+          SOURCE_TAG: ${{ steps.vars.outputs.source_tag }}
+          VERSION: ${{ steps.vars.outputs.version }}
+        run: |
+          set -euo pipefail
+          for imagen in vega-api vega-web; do
+            base="${REGISTRY}/${IMAGE_NAMESPACE}/${imagen}"
+
+            destinos="--tag ${base}:prod"
+            if [ -n "${VERSION}" ]; then
+              destinos="${destinos} --tag ${base}:${VERSION}"
+            fi
+
+            # imagetools create no descarga ni reconstruye nada: copia el
+            # manifiesto de origen bajo los nombres de destino.
+            # shellcheck disable=SC2086
+            docker buildx imagetools create ${destinos} "${base}:${SOURCE_TAG}"
+
+            echo "· ${base}:${SOURCE_TAG} → prod${VERSION:+, ${VERSION}}"
+          done
+
+      # ── Registrar el despliegue en git ──────────────────────────────────
+      - name: Escribir y commitear el tag desplegado en deploy/prod/stack.env
+        env:
+          SOURCE_TAG: ${{ steps.vars.outputs.source_tag }}
+          VERSION: ${{ steps.vars.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          # Cuando el disparador es un push de tag, el checkout deja HEAD
+          # desprendido sobre el commit etiquetado. Nos plantamos sobre la punta
+          # de main ANTES de escribir nada, para que el commit del despliegue no
+          # quede huérfano ni revierta trabajo posterior.
+          git fetch origin main
+          git checkout -B registro-despliegue origin/main
+
+          # Se despliega el sha-<short> inmutable, NO el tag flotante `prod`:
+          # así el historial de este fichero es el historial de despliegues y
+          # el rollback es volver a la línea anterior.
+          cat > deploy/prod/stack.env <<EOF
+          # Fichero GESTIONADO POR LA CI — no lo edites salvo para hacer rollback.
+          # Lo reescribe .github/workflows/promote-to-prod.yml al promocionar.
+          #
+          # Promocionado desde test el $(date -u '+%Y-%m-%d %H:%M UTC')
+          # Commit: ${GITHUB_SHA}${VERSION:+
+          # Versión: ${VERSION}}
+          VEGA_IMAGE_TAG=${SOURCE_TAG}
+          EOF
+
+          # .env es el espejo que Docker Compose sí lee solo al interpolar
+          # `image:`. Está en .gitignore, de ahí el `git add -f`.
+          cat > deploy/prod/.env <<EOF
+          # Espejo de stack.env — GESTIONADO POR LA CI, no lo edites.
+          VEGA_IMAGE_TAG=${SOURCE_TAG}
+          EOF
+
+          git add deploy/prod/stack.env
+          git add -f deploy/prod/.env
+
+          if git diff --cached --quiet; then
+            echo "Producción ya estaba en ${SOURCE_TAG}; nada que commitear."
+            exit 0
+          fi
+
+          # [skip ci]: es un commit de metadatos, no debe disparar otra build.
+          git commit -m "chore(deploy): prod -> ${SOURCE_TAG}${VERSION:+ (${VERSION})} [skip ci]"
+          git push origin HEAD:main
+
+      # ── Despliegue ──────────────────────────────────────────────────────
+      - name: Disparar el webhook del Portainer de producción
+        env:
+          PORTAINER_WEBHOOK: ${{ secrets.PORTAINER_PROD_WEBHOOK }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PORTAINER_WEBHOOK:-}" ]; then
+            echo "::warning title=Webhook no configurado::El secreto PORTAINER_PROD_WEBHOOK no existe. Las imágenes ya están re-etiquetadas y el tag commiteado; redespliega el stack a mano desde Portainer."
+            exit 0
+          fi
+
+          codigo=$(curl -sS -o /tmp/portainer.out -w '%{http_code}' \
+            -X POST "${PORTAINER_WEBHOOK}?pullimage=true" || echo '000')
+
+          echo "Respuesta de Portainer: HTTP ${codigo}"
+          cat /tmp/portainer.out || true
+
+          case "${codigo}" in
+            2*) echo "Redespliegue de producción solicitado correctamente." ;;
+            *)  echo "::error title=Webhook fallido::Portainer devolvió HTTP ${codigo}."; exit 1 ;;
+          esac
+
+      - name: Resumen
+        env:
+          SOURCE_TAG: ${{ steps.vars.outputs.source_tag }}
+          VERSION: ${{ steps.vars.outputs.version }}
+        run: |
+          {
+            echo "### Promocionado a producción"
+            echo
+            echo "| Campo | Valor |"
+            echo "|---|---|"
+            echo "| Artefacto | \`${SOURCE_TAG}\` (sin reconstruir) |"
+            echo "| Tags nuevos | \`prod\`${VERSION:+, \`${VERSION}\`} |"
+            echo "| Imágenes | \`ghcr.io/${IMAGE_NAMESPACE}/vega-api\`, \`ghcr.io/${IMAGE_NAMESPACE}/vega-web\` |"
+            echo
+            echo "Rollback: pon el \`sha-\` anterior en \`deploy/prod/stack.env\` y redespliega el stack."
+          } >> "$GITHUB_STEP_SUMMARY"

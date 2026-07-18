@@ -1,0 +1,23 @@
+# Servicios de apoyo para desarrollo local.
+# El puerto 5433 evita chocar con otros Postgres que ya tengas levantados.
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: vega-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: vega
+      POSTGRES_PASSWORD: vega
+      POSTGRES_DB: vega
+    ports:
+      - '5433:5432'
+    volumes:
+      - vega-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U vega -d vega']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  vega-pgdata:

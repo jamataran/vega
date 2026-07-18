@@ -1,0 +1,149 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  Vega · stack de TEST (Portainer de pruebas)
+#
+#  Este fichero lo consume el stack git-backed del Portainer de test. NO se
+#  edita a mano para cambiar de versión: el tag desplegado vive en stack.env,
+#  que actualiza la CI en cada push a main. Ver deploy/README.md.
+#
+#  Diferencias deliberadas frente a prod:
+#    · puertos publicados 1808x (prod usa 1800x) → el proxy inverso distingue
+#    · recursos recortados, logs en debug, NODE_ENV=test
+#    · restart: unless-stopped (en prod, always) → aquí sí queremos poder
+#      parar un contenedor y que se quede parado mientras se investiga algo
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: vega-test
+
+services:
+  # ── Base de datos ─────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    # Sin `ports:` a propósito: Postgres sólo es alcanzable desde la red
+    # interna del stack. Para inspeccionarla, `docker exec` o un túnel SSH.
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-vega}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?define POSTGRES_PASSWORD en las variables del stack de Portainer}
+      POSTGRES_DB: ${POSTGRES_DB:-vega}
+      # Evita reinicializar el volumen si alguien cambia el locale del host.
+      POSTGRES_INITDB_ARGS: '--encoding=UTF8 --locale=C'
+    volumes:
+      - vega-test-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-vega} -d ${POSTGRES_DB:-vega}']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks: [vega-test]
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 512M
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+
+  # ── API ───────────────────────────────────────────────────────────────────
+  api:
+    # El tag NUNCA es flotante: lo fija stack.env con el sha-<short> concreto
+    # que la CI acaba de construir, de forma que git es el registro de qué hay
+    # desplegado y el rollback es un cambio de una línea.
+    image: ghcr.io/jamataran/vega-api:${VEGA_IMAGE_TAG:?falta VEGA_IMAGE_TAG (lo escribe la CI en deploy/test/stack.env)}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # La imagen aplica las migraciones SQL al arrancar contra esta URL.
+      DATABASE_URL: postgres://${POSTGRES_USER:-vega}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-vega}
+      # `test`, no `staging`: apps/api/src/config.ts valida NODE_ENV contra el
+      # enum development|test|production y cualquier otro valor tumba el arranque.
+      NODE_ENV: ${NODE_ENV:-test}
+      LOG_LEVEL: ${LOG_LEVEL:-debug}
+      API_HOST: 0.0.0.0
+      API_PORT: '3000'
+      JWT_SECRET: ${JWT_SECRET:?define JWT_SECRET en las variables del stack de Portainer}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-12h}
+      # Origen del navegador con el que se sirve la PWA de test.
+      WEB_ORIGIN: ${WEB_ORIGIN:?define WEB_ORIGIN (p. ej. https://test.vega.ejemplo.es)}
+      # En test se puede dejar el proveedor simulado y no gastar tokens.
+      AI_PROVIDER: ${AI_PROVIDER:-mock}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      AI_MODEL_TRANSCRIPTION: ${AI_MODEL_TRANSCRIPTION:-claude-opus-4-8}
+      AI_MODEL_GRADING: ${AI_MODEL_GRADING:-claude-opus-4-8}
+      LMS_CONNECTOR: ${LMS_CONNECTOR:-mock}
+      LMS_FILESYSTEM_ROOT: /app/data/entregas
+      MOODLE_BASE_URL: ${MOODLE_BASE_URL:-}
+      MOODLE_TOKEN: ${MOODLE_TOKEN:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      BRAND_NAME: ${BRAND_NAME:-Vega (test)}
+    ports:
+      # host:contenedor — 18001 para que el proxy inverso lo distinga del 18000
+      # de producción cuando ambos entornos comparten máquina.
+      - '${VEGA_API_PORT:-18001}:3000'
+    volumes:
+      # Contextos markdown del profesor (versionados con git dentro del volumen)
+      # y entregas del conector de sistema de ficheros.
+      - vega-test-contexts:/app/contexts
+      - vega-test-data:/app/data
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
+    networks: [vega-test]
+    deploy:
+      resources:
+        limits:
+          cpus: '0.75'
+          memory: 640M
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+
+  # ── PWA ───────────────────────────────────────────────────────────────────
+  web:
+    image: ghcr.io/jamataran/vega-web:${VEGA_IMAGE_TAG:?falta VEGA_IMAGE_TAG (lo escribe la CI en deploy/test/stack.env)}
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - '${VEGA_WEB_PORT:-18081}:8080'
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '--spider', 'http://127.0.0.1:8080/health.txt']
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    networks: [vega-test]
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 128M
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+
+networks:
+  vega-test:
+    driver: bridge
+
+volumes:
+  # Volúmenes propios del entorno: nunca compartidos con producción.
+  vega-test-pgdata:
+  vega-test-contexts:
+  vega-test-data:

@@ -1,0 +1,7 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Vega · Arrancar todo" type="CompoundRunConfigurationType">
+    <toRun name="Vega · API (dev)" type="js.build_tools.npm" />
+    <toRun name="Vega · Web (dev)" type="js.build_tools.npm" />
+    <method v="2" />
+  </configuration>
+</component>

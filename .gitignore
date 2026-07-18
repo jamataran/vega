@@ -70,6 +70,13 @@ web_modules/
 .env.*
 !.env.example
 
+# Excepción: los espejos de `deploy/<entorno>/.env` SÍ van a git. Portainer
+# despliega el stack desde el repositorio y Compose sólo interpola
+# ${VEGA_IMAGE_TAG} desde un fichero llamado exactamente `.env` junto al
+# compose. Si se ignoraran, el despliegue arrancaría sin tag de imagen.
+# No contienen secretos: sólo el tag que la CI acaba de publicar.
+!deploy/*/.env
+
 # parcel-bundler cache (https://parceljs.org/)
 .cache
 .parcel-cache

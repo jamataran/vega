@@ -1,0 +1,67 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  CI — verificación del monorepo (typecheck · lint · test · build)
+#
+#  Corre en cada pull request y en cada push a main. No publica nada: de las
+#  imágenes se encarga build-and-deploy-test.yml.
+# ─────────────────────────────────────────────────────────────────────────────
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Sólo lectura: este workflow no escribe en el repo ni en el registro.
+permissions:
+  contents: read
+
+# Un push nuevo sobre la misma rama cancela la ejecución anterior: en una PR
+# activa no tiene sentido gastar runners validando commits ya superados.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  verify:
+    name: Verificar
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # No fijamos versión: action-setup lee el campo "packageManager" de
+      # package.json, que es la única fuente de verdad del pnpm del proyecto.
+      - name: Instalar pnpm
+        uses: pnpm/action-setup@v4
+
+      # `cache: pnpm` cachea el store global; hay que declararlo DESPUÉS de
+      # instalar pnpm, porque setup-node necesita el binario para localizarlo.
+      - name: Instalar Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Instalar dependencias
+        run: pnpm install --frozen-lockfile
+
+      # Pasos separados a propósito: si algo falla, el nombre del step ya dice
+      # qué se ha roto sin abrir los logs.
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Tests
+        run: pnpm test
+
+      # El build va el último porque es el más lento y el que menos veces falla
+      # sin que haya fallado antes el typecheck.
+      - name: Build
+        run: pnpm build
