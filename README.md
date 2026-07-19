@@ -1,3 +1,5 @@
+<img src="brand/vega-icon.svg" alt="" width="72" height="72">
+
 # Vega
 
 **An AI grading and forum-answering engine for Moodle — the teacher always has the final word.**
