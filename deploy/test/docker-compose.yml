@@ -113,8 +113,8 @@ services:
         max-file: '3'
 
   # ── PWA ───────────────────────────────────────────────────────────────────
-  web:
-    image: ghcr.io/jamataran/vega-web:${VEGA_IMAGE_TAG:?falta VEGA_IMAGE_TAG (lo escribe la CI en deploy/test/stack.env)}
+  frontend:
+    image: ghcr.io/jamataran/vega-frontend:${VEGA_IMAGE_TAG:?falta VEGA_IMAGE_TAG (lo escribe la CI en deploy/test/stack.env)}
     restart: unless-stopped
     depends_on:
       - api

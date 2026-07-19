@@ -115,8 +115,8 @@ services:
         max-file: '5'
 
   # ── PWA ───────────────────────────────────────────────────────────────────
-  web:
-    image: ghcr.io/jamataran/vega-web:${VEGA_IMAGE_TAG:?falta VEGA_IMAGE_TAG (lo escribe promote-to-prod en deploy/prod/stack.env)}
+  frontend:
+    image: ghcr.io/jamataran/vega-frontend:${VEGA_IMAGE_TAG:?falta VEGA_IMAGE_TAG (lo escribe promote-to-prod en deploy/prod/stack.env)}
     restart: always
     depends_on:
       - api

@@ -3,7 +3,7 @@
 #  Vega · imagen de la PWA (React + Vite servida por nginx)
 #
 #  Se construye SIEMPRE desde la raíz del monorepo:
-#      docker build -f apps/web/Dockerfile .
+#      docker build -f apps/frontend/Dockerfile .
 #
 #  Vite hornea las variables VITE_* en tiempo de BUILD, no de arranque: por eso
 #  llegan como ARG y no como ENV del contenedor. Si algún día hacen falta
@@ -52,19 +52,19 @@ ENV VITE_API_BASE_URL=${VITE_API_BASE_URL} \
     VITE_APP_VERSION=${VITE_APP_VERSION}
 
 COPY . .
-# `@vega/web...` arrastra @vega/shared y demás deps de workspace.
-RUN pnpm --filter "@vega/web..." build
+# `@vega/frontend...` arrastra @vega/shared y demás deps de workspace.
+RUN pnpm --filter "@vega/frontend..." build
 
 # ── runtime ─────────────────────────────────────────────────────────────────
 FROM ${NGINX_IMAGE} AS runtime
 
-LABEL org.opencontainers.image.title="vega-web" \
+LABEL org.opencontainers.image.title="vega-frontend" \
       org.opencontainers.image.description="PWA React de Vega servida por nginx" \
       org.opencontainers.image.source="https://github.com/jamataran/vega" \
       org.opencontainers.image.licenses="AGPL-3.0-only"
 
-COPY apps/web/nginx.conf /etc/nginx/conf.d/default.conf
-COPY --from=build /repo/apps/web/dist /usr/share/nginx/html
+COPY apps/frontend/nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=build /repo/apps/frontend/dist /usr/share/nginx/html
 
 # nginx sin root: escucha en 8080 (>1024) y mueve el pidfile a /tmp, que es lo
 # único que el usuario `nginx` puede escribir. Los directorios de caché y de

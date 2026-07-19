@@ -17,7 +17,7 @@ import {
 import { ActivityKind, AutonomyMode, ContextLevel, SubmissionStatus, UserRole } from './enums.js';
 
 /**
- * Contrato HTTP entre `apps/api` y `apps/web`.
+ * Contrato HTTP entre `apps/api` y `apps/frontend`.
  *
  * Convención: **toda respuesta es un objeto con una clave nombrada**
  * (`{ activity }`, `{ user }`, `{ items }`…), nunca la entidad pelada. Así se
@@ -334,6 +334,50 @@ export const OverviewResponse = z.object({
 });
 export type OverviewResponse = z.infer<typeof OverviewResponse>;
 
+// ── Panel: desglose de coste ────────────────────────────────────────────────
+
+/**
+ * Ventana temporal del desglose. Presets en vez de fechas libres: la pregunta
+ * real es «¿cuánto llevo este mes?», no «¿cuánto gasté un martes concreto?».
+ */
+export const CostPeriod = z.enum(['this_month', 'last_30_days', 'this_quarter', 'all_time']);
+export type CostPeriod = z.infer<typeof CostPeriod>;
+
+/** Eje por el que se desglosa el gasto del periodo. */
+export const CostDimension = z.enum(['activity_kind', 'course', 'activity']);
+export type CostDimension = z.infer<typeof CostDimension>;
+
+export const CostGroup = z.object({
+  /** Clave estable de la fila: el `ActivityKind`, el nombre del curso o el id. */
+  key: z.string().min(1),
+  label: z.string().min(1),
+  /** Sólo con dimensión `activity`: deja abrir su ficha desde el panel. */
+  activityId: Id.nullable(),
+  /** `null` al agrupar por curso, donde conviven entregas y foros. */
+  kind: ActivityKind.nullable(),
+  costCents: z.number().min(0),
+  corrections: z.number().int().min(0),
+  avgCostCents: z.number().min(0),
+});
+export type CostGroup = z.infer<typeof CostGroup>;
+
+export const CostBreakdownResponse = z.object({
+  period: CostPeriod,
+  /** Extremos reales de la ventana, para rotularla sin recalcularla en el front. */
+  from: IsoDate,
+  to: IsoDate,
+  dimension: CostDimension,
+  usage: UsageMetrics,
+  corrections: z.number().int().min(0),
+  avgCostCents: z.number().min(0),
+  /**
+   * Ordenados de más caro a más barato: la primera fila es la que hay que
+   * mirar. Sólo entran actividades con gasto en la ventana.
+   */
+  groups: z.array(CostGroup),
+});
+export type CostBreakdownResponse = z.infer<typeof CostBreakdownResponse>;
+
 // ── Procesos ────────────────────────────────────────────────────────────────
 
 export const BatchRunListResponse = z.object({ items: z.array(BatchRun) });
@@ -379,6 +423,7 @@ export const routes = {
   settings: '/api/settings',
 
   overview: '/api/stats/overview',
+  costBreakdown: '/api/stats/cost',
   batchRuns: '/api/batch/runs',
   triggerBatch: '/api/batch/run',
 } as const;

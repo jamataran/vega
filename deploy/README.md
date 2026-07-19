@@ -31,7 +31,7 @@ flowchart TD
     end
 
     subgraph ghcr["GHCR · ghcr.io/jamataran"]
-        IMG["vega-api · vega-web<br/>tags: sha-abc1234 · test"]
+        IMG["vega-api · vega-frontend<br/>tags: sha-abc1234 · test"]
         IMGP["mismos manifiestos<br/>tags: prod · v1.2.3"]
     end
 
@@ -256,10 +256,10 @@ en la red de Traefik y quitar las secciones `ports:` del compose. Traefik ya ree
 ```yaml
 labels:
   - traefik.enable=true
-  - traefik.http.routers.vega-web.rule=Host(`vega.ejemplo.es`)
-  - traefik.http.routers.vega-web.entrypoints=websecure
-  - traefik.http.routers.vega-web.tls.certresolver=le
-  - traefik.http.services.vega-web.loadbalancer.server.port=8080
+  - traefik.http.routers.vega-frontend.rule=Host(`vega.ejemplo.es`)
+  - traefik.http.routers.vega-frontend.entrypoints=websecure
+  - traefik.http.routers.vega-frontend.tls.certresolver=le
+  - traefik.http.services.vega-frontend.loadbalancer.server.port=8080
   - traefik.http.routers.vega-api.rule=Host(`vega.ejemplo.es`) && PathPrefix(`/api`)
   - traefik.http.routers.vega-api.entrypoints=websecure
   - traefik.http.routers.vega-api.tls.certresolver=le
@@ -268,7 +268,7 @@ labels:
 
 ### Alternativa: un solo vhost
 
-`apps/web/nginx.conf` trae comentado un bloque `location /api/` que reenvía al contenedor
+`apps/frontend/nginx.conf` trae comentado un bloque `location /api/` que reenvía al contenedor
 `api` desde dentro del propio contenedor web. Si lo activas, el proxy inverso sólo necesita
 apuntar al puerto de la web y desaparece el CORS, a cambio de un salto extra para el tráfico
 de la API.
@@ -364,7 +364,7 @@ lockfile y los `package.json` de todos los workspaces:
 
 ```bash
 docker build -f apps/api/Dockerfile -t vega-api:local .
-docker build -f apps/web/Dockerfile -t vega-web:local .
+docker build -f apps/frontend/Dockerfile -t vega-frontend:local .
 ```
 
 - Usan `# syntax=docker/dockerfile:1.7-labs` para poder copiar sólo los manifiestos con

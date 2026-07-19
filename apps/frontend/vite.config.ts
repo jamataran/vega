@@ -18,7 +18,7 @@ export default defineConfig({
       manifest: {
         name: 'Vega',
         short_name: 'Vega',
-        description: 'Corrección asistida de exámenes de matemáticas manuscritos.',
+        description: 'Corrección de entregas y respuesta a dudas de foro, con la última palabra del profesor.',
         lang: 'es-ES',
         start_url: '/',
         scope: '/',

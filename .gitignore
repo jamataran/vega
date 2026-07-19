@@ -132,6 +132,9 @@ dist
 # Stores VSCode versions used for testing VSCode extensions
 .vscode-test
 
+# Ruido de JetBrains que no es configuración compartible del proyecto.
+.idea/copilot.data.migration.ask2agent.xml
+
 # pnpm
 .pnpm-store
 

@@ -113,7 +113,7 @@ jobs:
           SOURCE_TAG: ${{ steps.vars.outputs.source_tag }}
         run: |
           set -euo pipefail
-          for imagen in vega-api vega-web; do
+          for imagen in vega-api vega-frontend; do
             ref="${REGISTRY}/${IMAGE_NAMESPACE}/${imagen}:${SOURCE_TAG}"
             echo "Comprobando ${ref}…"
             if ! docker buildx imagetools inspect "${ref}" > /dev/null 2>&1; then
@@ -129,7 +129,7 @@ jobs:
           VERSION: ${{ steps.vars.outputs.version }}
         run: |
           set -euo pipefail
-          for imagen in vega-api vega-web; do
+          for imagen in vega-api vega-frontend; do
             base="${REGISTRY}/${IMAGE_NAMESPACE}/${imagen}"
 
             destinos="--tag ${base}:prod"
@@ -229,7 +229,7 @@ jobs:
             echo "|---|---|"
             echo "| Artefacto | \`${SOURCE_TAG}\` (sin reconstruir) |"
             echo "| Tags nuevos | \`prod\`${VERSION:+, \`${VERSION}\`} |"
-            echo "| Imágenes | \`ghcr.io/${IMAGE_NAMESPACE}/vega-api\`, \`ghcr.io/${IMAGE_NAMESPACE}/vega-web\` |"
+            echo "| Imágenes | \`ghcr.io/${IMAGE_NAMESPACE}/vega-api\`, \`ghcr.io/${IMAGE_NAMESPACE}/vega-frontend\` |"
             echo
             echo "Rollback: pon el \`sha-\` anterior en \`deploy/prod/stack.env\` y redespliega el stack."
           } >> "$GITHUB_STEP_SUMMARY"

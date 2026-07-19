@@ -1,7 +1,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 #  Build & deploy a TEST
 #
-#  Push a main  →  construye y publica vega-api y vega-web en GHCR con dos
+#  Push a main  →  construye y publica vega-api y vega-frontend en GHCR con dos
 #                  tags: `sha-<short>` (inmutable) y `test` (flotante)
 #               →  escribe VEGA_IMAGE_TAG=sha-<short> en deploy/test/stack.env
 #                  y lo commitea con [skip ci]
@@ -67,9 +67,9 @@ jobs:
           - app: api
             image: vega-api
             dockerfile: apps/api/Dockerfile
-          - app: web
-            image: vega-web
-            dockerfile: apps/web/Dockerfile
+          - app: frontend
+            image: vega-frontend
+            dockerfile: apps/frontend/Dockerfile
 
     steps:
       - name: Checkout
@@ -220,7 +220,7 @@ jobs:
             echo "| Campo | Valor |"
             echo "|---|---|"
             echo "| Tag | \`${IMAGE_TAG}\` |"
-            echo "| Imágenes | \`ghcr.io/${IMAGE_NAMESPACE}/vega-api\`, \`ghcr.io/${IMAGE_NAMESPACE}/vega-web\` |"
+            echo "| Imágenes | \`ghcr.io/${IMAGE_NAMESPACE}/vega-api\`, \`ghcr.io/${IMAGE_NAMESPACE}/vega-frontend\` |"
             echo "| Commit | \`${GITHUB_SHA}\` |"
             echo
             echo "Para promocionar a producción, lanza **Promote to prod** con \`image_tag=${IMAGE_TAG}\`."

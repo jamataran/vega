@@ -1,5 +1,5 @@
 import type { ContextLevel } from '@vega/shared';
-import type { QueueParams } from './api';
+import type { CostBreakdownParams, QueueParams } from './api';
 
 /** Claves centralizadas: invalidar desde una mutación no debe ser adivinar. */
 export const queryKeys = {
@@ -18,6 +18,7 @@ export const queryKeys = {
   users: ['users'] as const,
   settings: ['settings'] as const,
   overview: ['overview'] as const,
+  costBreakdown: (params: CostBreakdownParams) => ['overview', 'cost', params] as const,
   batchRuns: ['batch', 'runs'] as const,
 };
 

@@ -1,6 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
 import { SUBMISSION_STATUS_LABEL, SubmissionStatus } from '@vega/shared';
-import type { ReactNode } from 'react';
 import { api } from '@/lib/api';
 import { queryKeys } from '@/lib/queryKeys';
 import {
@@ -9,38 +8,13 @@ import {
   formatEurosFromCents,
   formatInteger,
   formatPercent,
-  formatPreciseEurosFromCents,
-  formatTokens,
 } from '@/lib/format';
 import { cn } from '@/lib/cn';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ErrorState, PageHeader, Section } from '@/components/common/Feedback';
-
-/**
- * Cifra tipografiada. Descartamos las gráficas a propósito: con seis métricas
- * escalares y una lista de ocho estados, un número bien puesto se lee más
- * rápido en un móvil que cualquier barra.
- */
-function Figure({
-  label,
-  value,
-  note,
-  className,
-}: {
-  label: string;
-  value: ReactNode;
-  note?: ReactNode;
-  className?: string;
-}) {
-  return (
-    <div className={cn('min-w-0', className)}>
-      <p className="eyebrow">{label}</p>
-      <p className="mt-1.5 font-display text-title font-semibold leading-none">{value}</p>
-      {note ? <p className="mt-1.5 text-ui text-muted-foreground">{note}</p> : null}
-    </div>
-  );
-}
+import { Figure } from '@/components/common/Figure';
+import { CostBreakdown } from '@/components/overview/CostBreakdown';
 
 export function OverviewPage() {
   const query = useQuery({
@@ -71,14 +45,11 @@ export function OverviewPage() {
   }
 
   const data = query.data;
-  const { usageThisMonth: usage } = data;
-  const totalTokens = usage.inputTokens + usage.outputTokens;
-  const cacheRatio = usage.inputTokens > 0 ? usage.cachedInputTokens / usage.inputTokens : 0;
 
   return (
     <div>
       <PageHeader eyebrow="Métricas" title="Panel">
-        Lo que se ha corregido este mes y lo que ha costado.
+        Estado de la cola y en qué se va el gasto del periodo.
       </PageHeader>
 
       <div className="flex flex-col gap-3">
@@ -116,26 +87,7 @@ export function OverviewPage() {
           </div>
         </Section>
 
-        <Section title="Coste del mes">
-          <div className="grid grid-cols-2 gap-x-4 gap-y-5">
-            <Figure
-              label="Gasto"
-              value={formatEurosFromCents(usage.costCents)}
-              note={`${formatTokens(totalTokens)} tokens`}
-            />
-            <Figure
-              label="Por corrección"
-              value={formatPreciseEurosFromCents(data.avgCostCentsPerCorrection)}
-              note="Media del mes"
-            />
-            <Figure
-              label="Tokens de entrada"
-              value={formatTokens(usage.inputTokens)}
-              note={`${Math.round(cacheRatio * 100)} % desde la caché`}
-            />
-            <Figure label="Tokens de salida" value={formatTokens(usage.outputTokens)} />
-          </div>
-        </Section>
+        <CostBreakdown />
 
         <Section title="Cola por estado">
           <dl className="divide-y divide-border">

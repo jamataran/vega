@@ -9,6 +9,7 @@ import {
   ContextListResponse,
   ContextResponse,
   CorrectionResponse,
+  CostBreakdownResponse,
   DiscoverActivitiesResponse,
   HealthResponse,
   ImportActivitiesResponse,
@@ -29,6 +30,8 @@ import {
 import type {
   ActivityKind,
   ContextLevel,
+  CostDimension,
+  CostPeriod,
   CreateUserRequest,
   ImportActivitiesRequest,
   LoginRequest,
@@ -272,6 +275,11 @@ export async function downloadFile(path: string, fallbackName: string): Promise<
 // ── Parámetros de la cola ───────────────────────────────────────────────────
 
 /** Alias de tipo (no interfaz) para que sea asignable a `Record<string, QueryValue>`. */
+export type CostBreakdownParams = {
+  period?: CostPeriod;
+  dimension?: CostDimension;
+};
+
 export type QueueParams = {
   status?: SubmissionStatus;
   activityId?: string;
@@ -378,6 +386,13 @@ export const api = {
   // ── Panel y procesos ──────────────────────────────────────────────────────
 
   overview: (signal?: AbortSignal) => request(routes.overview, { schema: OverviewResponse, signal }),
+
+  costBreakdown: (params: CostBreakdownParams, signal?: AbortSignal) =>
+    request(routes.costBreakdown, {
+      schema: CostBreakdownResponse,
+      query: { ...params },
+      signal,
+    }),
 
   batchRuns: (signal?: AbortSignal) =>
     request(routes.batchRuns, { schema: BatchRunListResponse, signal }),
