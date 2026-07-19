@@ -5,27 +5,33 @@
 | **Id** | HU-18 |
 | **Épica** | Observabilidad y coste |
 | **Estado** | borrador |
-| **Prioridad** | Could |
-| **Estimación** | 5 |
+| **Prioridad** | Should |
+| **Estimación** | 8 |
 | **Depende de** | HU-12, HU-16 |
-| **Bloquea a** | ninguna |
+| **Bloquea a** | HU-21 |
 | **Entrega mockeada** | Parcial |
 
 ## Narrativa
 
 **Como** administrador de la academia
-**quiero** ver qué me cuesta Vega y cuánto tengo que corregir a la IA
-**para** saber si el sistema sale a cuenta y si está mejorando o empeorando.
+**quiero** ver qué me cuesta Vega, en qué se me va y cuánto tengo que corregir a la IA
+**para** saber si el sistema sale a cuenta, dónde recortar y si está mejorando o empeorando.
 
-Dos preguntas, ninguna retórica. La del **coste** decide si el producto es viable: si corregir un
-examen cuesta más que el tiempo que ahorra, no hay negocio. La de la **desviación** decide si el
-producto funciona: si el profesor cambia sistemáticamente medio punto por entrega, la propuesta de
-la IA no le está ahorrando revisión, sólo se la está reformulando.
+Tres preguntas, ninguna retórica. La del **coste total** decide si el producto es viable: si
+corregir una entrega cuesta más que el tiempo que ahorra, no hay negocio. La del **reparto** decide
+qué hacer al respecto: un total no es accionable, pero «los foros de Lengua II se han comido la
+mitad del mes» sí lo es. Y la de la **desviación** decide si el producto funciona: si el profesor
+cambia sistemáticamente medio punto por entrega, la propuesta de la IA no le está ahorrando
+revisión, sólo se la está reformulando.
 
 La desviación se puede medir gracias al
 [ADR 0008](../decisiones/0008-separar-puntos-ia-y-profesor.md): `aiPoints` y `teacherPoints` son
 columnas distintas, así que la señal está en los datos desde el primer día sin instrumentación
 adicional. Este panel sólo la enseña.
+
+**Cambio respecto a la versión anterior de esta HU:** el panel era una foto plana del mes en curso.
+Ahora la ventana se elige y el gasto se desglosa por tres ejes —tipo de actividad, curso y
+actividad— para poder bajar del agregado a lo que lo ha provocado sin cambiar de pantalla.
 
 ## Criterios de aceptación
 
@@ -37,13 +43,82 @@ Cuando envío GET /api/stats/overview
 Entonces recibo 200 con OverviewResponse
 Y counts trae el recuento por estado
 Y gradedLast30Days trae las corregidas en 30 días
-Y usageThisMonth trae inputTokens, outputTokens, cachedInputTokens y costCents
-Y avgCostCentsPerCorrection trae el coste medio por corrección
 Y avgTeacherDeviation trae la desviación media en puntos
+Y untouchedRatio trae la proporción de validadas sin editar
 Y lastBatchRun trae el último lote o null
 ```
 
-### Escenario 2: la desviación tiene signo
+### Escenario 2: desglose del gasto por defecto
+
+```gherkin
+Dado que hay correcciones de este mes
+Cuando envío GET /api/stats/cost sin parámetros
+Entonces recibo 200 con CostBreakdownResponse
+Y period es "this_month" y dimension es "activity_kind"
+Y from y to delimitan la ventana en fechas ISO
+Y usage, corrections y avgCostCents son los totales de esa ventana
+Y groups trae una fila por ActivityKind con gasto en la ventana
+```
+
+### Escenario 3: cambiar la ventana no cambia el eje
+
+```gherkin
+Dado que estoy viendo el desglose por tipo del mes en curso
+Cuando elijo el periodo "Últimos 30 días"
+Entonces se consulta GET /api/stats/cost?period=last_30_days&dimension=activity_kind
+Y los totales y las filas corresponden a la ventana nueva
+Y el eje elegido se conserva
+```
+
+### Escenario 4: bajar del tipo a la actividad
+
+```gherkin
+Dado que estoy viendo el desglose por tipo
+Cuando cambio el eje a "Actividad"
+Entonces se consulta GET /api/stats/cost?period=<el mismo>&dimension=activity
+Y cada fila trae activityId, y su etiqueta es el nombre de la actividad
+Y las filas vienen ordenadas de más caro a menos caro
+Y desde cada fila puedo abrir la ficha de esa actividad
+```
+
+### Escenario 5: sólo aparece lo que ha gastado
+
+```gherkin
+Dado que existen actividades dadas de alta sin ninguna corrección en la ventana
+Cuando consulto el desglose por actividad
+Entonces esas actividades no aparecen en groups
+Y el panel no las presenta como si hubieran costado 0
+```
+
+### Escenario 6: periodo sin gasto
+
+```gherkin
+Dado que no hay ninguna corrección en la ventana elegida
+Cuando consulto el desglose
+Entonces groups viene vacío
+Y los totales son 0
+Y la UI muestra un estado vacío que lo explica, en lugar de una lista de ceros
+```
+
+### Escenario 7: parámetros inválidos
+
+```gherkin
+Dado que he iniciado sesión
+Cuando envío GET /api/stats/cost?period=ayer
+Entonces recibo 422 con error.code = "UNPROCESSABLE"
+Y error.fields.period indica los valores admitidos
+```
+
+### Escenario 8: el desglose distingue lo no puntuable
+
+```gherkin
+Dado que hay gasto en actividades de tipo forum
+Cuando consulto el desglose por tipo o por actividad
+Entonces las filas de foro vienen marcadas como no puntuables
+Y su coste se suma al total igual que el de las entregas
+```
+
+### Escenario 9: la desviación tiene signo
 
 ```gherkin
 Dado que hay correcciones validadas donde el profesor subió la nota
@@ -52,7 +127,7 @@ Entonces avgTeacherDeviation es positiva
 Y la UI explica que positiva significa que el profesor sube la nota respecto a la IA
 ```
 
-### Escenario 3: sin datos suficientes
+### Escenario 10: sin datos suficientes
 
 ```gherkin
 Dado que no hay ninguna corrección validada
@@ -61,16 +136,17 @@ Entonces avgTeacherDeviation es 0
 Y la UI indica que no hay datos suficientes en lugar de presentar el 0 como un resultado
 ```
 
-### Escenario 4: la desviación se calcula sobre lo validado
+### Escenario 11: la desviación se calcula sobre lo validado y puntuable
 
 ```gherkin
-Dado que hay correcciones en "graded" sin validar y otras en "validated"
+Dado que hay correcciones en "graded" sin validar, otras en "validated" de entregas
+Y correcciones validadas de actividades con graded = false
 Cuando se calcula avgTeacherDeviation
-Entonces sólo se tienen en cuenta las validadas
-Y las que están esperando al profesor no cuentan
+Entonces sólo se tienen en cuenta las validadas de actividades puntuables
+Y las de foro no entran, porque no tienen puntos que restar
 ```
 
-### Escenario 5: coste con proveedor mock
+### Escenario 12: coste con proveedor mock
 
 ```gherkin
 Dado que el despliegue tiene AI_PROVIDER=mock
@@ -80,25 +156,16 @@ Y la UI indica que el sistema está en modo simulado
 Y no se presentan esos ceros como una medida real de coste
 ```
 
-### Escenario 6: ahorro de caché
+### Escenario 13: ahorro de caché
 
 ```gherkin
-Dado que se han ejecutado lotes ordenados por buzón
-Cuando consulto el panel
+Dado que se han ejecutado lotes ordenados por actividad
+Cuando consulto el desglose
 Entonces veo la proporción de cachedInputTokens sobre inputTokens
 Y esa proporción es mayor que cero
 ```
 
-### Escenario 7: historial de lotes
-
-```gherkin
-Dado que se han ejecutado varios lotes
-Cuando consulto GET /api/batch/runs
-Entonces veo cada BatchRun con su duración, entregas procesadas, fallidas y coste
-Y el panel muestra el último de forma destacada
-```
-
-### Escenario 8: cuello de botella visible
+### Escenario 14: cuello de botella visible
 
 ```gherkin
 Dado que hay 40 entregas en "graded" y 2 en "validated"
@@ -109,125 +176,104 @@ Y el panel deja claro que el trabajo se acumula en la revisión, no en el proces
 
 ## Reglas de negocio
 
-**RN-1.** `avgTeacherDeviation` es la media, **sobre correcciones validadas**, de
-`SUM(effectivePoints) - SUM(aiPoints)`. **Positiva = el profesor sube la nota** (lo dice el propio
-comentario de `OverviewResponse`).
+**RN-1.** `avgTeacherDeviation` es la media, por corrección validada, de
+`SUM(COALESCE(teacherPoints, aiPoints) - aiPoints)`. Positiva significa que el profesor sube la
+nota respecto a la IA.
 
-**RN-2.** `usageThisMonth` agrega el consumo del **mes natural en curso**, a partir de las cuatro
-columnas de `corrections`.
+**RN-2.** La desviación **sólo considera correcciones validadas de actividades puntuables**. En una
+actividad con `graded = false` no hay `pointsAllocation` ni `teacherPoints`: incluirla sería sumar
+ceros y diluir la señal.
 
-**RN-3.** `avgCostCentsPerCorrection` es `costCents` total dividido por número de correcciones, en
-**céntimos** (`UsageMetrics.costCents`). El dinero no viaja como flotante de euros.
+**RN-3.** `untouchedRatio` es la proporción de correcciones validadas en las que el profesor no
+cambió nada: ni puntos, ni feedback de apartado, ni resumen, ni el texto redactado. Es la métrica
+que justifica subir el modo de autonomía de una actividad (ver HU-21).
 
-**RN-4.** `counts` es el mismo `QueueCounts` de la cola: recuento por estado de todas las entregas.
+**RN-4.** Con cero correcciones validadas, `avgTeacherDeviation` y `untouchedRatio` valen `0` y la
+UI **debe** distinguir ese `0` de un resultado medido.
 
-**RN-5.** Con el proveedor `mock`, `usage` es cero. La UI **debe indicarlo** para que nadie
-interprete un coste de cero como una medida (HU-03, RN-3).
+**RN-5.** `CostPeriod` admite `this_month`, `last_30_days`, `this_quarter` y `all_time`. `all_time`
+se ancla en la fecha de la primera corrección, no en `-infinity`: el contrato devuelve fechas ISO y
+la ventana tiene que poder rotularse.
 
-**RN-6.** El panel es de **sólo lectura**. No permite lanzar el lote (eso es HU-09, y es de `admin`)
-ni ninguna otra acción.
+**RN-6.** `CostDimension` admite `activity_kind`, `course` y `activity`. Periodo y eje son
+independientes: cambiar uno no reinicia el otro.
 
-**RN-7.** Accesible para cualquier usuario autenticado. Ver pregunta abierta 5.
+**RN-7.** `groups` viene **ordenado por `costCents` descendente**. La primera fila es la que hay que
+mirar.
 
-**RN-8.** Las cifras se calculan en el momento de la petición. No hay agregados precalculados ni
-tabla de métricas.
+**RN-8.** En `groups` sólo entran filas con gasto en la ventana. Una actividad sin correcciones no
+aparece: el panel informa de lo gastado, no inventaria el catálogo.
 
-**RN-9.** Con menos de un mínimo de correcciones validadas, la desviación **no se presenta como
-resultado**: se indica que no hay datos suficientes.
+**RN-9.** `activityId` sólo viene relleno con `dimension = activity`; es lo que permite navegar a la
+ficha. Con `course` y `activity_kind` es `null`.
+
+**RN-10.** Al agrupar por curso, `courseName` vacío se etiqueta «Sin curso». Es texto libre y admite
+la cadena vacía por defecto de esquema.
+
+**RN-11.** Los costes viajan en **céntimos** en todo el contrato (`numeric(10,4)` en base de datos)
+y se formatean en el front. `avgCostCents` se redondea a cuatro decimales.
+
+**RN-12.** El desglose es de **sólo lectura y por sesión**: no se persiste el periodo ni el eje
+elegidos.
 
 ## Casos límite
 
 | Caso | Qué se hace |
 |---|---|
-| Ninguna corrección todavía | Todo a cero y mensaje de «sin datos», no un panel de ceros |
-| Una sola corrección validada | La desviación se calcula pero se marca como no significativa (RN-9) |
-| Desviación exactamente 0 | Puede significar acuerdo perfecto **o** que nadie ha tocado nada. Se distingue mostrando el porcentaje de entregas validadas sin edición |
-| Correcciones de meses anteriores | `usageThisMonth` sólo cuenta el mes en curso; `avgCostCentsPerCorrection` no está acotado a mes (ver pregunta abierta 2) |
-| Un lote fallido | Sale en `lastBatchRun` con `status: 'failed'`. El panel lo destaca |
-| El coste se dispara un mes | El panel lo muestra. **No hay alerta**: nadie se entera si no mira. Ver HU-09, pregunta 3 |
-| Muchas correcciones | La agregación es un `SUM` sobre `corrections` y `correction_items`. Con volumen de academia no hay problema; con años de historia conviene índice |
+| Una sola fila en el desglose | Ocupa la barra entera; no es un error, es que sólo hay una fuente de gasto |
+| Fila con coste 0 y correcciones > 0 | Aparece con barra al mínimo visible; es señal de proveedor mock o de tarifa mal configurada |
+| Actividad borrada con correcciones históricas | El `JOIN` la excluye; su gasto desaparece del desglose por actividad pero sigue en los totales. **Discrepancia conocida**: ver preguntas abiertas |
+| Curso renombrado en Moodle a mitad de periodo | Aparecen dos filas, una por cada nombre. `courseName` es texto libre y no hay identidad estable |
+| `all_time` sin ninguna corrección | `from` y `to` valen ambos «ahora»; la ventana es vacía y `groups` también |
+| Cambio de eje con la petición anterior en vuelo | Se muestra el resultado anterior atenuado hasta que llega el nuevo; no se vacía la lista |
 
 ## Fuera de alcance
 
-- **Desviación por buzón, por apartado o por periodo.** `OverviewResponse` sólo trae la media
-  global. Ver pregunta abierta 1.
-- **Exportación CSV.** Estaba en el backlog original (T09); no está en el contrato.
-- **Gráficas de evolución temporal.** No hay endpoint de series.
-- **Alertas de coste.** RN de casos límite.
-- **Coste por alumno o por buzón.** No hay endpoint.
-- **Métricas de calidad del OCR.** Ver HU-10, pregunta 6 y HU-11, pregunta 5.
-- **Calibración de la confianza.** Ver HU-13, pregunta 4.
-- **Tiempo de revisión por entrega.** No se mide.
+- **Exportar el desglose** a CSV o PDF.
+- **Comparar dos periodos** entre sí (mes contra mes anterior).
+- **Presupuesto y alertas**: fijar un techo de gasto mensual y avisar al acercarse. Es la
+  continuación natural de esta HU y no está decidida.
+- **Coste por profesor**: el gasto se atribuye a la actividad, no a quien revisa.
+- **Cuarto nivel de zoom** (las correcciones individuales de una actividad). Desde la fila se abre la
+  ficha de la actividad; el detalle por entrega vive en la cola de revisión (HU-14).
 
 ## Notas de implementación
 
-**Entidades** (`@vega/shared`): `UsageMetrics`, `BatchRun`, `QueueCounts`, y las funciones
-`effectivePoints` y `totalScore`.
+**Entidades** (`@vega/shared`): `OverviewResponse`, `CostBreakdownResponse`, `CostGroup`,
+`CostPeriod`, `CostDimension`, `UsageMetrics`, `BatchRun`.
 
-**Contrato**: `OverviewResponse` (`counts`, `gradedLast30Days`, `usageThisMonth`,
-`avgCostCentsPerCorrection`, `avgTeacherDeviation`, `lastBatchRun`), `BatchRunListResponse`.
+**Endpoints** (`routes`): `overview` → `GET /api/stats/overview`; `costBreakdown` →
+`GET /api/stats/cost?period=&dimension=`. Ambos exigen sesión.
 
-**Endpoints** (`routes`): `overview` → `GET /api/stats/overview`; `batchRuns` →
-`GET /api/batch/runs`.
+**Esquema**: `corrections.cost_cents` (`numeric(10,4)`), `input_tokens`, `output_tokens`,
+`cached_input_tokens`, `created_at`. El desglose une `corrections → submissions → activities` y
+agrupa por `a.kind`, `a.course_name` o `a.id`.
 
-**Esquema**: `corrections` con `input_tokens`, `output_tokens`, `cached_input_tokens` y
-`cost_cents numeric(10,4)`; `correction_items` con `ai_points` y `teacher_points`; `batch_runs` con
-las mismas cuatro columnas de consumo.
-
-**Cálculo de la desviación (RN-1)**: sobre `correction_items` de correcciones con `validated_at IS
-NOT NULL`, `SUM(COALESCE(teacher_points, ai_points)) - SUM(ai_points)` por corrección, y media de
-ese valor. Es exactamente la resta que el ADR 0008 hace posible.
-
-Ojo con el signo: `effectivePoints - aiPoints` y no al revés. Invertirlo produce un panel que dice
-lo contrario de la realidad, y nadie lo notará durante meses.
-
-**Métrica que falta en el contrato**: el **porcentaje de entregas validadas sin ninguna edición**
-—la medida real del ahorro de tiempo, según el propio ADR 0008— **no está en `OverviewResponse`**.
-Es una consulta trivial —correcciones validadas en las que todos los `teacher_points` y el
-`teacher_summary` siguen a `NULL`— y probablemente la cifra más importante del panel. Ver pregunta
-abierta 3.
-
-**UI**: pestaña «Métricas» de la navegación inferior. Tres bloques: **carga de trabajo** (recuentos
-por estado, cuello de botella), **coste** (mes en curso, media por corrección, proporción de caché)
-y **calidad** (desviación media, con su signo explicado en texto, no sólo con un número). Aviso
-visible cuando el proveedor es `mock` (RN-5).
-
-**Mock**: parcial. El endpoint es real y las consultas también; lo que no hay son datos con
-significado, porque el proveedor `mock` deja `usage` a cero. La parte de desviación sí es
-demostrable en la entrega mockeada: basta con editar puntuaciones y validar.
+**UI**: `apps/frontend/src/pages/OverviewPage.tsx` y
+`apps/frontend/src/components/overview/CostBreakdown.tsx`. Selector de periodo con `Select`, eje con
+`Tabs`. Las barras de proporción se escalan sobre la fila más cara, no sobre el total, para que el
+reparto no se vea plano cuando hay una fila dominante. No se añade librería de gráficas: para
+métricas sueltas el panel sigue usando cifras tipografiadas.
 
 ## Preguntas abiertas
 
-1. **¿Hace falta desagregar la desviación?** La media global dice si el sistema va bien o mal, pero
-   **no dice qué arreglar**. La cifra accionable es por buzón —«en `tema07` subo sistemáticamente
-   medio punto, el contexto es demasiado duro»— o por apartado. Los datos están; falta endpoint y
-   falta decidir hasta dónde llegar. Sin desagregar, el panel informa pero no sirve para actuar.
-
-2. **¿Sobre qué ventana se calcula `avgCostCentsPerCorrection`?** El contrato no lo dice.
-   ¿Histórico completo, que mezcla modelos y precios de hace meses? ¿Mes en curso, coherente con
-   `usageThisMonth` pero ruidoso al principio de mes? ¿Últimos 30 días? Cada opción da un número
-   distinto y el panel no aclara cuál es. **`[bloqueante]` para que la cifra signifique algo.**
-
-3. **¿Se añade el porcentaje de validadas sin edición?** Es, según el ADR 0008, «la medida real del
-   ahorro de tiempo», y es la cifra que responde a «¿me está sirviendo esto?». No está en
-   `OverviewResponse`. Añadirla es un campo más en el contrato y una consulta sencilla. La única
-   pega: con la respuesta (b) a la pregunta 3 de HU-16 —aceptar apartado guardando `teacherPoints =
-   aiPoints`— esta métrica se contaminaría. Las dos decisiones están acopladas.
-
-4. **¿Cómo se calcula `costCents` con el proveedor real?** El coste depende del modelo, de los
-   precios vigentes y del descuento por caché, y esos precios cambian. Opciones: (a) tabla de
-   precios por modelo en configuración, que hay que mantener a mano y quedará obsoleta; (b) tomar el
-   coste del proveedor si lo devuelve; (c) sólo contar tokens y no calcular euros, lo que quita al
-   panel su respuesta más útil. Sin resolverlo, `cost_cents` es un número inventado con aspecto de
-   dato.
-
-5. **¿Debe un profesor ver la desviación?** Es una métrica sobre **su propio trabajo** frente al de
-   la IA, y en manos de un jefe de estudios puede leerse como evaluación de desempeño. RN-7 lo deja
-   visible para todos. Opciones: (a) visible para todos, que es lo que hay; (b) sólo `admin`; (c)
-   cada profesor ve la suya y el `admin` ve la agregada. La (c) es la más sana pero exige desagregar
-   por usuario, que hoy es posible (`validated_by`) pero no está en el contrato.
-
-6. **¿Merece la pena un histórico de coste por mes?** `usageThisMonth` sólo da el mes en curso. Ver
-   la tendencia —si el coste por corrección baja al mejorar la caché, o sube al cambiar de modelo—
-   exige series temporales y un endpoint nuevo. ¿O basta con mirar `GET /api/batch/runs`, que ya
-   trae el coste de cada lote y permite hacerse una idea?
+1. **¿Qué hace `costCents` cuando el proveedor es real?** Hoy el valor lo escribe el motor a partir
+   de una tarifa fija. Si la tarifa cambia y no se versiona, el histórico queda mal calculado y
+   `cost_cents` es un número inventado con aspecto de dato. Opciones: (a) guardar la tarifa aplicada
+   junto a cada corrección; (b) recalcular el histórico al cambiar la tarifa; (c) asumir la deriva y
+   documentarla. `[bloqueante]`
+2. **¿Cómo sabe el panel que está en modo simulado?** El escenario 12 lo exige y **no hay ningún
+   campo en el contrato que lo diga**. Opciones: (a) añadir `simulated: boolean` a las dos
+   respuestas de estadísticas; (b) derivarlo de `GET /api/settings`, que sólo ve el administrador;
+   (c) marcar las correcciones simuladas en base de datos. La (c) es la única que sobrevive a
+   cambiar de proveedor a mitad de mes. `[bloqueante]`
+3. **¿Qué pasa con el gasto de una actividad borrada?** El `JOIN` la excluye del desglose pero su
+   coste sigue contando en los totales, así que la suma de `groups` puede ser menor que
+   `usage.costCents`. Opciones: (a) fila «Actividades eliminadas» que cuadre la suma; (b) impedir el
+   borrado y desactivar en su lugar; (c) documentar la discrepancia. Hoy no hay endpoint de borrado
+   de actividad, así que no es urgente — pero el `JOIN` ya está escrito como si lo hubiera.
+4. **¿Debe el desglose respetar la actividad desactivada?** Una actividad con `enabled = false`
+   sigue teniendo gasto histórico. Hoy aparece. Parece correcto, pero conviene confirmarlo.
+5. **¿Merece la pena `avgCostCentsPerCorrection` en `OverviewResponse`** ahora que
+   `CostBreakdownResponse` da la misma cifra con ventana elegible? Son dos fuentes para el mismo
+   número y pueden discrepar si las ventanas no coinciden. Candidato a eliminarse del contrato.

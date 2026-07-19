@@ -215,7 +215,7 @@ principio y hacerla falsa obligaría a rehacerla.
 3. **¿Dónde se guarda el token en el cliente?** `localStorage` es lo que sobrevive con menos
    fricción al cierre de la PWA, pero es accesible desde JavaScript y por tanto vulnerable a XSS.
    Una cookie `HttpOnly` + `SameSite` es más segura, pero cambia el modelo de autenticación del
-   contrato (que hoy es cabecera `Bearer`) y complica el CORS entre `apps/web` y `apps/api` en
+   contrato (que hoy es cabecera `Bearer`) y complica el CORS entre `apps/frontend` y `apps/api` en
    despliegues con dominios distintos. **`[bloqueante]`: condiciona el contrato.**
 
 4. **¿Qué longitud mínima de contraseña?** `CreateUserRequest` exige 8 caracteres. Para un usuario

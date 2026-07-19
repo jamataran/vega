@@ -492,9 +492,45 @@ opcionales.
 | `usageThisMonth` | `UsageMetrics` | `inputTokens`, `outputTokens`, `cachedInputTokens`, `costCents` del mes en curso |
 | `avgCostCentsPerCorrection` | `number` | Coste medio por corrección, en céntimos |
 | `avgTeacherDeviation` | `number` | Desviación media en puntos entre la nota de la IA y la validada. **Positiva = el profesor sube la nota** |
+| `untouchedRatio` | `number` | Proporción 0–1 de correcciones validadas que el profesor no tocó |
 | `lastBatchRun` | `BatchRun \| null` | Última ejecución del lote |
 
 **Errores**: 401, 403.
+
+---
+
+### `GET /api/stats/cost`
+
+`routes.costBreakdown` · **Profesor**
+
+Desglose del gasto de una ventana por un eje. Es lo que permite bajar del total a las actividades
+que lo han provocado. Ver [HU-18](hu/HU-18-panel-coste-y-desviacion.md).
+
+**Query**
+
+| Parámetro | Tipo | Por defecto | Valores |
+|---|---|---|---|
+| `period` | `CostPeriod` | `this_month` | `this_month`, `last_30_days`, `this_quarter`, `all_time` |
+| `dimension` | `CostDimension` | `activity_kind` | `activity_kind`, `course`, `activity` |
+
+**Respuesta 200** — `CostBreakdownResponse`
+
+| Campo | Tipo | Significado |
+|---|---|---|
+| `period` | `CostPeriod` | Ventana aplicada |
+| `from` / `to` | `IsoDate` | Extremos reales de la ventana. Con `all_time`, `from` es la primera corrección |
+| `dimension` | `CostDimension` | Eje aplicado |
+| `usage` | `UsageMetrics` | Totales de la ventana |
+| `corrections` | `number` | Correcciones de la ventana |
+| `avgCostCents` | `number` | Coste medio por corrección, en céntimos |
+| `groups` | `CostGroup[]` | Filas del desglose, **ordenadas de más caro a menos** |
+
+`CostGroup`: `key`, `label`, `activityId` (sólo con `dimension = activity`, si no `null`), `kind`
+(`null` al agrupar por curso), `costCents`, `corrections`, `avgCostCents`.
+
+Sólo entran filas **con gasto en la ventana**: una actividad sin correcciones no aparece.
+
+**Errores**: 401, 403, 422 (`period` o `dimension` fuera de los valores admitidos).
 
 ---
 
@@ -555,6 +591,7 @@ Es asíncrono: responde en cuanto encola. El progreso se sigue con `GET /api/bat
 | `user` | PATCH | `/api/users/{id}` | Admin | `UpdateUserRequest` | `User` |
 | `user` | DELETE | `/api/users/{id}` | Admin | — | *sin definir* |
 | `overview` | GET | `/api/stats/overview` | Profesor | — | `OverviewResponse` |
+| `costBreakdown` | GET | `/api/stats/cost` | Profesor | *query* | `CostBreakdownResponse` |
 | `batchRuns` | GET | `/api/batch/runs` | Profesor | — | `BatchRunListResponse` |
 | `triggerBatch` | POST | `/api/batch/run` | Admin | — | `TriggerBatchResponse` (202) |
 

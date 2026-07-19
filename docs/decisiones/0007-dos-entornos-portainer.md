@@ -35,7 +35,7 @@ graph LR
   PR[Pull request] --> CI1[GitHub Actions<br/>lint + typecheck + tests]
   CI1 --> M[merge a main]
   M --> CI2[GitHub Actions<br/>build multi-stage]
-  CI2 --> GHCR[(GHCR<br/>vega-api · vega-web)]
+  CI2 --> GHCR[(GHCR<br/>vega-api · vega-frontend)]
   GHCR --> PT[Portainer test<br/>docker-compose.test.yml]
   PT --> V{¿Verificado?}
   V -->|sí| PP[Portainer prod<br/>docker-compose.prod.yml]

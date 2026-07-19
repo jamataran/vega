@@ -1,19 +1,22 @@
 # Documentación de Vega
 
-Vega corrige exámenes de matemáticas manuscritos con IA y deja la última palabra al profesor,
-que revisa y valida desde el móvil. Esta carpeta contiene el diseño de producto y de ingeniería.
+Vega corrige entregas y responde dudas de foro sobre Moodle, y deja la última palabra al
+profesor, que revisa y valida desde el móvil. La materia no forma parte del núcleo: lo que la IA
+sabe de ella vive en los ficheros de [`contexts/`](../contexts/README.md). Esta carpeta contiene el
+diseño de producto y de ingeniería.
 
 ## Índice
 
 | Documento | Qué contiene |
 |---|---|
+| [`hitos.md`](hitos.md) | El plan de trabajo: cinco hitos, qué HU entra en cada uno y qué falta |
 | [`arquitectura.md`](arquitectura.md) | Componentes, flujo de una entrega de principio a fin y por qué el monorepo está partido así |
 | [`modelo-de-datos.md`](modelo-de-datos.md) | Diagrama entidad-relación y máquina de estados de `SubmissionStatus` |
 | [`api.md`](api.md) | Referencia de todos los endpoints, derivada del contrato de `@vega/shared` |
-| [`glosario.md`](glosario.md) | Vocabulario de la academia: buzón, simulacro, apartado, rúbrica… |
+| [`glosario.md`](glosario.md) | Vocabulario del dominio: actividad, entrega, foro, contexto, apartado… |
 | [`hu/`](hu/) | Historias de usuario. **Es el documento vivo del producto** |
 | [`decisiones/`](decisiones/) | ADRs: decisiones de arquitectura con su contexto y sus consecuencias |
-| [`tareas-claude-code.md`](tareas-claude-code.md) | Backlog histórico de implementación (previo al giro a TypeScript; ver ADR 0001) |
+| [`tareas-claude-code.md`](tareas-claude-code.md) | **Obsoleto.** Backlog previo al giro a TypeScript: describe un backend Python/FastAPI que ya no existe. Se conserva sólo como rastro; no lo uses como referencia |
 
 ## Fuentes de verdad
 

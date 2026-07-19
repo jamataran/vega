@@ -69,10 +69,10 @@ La columna **Mock** del índice dice qué queda cubierto en esa entrega:
 | [HU-01](HU-01-inicio-de-sesion.md) | Inicio de sesión y sesión persistente | Acceso y usuarios | refinada | Must | 3 | **Sí** |
 | [HU-02](HU-02-gestion-de-usuarios.md) | Alta y gestión de usuarios | Acceso y usuarios | borrador | Should | 5 | Parcial |
 | [HU-03](HU-03-ajustes-y-estado.md) | Ajustes y estado del sistema | Acceso y usuarios | borrador | Could | 2 | **Sí** |
-| [HU-04](HU-04-configuracion-de-buzon.md) | Configuración de un buzón | Buzones y contexto | refinada | Must | 5 | **Sí** |
-| [HU-05](HU-05-solucion-referencia-y-reparto.md) | Solución de referencia y reparto de puntos | Buzones y contexto | refinada | Must | 5 | **Sí** |
-| [HU-06](HU-06-editor-contextos-tres-niveles.md) | Editor de contextos de corrección | Buzones y contexto | borrador | Must | 8 | **Sí** |
-| [HU-07](HU-07-contexto-efectivo-resuelto.md) | Ver el contexto efectivo de un buzón | Buzones y contexto | refinada | Should | 2 | Parcial |
+| [HU-04](HU-04-configuracion-de-actividad.md) | Configuración de una actividad | Actividades y contexto | refinada | Must | 5 | **Sí** |
+| [HU-05](HU-05-solucion-referencia-y-reparto.md) | Solución de referencia y reparto de puntos | Actividades y contexto | refinada | Must | 5 | **Sí** |
+| [HU-06](HU-06-editor-contextos-tres-niveles.md) | Editor de contextos de corrección | Actividades y contexto | borrador | Must | 8 | **Sí** |
+| [HU-07](HU-07-contexto-efectivo-resuelto.md) | Ver el contexto efectivo de una actividad | Actividades y contexto | refinada | Should | 2 | Parcial |
 | [HU-08](HU-08-ingesta-de-entregas.md) | Ingesta de entregas desde el conector | Ingesta | borrador | Must | 8 | Parcial |
 | [HU-09](HU-09-lote-nocturno.md) | Lote nocturno de procesamiento | Ingesta | borrador | Should | 8 | Parcial |
 | [HU-10](HU-10-transcripcion-ocr.md) | Transcripción del manuscrito a LaTeX | Transcripción | borrador | Must | 13 | Parcial |
@@ -83,9 +83,12 @@ La columna **Mock** del índice dice qué queda cubierto en esa entrega:
 | [HU-15](HU-15-pantalla-revision-movil.md) | Pantalla de revisión en el móvil | Revisión y validación | refinada | Must | 13 | **Sí** |
 | [HU-16](HU-16-edicion-y-validacion.md) | Editar puntuaciones y validar | Revisión y validación | refinada | Must | 8 | **Sí** |
 | [HU-17](HU-17-publicacion-en-lms.md) | Publicar nota y PDF de feedback | Publicación | borrador | Must | 13 | No |
-| [HU-18](HU-18-panel-coste-y-desviacion.md) | Panel de coste y desviación | Observabilidad y coste | borrador | Could | 5 | Parcial |
+| [HU-18](HU-18-panel-coste-y-desviacion.md) | Panel de coste y desviación | Observabilidad y coste | borrador | Should | 8 | Parcial |
+| [HU-19](HU-19-alta-de-actividades-desde-moodle.md) | Alta de actividades desde Moodle | Actividades y contexto | borrador | Must | 8 | No |
+| [HU-20](HU-20-respuesta-a-dudas-de-foro.md) | Respuesta a dudas de foro | Corrección | borrador | Must | 8 | Parcial |
+| [HU-21](HU-21-modos-de-autonomia.md) | Modos de autonomía por actividad | Revisión y validación | borrador | Should | 8 | Parcial |
 
-**Estimación** en puntos de historia, escala Fibonacci (1, 2, 3, 5, 8, 13). Total: 129 puntos.
+**Estimación** en puntos de historia, escala Fibonacci (1, 2, 3, 5, 8, 13). Total: 145 puntos.
 No es un compromiso de plazo; es una medida de tamaño relativo para poder discutir el orden.
 
 ### Reparto por épica
@@ -93,11 +96,11 @@ No es un compromiso de plazo; es una medida de tamaño relativo para poder discu
 | Épica | HU | Must | Should | Could |
 |---|---|---|---|---|
 | Acceso y usuarios | 01, 02, 03 | 1 | 1 | 1 |
-| Buzones y contexto de corrección | 04, 05, 06, 07 | 3 | 1 | — |
+| Actividades y contexto de corrección | 04, 05, 06, 07, 19 | 4 | 1 | — |
 | Ingesta | 08, 09 | 1 | 1 | — |
 | Transcripción | 10, 11 | 1 | 1 | — |
-| Corrección | 12, 13 | 1 | 1 | — |
-| Revisión y validación | 14, 15, 16 | 3 | — | — |
+| Corrección | 12, 13, 20 | 2 | 1 | — |
+| Revisión y validación | 14, 15, 16, 21 | 3 | 1 | — |
 | Publicación | 17 | 1 | — | — |
 | Observabilidad y coste | 18 | — | — | 1 |
 
@@ -120,7 +123,8 @@ el producto es el que quiere. Lo que se deja fuera es lo que no cambia esa conve
 graph LR
   HU01[HU-01 login] --> HU02[HU-02 usuarios]
   HU01 --> HU14[HU-14 cola]
-  HU04[HU-04 buzón] --> HU05[HU-05 solución y puntos]
+  HU19[HU-19 alta desde Moodle] --> HU04[HU-04 actividad]
+  HU04 --> HU05[HU-05 solución y puntos]
   HU04 --> HU06[HU-06 contextos]
   HU06 --> HU07[HU-07 contexto resuelto]
   HU04 --> HU08[HU-08 ingesta]
@@ -137,6 +141,13 @@ graph LR
   HU16 --> HU17[HU-17 publicar]
   HU12 --> HU18[HU-18 panel]
   HU16 --> HU18
+  HU08 --> HU20[HU-20 dudas de foro]
+  HU12 --> HU20
+  HU16 --> HU20
+  HU12 --> HU21[HU-21 autonomía]
+  HU16 --> HU21
+  HU17 --> HU21
+  HU18 --> HU21
 ```
 
 ## Cómo escribir una HU aquí

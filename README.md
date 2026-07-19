@@ -1,115 +1,218 @@
 # Vega
 
-**Corrección asistida por IA de exámenes de matemáticas manuscritos — con el profesor siempre al mando.**
+**An AI grading and forum-answering engine for Moodle — the teacher always has the final word.**
 
-Vega automatiza la parte tediosa de corregir exámenes de matemáticas escaneados y escritos a mano: transcribe el desarrollo del alumno, lo contrasta con la solución de referencia del profesor (o evalúa por sí mismos los métodos alternativos), propone una puntuación desglosada por apartados con feedback detallado, y lo deja todo en una cola de revisión para que el profesor edite y valide — desde el móvil. Solo tras la validación explícita se publica algo en el LMS.
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-5B39FF.svg)](LICENSE)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-22-5FA04E?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
+[![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)](https://react.dev/)
+[![Vite](https://img.shields.io/badge/Vite-6-646CFF?logo=vite&logoColor=white)](https://vite.dev/)
+[![Fastify](https://img.shields.io/badge/Fastify-5-000000?logo=fastify&logoColor=white)](https://fastify.dev/)
 
-Nacida para academias de *oposiciones* españolas; útil para cualquier curso con entregas manuscritas de matemáticas.
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+[![Drizzle](https://img.shields.io/badge/Drizzle-ORM-C5F74F?logo=drizzle&logoColor=black)](https://orm.drizzle.team/)
+[![Tailwind CSS](https://img.shields.io/badge/Tailwind_CSS-3-06B6D4?logo=tailwindcss&logoColor=white)](https://tailwindcss.com/)
+[![Claude](https://img.shields.io/badge/Claude-API-D97757?logo=anthropic&logoColor=white)](https://docs.anthropic.com/)
+[![Moodle](https://img.shields.io/badge/Moodle-3%2B-F98012?logo=moodle&logoColor=white)](https://moodle.org/)
+[![Docker](https://img.shields.io/badge/Docker-GHCR-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/)
+[![CI](https://img.shields.io/badge/CI-GitHub_Actions-2088FF?logo=githubactions&logoColor=white)](.github/workflows)
+[![pnpm](https://img.shields.io/badge/pnpm-workspaces-F69220?logo=pnpm&logoColor=white)](https://pnpm.io/)
 
-## Cómo funciona
+---
+
+Teaching staff lose hours to two repetitive jobs: marking submissions and answering the same
+questions in course forums. Vega takes both on as a first pass, then hands the result to the
+teacher to edit and approve. It reads your Moodle, drafts the work, and waits.
+
+## What Vega does
+
+Vega watches the Moodle activities you choose and handles two distinct jobs. They share the same
+engine but differ in one decisive way — **whether a grade is involved.**
+
+| | **Assignment submissions** | **Forum questions** |
+|---|---|---|
+| Moodle activity | `mod_assign` | `mod_forum` |
+| What the student sends | A file (PDF, image, document) | A written post |
+| What Vega drafts | Per-criterion scores + feedback | A reply to the question |
+| Grade published? | **Yes** — score and feedback | **No** — never. Feedback only |
+| Teacher's job | Adjust the marks, approve | Edit the reply, approve |
+
+The distinction runs all the way down the stack: an activity's `kind` is `assignment` or `forum`,
+and for a forum the grade is structurally `null` — there is no field for the connector to fill in
+and no code path that writes a mark back to Moodle.
+
+## How it works
 
 ```
-Buzón del LMS ──► lote nocturno ──► transcripción (manuscrito → LaTeX)
-                                          │
-                                          ▼
-                              corrección IA contra la rúbrica
-                              y la solución del profesor
-                                          │
-                                          ▼
-                   📱 cola de revisión — el profesor edita y valida
-                                          │
-                                          ▼
-                    nota + PDF de feedback publicados en el LMS
+                    ┌─ Moodle ────────────────────────┐
+                    │  assignment inbox    forum       │
+                    └────────┬───────────────┬─────────┘
+                             │               │
+                    scheduled batch pulls new work
+                             │               │
+                  file submission        forum post
+                             │               │
+                  transcription (OCR)        │
+                             │               │
+                             └───────┬───────┘
+                                     ▼
+                      AI drafts against your context
+                       (global → activity kind → activity)
+                                     │
+                                     ▼
+                    📱 review queue — teacher edits and approves
+                                     │
+                     ┌───────────────┴───────────────┐
+                     ▼                               ▼
+             grade + feedback                  forum reply
+             published to Moodle             posted to Moodle
 ```
 
-**Humano en el circuito por diseño.** La IA propone; el profesor dispone. Las correcciones de baja confianza y las dudas de transcripción llegan señaladas. Nada alcanza al alumno sin aprobación.
+**Human in the loop by design.** The AI proposes; the teacher disposes. Low-confidence drafts and
+transcription doubts arrive flagged. Nothing reaches a student without approval — and per activity
+you can loosen that to *review only the uncertain ones* once you trust the results, or keep full
+review forever.
 
-## Funcionalidades
+## Any subject, not just maths
 
-- **OCR de matemáticas manuscritas** con visión de Claude: transcripción íntegra a LaTeX con marcas `[ILEGIBLE]` / `[DUDA]`, mostrada junto al escaneo original.
-- **Contexto de corrección a tres niveles**, todo editable por el profesor en Markdown: instrucciones globales → tipo de tarea (*simulacro de problema* / *simulacro de tema*) → buzón (solución de referencia en PDF o LaTeX, indicaciones específicas, reparto de puntos).
-- **Interfaz de revisión mobile-first**: desliza entre original / transcripción / corrección, ajusta puntuaciones por apartado, edita el feedback y valida con el pulgar.
-- **Conectores LMS** tras una interfaz mínima (`list_submissions`, `download`, `publish_grade`, `publish_feedback_file`). Moodle 3 es el primero; se incluye conector de sistema de ficheros para uso sin LMS. PRs para otros LMS bienvenidas.
-- **Coste optimizado**: los lotes nocturnos ordenados por buzón explotan el prompt caching y la Batches API de Anthropic; el uso de tokens y el coste por corrección quedan medidos y visibles en el panel.
-- **Autosuficiente**: usuarios propios (roles profesor / administrador), pantalla de ajustes, instalable como PWA, sin dependencias de autenticación externas.
+Vega has no subject baked in. What the AI knows about your course lives entirely in Markdown files
+you write — **the prompts are the personalisation**, and they layer in three levels:
+
+```
+contexts/global.md                     department-wide policy: tone, rounding, how strict to be
+contexts/activity-kinds/<kind>.md      what matters in this format of work
+contexts/activities/<slug>.md          this specific assignment or forum
+```
+
+More specific layers add to and qualify the general ones; they never erase them. So a maths
+department writes rules about method marks and algebraic rigour, while a Spanish literature
+department writes about argument structure and register — same engine, different Markdown.
+
+Handwriting transcription and LaTeX rendering ship in the box because handwritten work is common
+and hard, not because Vega is a maths tool. A course with typed submissions simply never triggers
+the OCR path.
+
+> These context files are the seed shipped with the repository. Once running, teachers edit the
+> same three levels from the app — see [`contexts/README.md`](contexts/README.md) for how files and
+> database rows relate.
+
+## Features
+
+- **Course and activity discovery** — pick a course from Moodle, see its assignments and forums,
+  and choose which ones Vega should watch.
+- **Three-level grading context**, all teacher-editable Markdown: global policy → activity kind →
+  the individual activity, plus a reference solution and points allocation where a grade applies.
+- **Handwriting OCR** with Claude vision: full transcription to LaTeX with `[ILEGIBLE]` / `[DUDA]`
+  markers, shown side by side with the original scan.
+- **Mobile-first review** — swipe between original, transcription and draft; adjust per-criterion
+  marks, edit the feedback, approve with your thumb.
+- **LMS connectors** behind a minimal interface (`listSubmissions`, `download`, `publishGrade`,
+  `publishFeedbackFile`). Moodle 3 ships first; a filesystem connector covers use without an LMS.
+  PRs for other platforms welcome.
+- **Cost control** — batch runs grouped by activity exploit prompt caching and Anthropic's Batches
+  API. Token usage and cost per correction are measured, and the dashboard lets you drill from a
+  period's total spend down to the activities that caused it.
+- **Self-contained** — its own users (teacher / admin roles), settings screen, installable as a
+  PWA, no external identity provider required.
 
 ## Stack
 
-TypeScript de punta a punta, en monorepo:
+TypeScript end to end, in a pnpm monorepo:
 
-| Pieza | Elección |
+| Layer | Choice |
 |---|---|
-| API | Node 22 + Fastify, validación Zod, tipos compartidos con el front |
-| Front | React 18 + Vite + Tailwind, PWA, renderizado KaTeX |
-| Base de datos | PostgreSQL 16 · Drizzle ORM, migraciones SQL planas versionadas |
-| IA | SDK de Anthropic (Messages + Batches, prompt caching) |
-| Empaquetado | Docker multi-stage → GitHub Container Registry (GHCR) |
-| CI/CD | GitHub Actions: lint + tests en PR; build y push de imágenes en `main` |
+| API | Node 22 + Fastify 5, Zod validation, types shared with the frontend |
+| Frontend | React 18 + Vite 6 + Tailwind, PWA, KaTeX rendering |
+| Database | PostgreSQL 16 · Drizzle ORM, versioned flat SQL migrations |
+| AI | Anthropic SDK (Messages + Batches, prompt caching) |
+| Packaging | Multi-stage Docker → GitHub Container Registry (GHCR) |
+| CI/CD | GitHub Actions: lint + tests on PRs; image build and push on `main` |
 
 ```
-apps/api        servidor Fastify (aplica además las migraciones al arrancar)
-apps/web        PWA React
-packages/core   motor de corrección — puro, agnóstico del LMS, ejecutable por CLI
-packages/shared esquemas Zod y tipos compartidos por api/web/core
-connectors/     interfaz lms + moodle3/ + filesystem/
-contexts/       contextos markdown del profesor (versionados con git)
-deploy/         docker-compose.prod.yml + notas de proxy inverso
-docs/           diseño y documentación
+apps/api         Fastify server (also applies migrations on boot)
+apps/frontend    React PWA — the teacher's working app
+packages/core    grading engine — pure, LMS-agnostic, runnable from the CLI
+packages/shared  Zod schemas and types shared by api / frontend / core
+connectors/      lms interface + moodle3/ + filesystem/
+contexts/        teacher-authored Markdown contexts (versioned in git)
+brand/           design tokens and the master icon
+deploy/          docker-compose.prod.yml + reverse-proxy notes
+docs/            design docs, user stories, decision records
 ```
 
-## Arranque rápido (desarrollo)
+## Quick start (development)
 
 ```bash
-git clone https://github.com/<tu-usuario>/vega && cd vega
-cp .env.example .env            # como mínimo, ANTHROPIC_API_KEY
-docker compose up -d postgres
+git clone https://github.com/<your-user>/vega && cd vega
+cp .env.example .env            # at minimum, ANTHROPIC_API_KEY
 pnpm install
-pnpm db:migrate                 # aplica las migraciones SQL
-pnpm dev                        # api :3000 · web :5173
-pnpm --filter api create-admin  # crea el primer usuario administrador
+pnpm setup                      # starts postgres, applies migrations, seeds demo data
+pnpm dev                        # api :3000 · frontend :5174
+pnpm create-admin               # create the first admin user
 ```
 
-Corregir un examen desde la CLI, sin LMS:
+Grade one submission from the CLI, no LMS involved:
 
 ```bash
-pnpm --filter core cli grade --buzon tema04 --pdf examen.pdf
+pnpm --filter @vega/core cli grade --activity tema04 --pdf exam.pdf
 ```
 
-## Despliegue (GitOps)
+## Deployment (GitOps)
 
-Cada push a `main` publica dos imágenes en GHCR:
+Every push to `main` publishes two images to GHCR:
 
-- `ghcr.io/<tu-usuario>/vega-api`
-- `ghcr.io/<tu-usuario>/vega-web`
+- `ghcr.io/<your-user>/vega-api`
+- `ghcr.io/<your-user>/vega-frontend`
 
-Apunta tu orquestador (stack de Portainer, compose plano, etc.) a
-[`deploy/docker-compose.prod.yml`](deploy/docker-compose.prod.yml). **Los cambios de esquema viajan dentro de la imagen del API**: las migraciones SQL versionadas se aplican de forma idempotente al arrancar el contenedor, de modo que tu flujo GitOps solo despliega imágenes — sin pasos manuales de migración. Endpoints de salud para el proxy inverso: `GET /api/health` (verifica la BD) y `/health.txt` en el front.
+Point your orchestrator (a Portainer stack, plain compose, …) at
+[`deploy/docker-compose.prod.yml`](deploy/docker-compose.prod.yml). **Schema changes travel inside
+the API image**: versioned SQL migrations are applied idempotently on container start, so your
+GitOps flow only ever deploys images — no manual migration step. Health endpoints for the reverse
+proxy: `GET /api/health` (checks the database) and `/health.txt` on the frontend.
 
-TLS y enrutado quedan en manos de tu proxy inverso (nginx, Plesk, Traefik…); ver [`deploy/README.md`](deploy/README.md).
+TLS and routing are your reverse proxy's job (nginx, Plesk, Traefik…); see
+[`deploy/README.md`](deploy/README.md).
 
-## Configuración y marca
+## Configuration and branding
 
-Todos los secretos por variables de entorno (`.env.example` es la referencia): URL de base de datos, secreto JWT, API key de Anthropic, SMTP para los resúmenes nocturnos, credenciales del LMS.
+All secrets come from environment variables — [`.env.example`](.env.example) is the reference:
+database URL, JWT secret, Anthropic API key, SMTP for batch summaries, LMS credentials.
 
-Dale la cara de tu academia sin hacer fork: monta tu logo y define un nombre —
+Put your own institution's face on it without forking — mount a logo and set a name:
 
 ```yaml
 services:
-  web:
+  frontend:
     volumes:
       - ./branding/logo.png:/usr/share/nginx/html/branding/logo.png:ro
     environment:
-      - BRAND_NAME=Academia Ejemplo
+      - BRAND_NAME=Example Academy
 ```
 
-## Privacidad
+## Privacy
 
-Las entregas de los alumnos se envían a la API de Anthropic para transcripción y corrección. Quien despliega Vega es responsable de reflejarlo en su política de privacidad (RGPD). Vega minimiza la exposición enviando identificadores internos en lugar de nombres de alumnos.
+Student submissions are sent to the Anthropic API for transcription and drafting. Whoever deploys
+Vega is responsible for reflecting that in their privacy policy (GDPR). Vega minimises exposure by
+sending internal identifiers rather than student names.
 
-## Licencia
+## Roadmap
 
-[AGPL-3.0](LICENSE). Puedes autoalojar, modificar y usar Vega comercialmente; si ofreces una versión modificada como servicio en red, debes compartir tus cambios. Configurar la marca (logo, nombre) no constituye modificación.
+Development runs in milestones; each one is shippable on its own.
 
-## Estado y hoja de ruta
+| | Milestone | State |
+|---|---|---|
+| **M1** | Login, app shell and CI/CD working end to end | In progress |
+| **M2** | Activity configuration: pull courses and activities from Moodle and choose what to watch | Next |
+| **M3** | Batch pipeline running against a mocked Anthropic API | Planned |
+| **M4** | Real API calls, drafts visible in the app | Planned |
+| **M5** | Fully functional application | Planned |
 
-En desarrollo temprano. Hoja de ruta: conector Moodle 4+ · conector Canvas · modo multi-tenant · analítica de desviación (IA vs. profesor). El diseño completo, en [`docs/`](docs/).
+Beyond that: Moodle 4+ connector · Canvas connector · multi-tenant mode · AI-vs-teacher deviation
+analytics. User stories live in [`docs/hu/`](docs/hu/), architecture and decision records in
+[`docs/`](docs/).
+
+## License
+
+[AGPL-3.0](LICENSE). You may self-host, modify and use Vega commercially; if you offer a modified
+version as a network service, you must share your changes. Configuring branding (logo, name) is not
+a modification.

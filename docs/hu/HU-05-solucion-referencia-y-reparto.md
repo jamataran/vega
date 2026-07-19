@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Id** | HU-05 |
-| **Épica** | Buzones y contexto de corrección |
+| **Épica** | Actividades y contexto de corrección |
 | **Estado** | refinada |
 | **Prioridad** | Must |
 | **Estimación** | 5 |
@@ -14,17 +14,29 @@
 ## Narrativa
 
 **Como** profesor
-**quiero** pegar la solución del examen y definir cuánto vale cada apartado
+**quiero** pegar la solución de la actividad y definir cuánto vale cada apartado
 **para** que la IA corrija contra mi criterio y no contra el suyo, y para que la nota salga
 desglosada como yo la desgloso.
 
 Es lo más caro de preparar de todo el sistema y lo que más determina la calidad de la corrección.
-Un buzón sin reparto de puntos produce correcciones que el profesor no puede revisar por apartados;
-un buzón sin solución de referencia produce correcciones donde la IA decide sola qué es correcto.
+Una actividad puntuable sin reparto produce correcciones que el profesor no puede revisar por
+apartados; sin solución de referencia produce correcciones donde la IA decide sola qué es correcto.
 
-Dos matices que están decididos y no se discuten aquí: la solución de referencia **no es la única
-solución válida** —los métodos alternativos se puntúan completo, ver HU-13— y la suma del reparto
-de puntos **no tiene por qué dar la nota máxima**, porque hay enunciados con apartados opcionales
+**Esto es una HU de actividades puntuables.** El reparto de puntos sólo tiene sentido cuando
+`graded` es `true`: en una actividad no puntuable no hay puntos que repartir ni nota máxima sobre
+la que repartirlos, y la corrección sale como texto redactado sin apartados (HU-04, RN-6). La
+solución de referencia, en cambio, **sirve igual en los dos casos**: en un foro no reparte puntos,
+pero le dice a Vega cuál es la respuesta buena.
+
+Vega no es una herramienta de matemáticas: sirve a cualquier materia. `referenceSolution` es texto
+—LaTeX si la materia lo pide, prosa si no— y el reparto son apartados con nombre y puntos, sin
+presuponer ninguna estructura interna. Cómo se reparte por dentro un apartado es asunto del
+contexto del tipo de actividad (`contexts/activity-kinds/`), que el profesorado edita, no de esta
+HU.
+
+Dos matices decididos en otro sitio y que no se discuten aquí: la solución de referencia **no es la
+única solución válida** —los métodos alternativos se puntúan completo, ver HU-13— y la suma del
+reparto **no tiene por qué dar la nota máxima**, porque hay enunciados con apartados opcionales
 (`domain.ts` lo dice explícitamente).
 
 ## Criterios de aceptación
@@ -32,26 +44,26 @@ de puntos **no tiene por qué dar la nota máxima**, porque hay enunciados con a
 ### Escenario 1: guardar la solución de referencia
 
 ```gherkin
-Dado que existe el buzón "problema12" sin solución de referencia
-Cuando envío PATCH /api/mailboxes/{id} con referenceSolution conteniendo LaTeX
-Entonces recibo 200 con el Mailbox actualizado
-Y GET /api/mailboxes/{id} devuelve el mismo texto exacto, sin reescapar
+Dado que existe la actividad "problema12" con referenceSolution a null
+Cuando envío PATCH /api/activities/{id} con referenceSolution conteniendo texto y LaTeX
+Entonces recibo 200 con ActivityResponse
+Y GET /api/activities/{id} devuelve el mismo texto exacto, sin transformar ni reescapar
 ```
 
 ### Escenario 2: la solución se renderiza
 
 ```gherkin
-Dado que el buzón tiene referenceSolution con "$$\int_0^1 x^2\,dx = \frac{1}{3}$$"
-Cuando abro la pantalla del buzón
-Entonces veo la expresión renderizada con KaTeX
+Dado que la actividad tiene referenceSolution con "El área vale $$\int_0^1 x^2\,dx = \frac{1}{3}$$"
+Cuando abro la pantalla de la actividad
+Entonces veo la prosa como texto y la expresión renderizada con KaTeX
 Y puedo alternar entre la vista renderizada y el texto fuente
 ```
 
 ### Escenario 3: LaTeX inválido no rompe la pantalla
 
 ```gherkin
-Dado que el buzón tiene referenceSolution con "$$\frac{1}{$$"
-Cuando abro la pantalla del buzón
+Dado que la actividad tiene referenceSolution con "$$\frac{1}{$$"
+Cuando abro la pantalla de la actividad
 Entonces la expresión mal formada se muestra señalada como no renderizable
 Y el resto de la solución sí se renderiza
 Y el guardado no se bloquea: el texto se conserva tal cual
@@ -60,186 +72,278 @@ Y el guardado no se bloquea: el texto se conserva tal cual
 ### Escenario 4: definir el reparto de puntos
 
 ```gherkin
-Dado que existe el buzón "problema12" con maxScore 10
-Cuando envío PATCH /api/mailboxes/{id} con pointsAllocation:
-  | label | statement                          | maxPoints |
-  | 1     | Integral con cambio de variable    | 2.5       |
-  | 2     | Área entre curvas                  | 2.5       |
-  | 3     | Volumen de revolución              | 2.5       |
-  | 4     | Teorema fundamental del cálculo    | 2.5       |
+Dado que existe la actividad "comentario-texto" con graded true y maxScore 10
+Cuando envío PATCH /api/activities/{id} con pointsAllocation:
+  | label | statement                             | maxPoints |
+  | 1     | Localización y tipo de texto          | 2         |
+  | 2     | Tema y estructura                     | 3         |
+  | 3     | Análisis de los recursos              | 3         |
+  | 4     | Valoración crítica                    | 2         |
 Entonces recibo 200
-Y el buzón devuelve los cuatro apartados en el mismo orden
+Y la Activity devuelve los cuatro apartados en el mismo orden en que los envié
 ```
 
 ### Escenario 5: la suma no cuadra con la nota máxima
 
 ```gherkin
-Dado que el buzón tiene maxScore 10
+Dado que la actividad tiene graded true y maxScore 10
 Cuando envío un pointsAllocation cuya suma de maxPoints es 8
 Entonces recibo 200: la operación NO se rechaza
-Y la pantalla del buzón muestra un aviso visible: "El reparto suma 8 de 10 puntos"
+Y la pantalla de la actividad muestra un aviso visible con la suma y la nota máxima
 ```
 
 ### Escenario 6: apartado sin etiqueta
 
 ```gherkin
-Dado que he iniciado sesión
+Dado que he iniciado sesión como "teacher"
 Cuando envío un pointsAllocation con un apartado cuyo label es ""
-Entonces recibo 400 con error.code = "BAD_REQUEST"
-Y error.fields señala el apartado afectado
+Entonces recibo 422 con error.code = "UNPROCESSABLE"
+Y error.fields señala la posición del apartado afectado
+Y el reparto anterior no cambia
 ```
 
 ### Escenario 7: puntos negativos
 
 ```gherkin
-Dado que he iniciado sesión
+Dado que he iniciado sesión como "teacher"
 Cuando envío un apartado con maxPoints = -1
-Entonces recibo 400 con error.code = "BAD_REQUEST"
+Entonces recibo 422 con error.code = "UNPROCESSABLE"
+Y error.fields señala el apartado afectado
 ```
 
-### Escenario 8: cambiar el reparto no altera las correcciones hechas
+### Escenario 8: dos apartados con la misma etiqueta
 
 ```gherkin
-Dado que el buzón "problema12" tiene entregas ya corregidas con cuatro apartados
+Dado que he iniciado sesión como "teacher"
+Cuando envío un pointsAllocation con dos apartados cuyo label es "1a"
+Entonces recibo 422 con error.code = "UNPROCESSABLE"
+Y error.message explica que las etiquetas de los apartados no pueden repetirse
+```
+
+### Escenario 9: en una actividad no puntuable no hay reparto
+
+```gherkin
+Dado que existe la actividad "foro-dudas" con graded false y maxScore null
+Cuando abro la pantalla de la actividad
+Entonces no veo la sección de reparto de puntos ni el campo de nota máxima
+Y sí veo la sección de solución de referencia
+```
+
+### Escenario 10: la solución de referencia sigue valiendo sin puntuación
+
+```gherkin
+Dado que existe la actividad "foro-dudas" con graded false
+Cuando envío PATCH /api/activities/{id} con referenceSolution "La respuesta correcta es…"
+Entonces recibo 200 y la Activity conserva graded false y maxScore null
+Y al responder una duda de ese foro, esa solución forma parte de lo que se envía al modelo
+Y la respuesta publicada no lleva nota ni desglose por apartados
+```
+
+### Escenario 11: quitar la puntuación vacía el reparto en uso
+
+```gherkin
+Dado que la actividad "practica-lectura" tiene graded true, maxScore 10 y cuatro apartados
+Cuando guardo la actividad con graded false
+Entonces recibo 200 con graded false y maxScore null
+Y las correcciones que se hagan a partir de ahora no llevan apartados: Correction.items va vacío
+  y Correction.maxScore va a null
+Y las correcciones ya hechas conservan sus apartados y su maxScore
+```
+
+### Escenario 12: cambiar el reparto no altera las correcciones hechas
+
+```gherkin
+Dado que la actividad "problema12" tiene entregas ya corregidas con cuatro apartados
 Cuando cambio el pointsAllocation a cinco apartados
-Entonces las correcciones existentes conservan sus cuatro correction_items
-Y sus max_points no cambian
+Entonces las correcciones existentes conservan sus cuatro CorrectionItem
+Y sus maxPoints no cambian
 Y las próximas entregas que se corrijan usarán los cinco apartados
 ```
 
-### Escenario 9: la solución llega al modelo
+### Escenario 13: la solución y el reparto llegan al modelo
 
 ```gherkin
-Dado que el buzón tiene referenceSolution y pointsAllocation definidos
-Cuando se corrige una entrega de ese buzón
-Entonces la solución de referencia y el reparto de puntos forman parte
-        de lo que se envía al modelo
-Y GET /api/contexts/resolved/{id} permite comprobarlo antes de corregir
+Dado que la actividad tiene referenceSolution y pointsAllocation definidos
+Cuando se corrige una entrega de esa actividad
+Entonces la solución de referencia y el reparto forman parte de lo que se envía al modelo
+Y GET /api/contexts/resolved/{activityId} permite comprobar el contexto antes de corregir
+```
+
+### Escenario 14: sin sesión
+
+```gherkin
+Dado que no envío cabecera Authorization
+Cuando envío PATCH /api/activities/{id} con referenceSolution o pointsAllocation
+Entonces recibo 401 con error.code = "UNAUTHORIZED"
+Y nada se guarda
 ```
 
 ## Reglas de negocio
 
-**RN-1.** `referenceSolution` es texto libre (LaTeX o texto plano) y es nullable. Se guarda **tal
-cual se escribe**, sin transformar ni reescapar.
+**RN-1.** `referenceSolution` es **texto libre y nullable**: prosa, LaTeX o una mezcla de las dos.
+Se guarda **tal cual se escribe**, sin transformar ni reescapar. No se presupone materia: el LaTeX
+es una posibilidad, no un requisito.
 
 **RN-2.** `pointsAllocation` es una lista ordenada de `PointsAllocation`: `label` (no vacío),
 `statement` (por defecto cadena vacía) y `maxPoints >= 0`. **El orden del array es el orden de los
 apartados** y se conserva.
 
-**RN-3.** **La suma de `maxPoints` no se fuerza a coincidir con `maxScore`.** Es una decisión
+**RN-3.** Los `label` deben ser **únicos dentro de la actividad**. Dos apartados «1a» hacen
+imposible que el profesor sepa cuál está puntuando.
+
+**RN-4.** **El reparto de puntos sólo aplica a actividades puntuables.** Con `graded = false` no se
+muestra, no se envía al modelo y no genera `CorrectionItem`. Lo que ocurre con un reparto ya
+guardado cuando la actividad deja de puntuarse está en la pregunta abierta 1.
+
+**RN-5.** **La solución de referencia aplica siempre**, se puntúe o no. En una actividad no
+puntuable es la guía de la respuesta correcta: orienta lo que Vega redacta, pero no reparte puntos
+ni produce nota.
+
+**RN-6.** **La suma de `maxPoints` no se fuerza a coincidir con `maxScore`.** Es una decisión
 explícita del modelo de dominio: hay enunciados con apartados opcionales o con puntos de
 presentación fuera del reparto. La UI avisa de la discrepancia; el API no la rechaza.
 
-**RN-4.** Los `label` deben ser **únicos dentro del buzón**. Dos apartados «1a» hacen imposible que
-el profesor sepa cuál está puntuando.
+**RN-7.** Cambiar `pointsAllocation` **no reescribe correcciones ya hechas**. Los `CorrectionItem`
+guardan su propio `label`, `statement` y `maxPoints`, copiados en el momento de corregir. Sólo
+afecta a las correcciones futuras.
 
-**RN-5.** Cambiar `pointsAllocation` **no reescribe correcciones ya hechas**. Los
-`correction_items` guardan su propio `label`, `statement` y `max_points`, copiados en el momento de
-corregir. Sólo afecta a las correcciones futuras.
+**RN-8.** El reparto de puntos y la solución de referencia **son entrada del sistema**, no
+documentación interna: viajan al modelo junto con los tres niveles de contexto
+(`contexts/README.md`).
 
-**RN-6.** El reparto de puntos y la solución de referencia forman parte de lo que se envía al
-modelo, junto con los tres niveles de contexto (`contexts/README.md`). No son documentación
-interna: son entrada del sistema.
+**RN-9.** Una actividad puntuable **sin `pointsAllocation`** se corrige igual, pero la IA decide
+sola el desglose, y ese desglose será distinto entre entregas de la misma actividad. La UI lo
+advierte como configuración incompleta.
 
-**RN-7.** Un buzón **sin `pointsAllocation`** puede corregirse, pero la IA decide sola el desglose,
-y ese desglose será distinto entre entregas del mismo examen. La UI lo advierte como configuración
-incompleta.
+**RN-10.** Una actividad **sin `referenceSolution`** se corrige igual: la IA resuelve la actividad
+por su cuenta. La calidad baja y la UI lo advierte, pero es un caso soportado — hay actividades
+para las que el profesor no tiene la solución escrita.
 
-**RN-8.** Un buzón **sin `referenceSolution`** puede corregirse: la IA resuelve el examen por su
-cuenta. La calidad baja y la UI lo advierte, pero es un caso soportado — hay exámenes para los que
-el profesor no tiene la solución escrita.
+**RN-11.** El reparto **no presupone estructura interna del apartado**. Un apartado es un nombre y
+unos puntos. Cómo se valora por dentro —qué pesa el planteamiento, el desarrollo o el resultado, si
+es que la materia distingue esas cosas— se escribe en Markdown en `contexts/activity-kinds/`, que
+el profesorado edita sin tocar el producto.
 
-**RN-9.** `gradingNotes` es Markdown libre con indicaciones del buzón, editable desde aquí. Su
-relación exacta con el contexto de nivel `mailbox` está por decidir (ver preguntas abiertas).
+**RN-12.** Las indicaciones de corrección de la actividad **no viven en una columna propia**: van
+en el `GradingContext` de nivel `activity`, cuya `key` es el `slug`. La columna `grading_notes`
+desapareció en la migración `0002_activities.sql`.
+
+**RN-13.** Cualquier usuario autenticado (`teacher` o `admin`) puede editar la solución y el
+reparto, con el mismo `PATCH /api/activities/{id}` de HU-04.
 
 ## Casos límite
 
 | Caso | Qué se hace |
 |---|---|
-| Solución de referencia muy larga (un PDF entero pegado) | Se guarda. Encarece cada llamada al modelo, pero el prompt caching lo amortigua dentro del mismo buzón. La UI muestra el tamaño aproximado |
-| Reparto con un solo apartado de valor `maxScore` | Válido. Es el caso de un simulacro de tema que se puntúa en bloque. La corrección tendrá un solo `CorrectionItem` |
-| Reparto vacío en un buzón con entregas ya corregidas | Permitido. Las correcciones hechas no cambian; las futuras las desglosa la IA sola |
-| `maxPoints = 0` en un apartado | Válido (`CHECK (max_points >= 0)`). Es un apartado que se comenta pero no puntúa |
-| La suma del reparto supera `maxScore` | Se guarda con aviso. Una entrega perfecta podría dar más nota que el máximo del examen: se avisa también en la revisión |
-| Solución de referencia en un formato distinto (PDF escaneado) | Fuera de alcance: el campo es texto. Ver pregunta abierta 2 |
+| Solución de referencia muy larga (un documento entero pegado) | Se guarda. Encarece cada llamada al modelo, pero el prompt caching lo amortigua dentro de la misma actividad. La UI muestra el tamaño aproximado |
+| Reparto con un solo apartado de valor `maxScore` | Válido. Es la actividad que se puntúa en bloque. La corrección tendrá un solo `CorrectionItem` |
+| Reparto vacío en una actividad con entregas ya corregidas | Permitido. Las correcciones hechas no cambian; las futuras las desglosa la IA sola (RN-9) |
+| `maxPoints = 0` en un apartado | Válido. Es un apartado que se comenta pero no puntúa |
+| La suma del reparto supera `maxScore` | Se guarda con aviso. Una entrega perfecta podría dar más nota que el máximo: se avisa también en la revisión |
+| Se envía `pointsAllocation` no vacío a una actividad con `graded = false` | Ver pregunta abierta 1: hoy el API lo acepta y lo guarda, y la pantalla envía `[]`. La regla que falta decidir es si se rechaza con 422 o se conserva latente |
 | Se reordenan los apartados sin cambiar los `label` | Las correcciones futuras salen en el orden nuevo. Las hechas conservan su `position` |
-| Dos apartados con el mismo `label` | 400 por RN-4 |
+| Solución de referencia en un formato distinto (PDF escaneado, foto de la pizarra) | El campo es texto. Se puede subir como fichero de contexto (`activity_files`, HU-06), pero hoy ese contenido no llega al modelo. Ver pregunta abierta 2 |
+| Actividad no puntuable con solución de referencia y sin contexto propio | Válido y útil: es el caso normal de un foro de dudas bien preparado |
 
 ## Fuera de alcance
 
-- **Adjuntar la solución como PDF.** `referenceSolution` es texto. Ver pregunta abierta 2.
-- **Editor visual de fórmulas.** El profesor escribe LaTeX. Se le da vista previa, no un editor
-  WYSIWYG.
-- **Rúbrica estructurada por apartado** (qué vale el planteamiento, qué el desarrollo). Eso vive en
-  Markdown, en el contexto del buzón: ver `contexts/task-types/` y HU-06.
-- **Reescribir correcciones existentes al cambiar el reparto.** RN-5. Si se quiere, se reprocesa
+- **Configurar `graded`, `maxScore`, `enabled` y `autonomy`.** Es HU-04, aunque se guarden con el
+  mismo `PATCH`.
+- **Adjuntar la solución como fichero y que el modelo la lea.** `referenceSolution` es texto. La
+  subida de ficheros de contexto existe (`activity_files`) pero su contenido no se almacena ni se
+  envía al modelo. Ver pregunta abierta 2 y HU-06.
+- **Editor visual de fórmulas.** El profesor escribe LaTeX si su materia lo pide. Se le da vista
+  previa, no un editor WYSIWYG.
+- **Rúbrica estructurada dentro de un apartado.** RN-11: eso vive en Markdown, en
+  `contexts/activity-kinds/`, y se edita desde HU-06.
+- **Reescribir correcciones existentes al cambiar el reparto.** RN-7. Si se quiere, se reprocesa
   (HU-11).
-- **Importar el reparto de puntos desde el LMS.** La interfaz de conector no lo contempla.
+- **Importar el reparto de puntos desde Moodle.** La interfaz `LmsConnector` no lo contempla y no
+  se plantea ampliarla por esto.
 - **Historial de versiones de la solución.** No hay columna ni tabla.
+- **Plantillas de reparto reutilizables entre actividades.** Ver pregunta abierta 4.
 
 ## Notas de implementación
 
-**Entidades** (`@vega/shared`): `Mailbox.referenceSolution`, `Mailbox.pointsAllocation`,
-`Mailbox.gradingNotes`, `PointsAllocation` (`label`, `statement`, `maxPoints`).
+**Entidades** (`@vega/shared`): `Activity.referenceSolution`, `Activity.pointsAllocation`,
+`PointsAllocation` (`label`, `statement`, `maxPoints`), `Correction.items`, `Correction.maxScore`,
+`CorrectionItem`.
 
-**Contrato**: `UpdateMailboxRequest` con `referenceSolution`, `gradingNotes` y `pointsAllocation`.
+**Contrato** (`packages/shared/src/api.ts`): `UpdateActivityRequest` con `referenceSolution`
+(`z.string().nullable().optional()`) y `pointsAllocation` (`z.array(PointsAllocation).optional()`).
 Es el mismo endpoint de HU-04.
 
-**Endpoints** (`routes`): `mailbox(id)` → `PATCH /api/mailboxes/{id}`.
+**Endpoints** (`routes`): `activity(id)` → `PATCH /api/activities/{id}`.
 
-**Esquema**: `mailboxes.reference_solution text`, `mailboxes.grading_notes text`,
-`mailboxes.points_allocation jsonb NOT NULL DEFAULT '[]'`.
+**Códigos de error**: las validaciones de cuerpo salen por `parseOrThrow`, que devuelve **422
+`UNPROCESSABLE`** con `error.fields`, no 400.
+
+**Esquema** (`0002_activities.sql` sobre `0001_init.sql`): `activities.reference_solution text`,
+`activities.points_allocation jsonb NOT NULL DEFAULT '[]'`. La columna `activities.grading_notes`
+**ya no existe** (RN-12).
 
 **Relación con la corrección**: `CorrectionItem` copia `label`, `statement` y `maxPoints` del
-reparto en el momento de corregir. Esa copia es lo que hace que RN-5 se cumpla sin esfuerzo.
+reparto en el momento de corregir. Esa copia es lo que hace que RN-7 se cumpla sin esfuerzo.
+`corrections.max_score` es nullable desde la 0002, que es lo que permite RN-4 y el escenario 11.
 
-**RN-4 no está en el esquema**: la unicidad de `label` dentro del `jsonb` no la puede expresar un
-`CHECK` razonable. Se valida en el API con un refinamiento Zod sobre `UpdateMailboxRequest`.
+**UI**: dentro de `apps/frontend/src/pages/ActivityDetailPage.tsx`. La solución de referencia usa
+`PreviewEditor` en modo `latex`, con vista previa conmutable. El reparto usa
+`PointsAllocationEditor`, que recibe `maxScore` para poder mostrar la suma acumulada. Ambas
+secciones se pintan condicionadas a `form.graded`, salvo la solución de referencia, que se muestra
+siempre (RN-5). Al guardar con `graded = false`, el formulario envía `pointsAllocation: []`.
 
-**UI**: dentro del detalle del buzón. La solución de referencia con área de texto y vista previa
-KaTeX conmutable (mismo componente que el editor de contextos de HU-06). El reparto de puntos como
-lista editable: añadir, reordenar por arrastre, eliminar, con la suma acumulada visible en todo
-momento junto a `maxScore`. En móvil, la suma va fija en la parte inferior.
+**Lo que hoy NO está implementado y esta HU exige**:
 
-**Mock**: completa. El conector `mock` siembra los tres buzones con reparto y solución realistas,
-coherentes con `contexts/mailboxes/`. Al menos uno de ellos siembra deliberadamente una suma que
-**no** cuadra con `maxScore`, para que el aviso de RN-3 se vea desde el primer día.
+- **RN-3 (etiquetas únicas, escenario 8)**: no hay refinamiento en `PointsAllocation` ni en
+  `UpdateActivityRequest`, y la unicidad dentro de un `jsonb` no la expresa un `CHECK` razonable.
+  Hay que añadir un `.superRefine()` en el contrato.
+- **RN-4 en el API (caso límite del reparto en actividad no puntuable)**: el `PATCH` guarda
+  `pointsAllocation` sin mirar `graded`. Sólo la UI lo evita. Ver pregunta abierta 1.
+
+**Mock**: completa. Los datos sembrados incluyen actividades con reparto y solución realistas y al
+menos una **no puntuable con solución de referencia**, para que el caso del foro se vea desde el
+primer día, y al menos una cuya suma **no** cuadra con `maxScore`, para que el aviso de RN-6 sea
+visible sin fabricarlo.
 
 ## Preguntas abiertas
 
-1. **¿Qué se hace cuando la IA no encuentra en el examen un apartado del reparto?** Un alumno deja
-   el apartado 3 en blanco. Opciones: (a) `CorrectionItem` con `aiPoints = 0` y feedback explicando
-   que no aparece —lo que hace `contexts/global.md` §1.2—; (b) no generar el item, dejando la
-   corrección con menos apartados de los esperados. La (a) es coherente con el contexto global, pero
-   conviene que quede escrito como regla del sistema y no sólo como instrucción al modelo.
-   **`[bloqueante]` para HU-12.**
+1. **¿Qué se hace con un `pointsAllocation` que llega a una actividad no puntuable?** Hoy el API lo
+   guarda y sólo la UI lo evita enviando `[]`, así que el estado de la base de datos depende de por
+   dónde entren los datos. Opciones: (a) rechazar con 422 si `graded` es `false` y el reparto no
+   está vacío, coherente con RN-4 pero incómodo al alternar el conmutador; (b) aceptarlo y
+   conservarlo latente, de modo que volver a puntuar recupere el reparto —es lo que describe el
+   caso límite de HU-04—; (c) aceptarlo y vaciarlo en el servidor, como se hace con `maxScore`
+   (HU-04, RN-5), lo que es consistente pero destruye trabajo del profesor sin avisar. Consecuencia:
+   sin decidirlo, dos clientes distintos dejan la misma actividad en estados distintos.
+   **`[bloqueante]`: es una invariante del dominio a medio escribir.**
 
-2. **¿Debe poder adjuntarse la solución como PDF?** El README menciona «solución de referencia en
-   PDF o LaTeX», pero `Mailbox.referenceSolution` es `string`. Muchos profesores tienen la solución
-   escrita a mano o en un PDF, no en LaTeX. Opciones: (a) sólo texto, y que el profesor transcriba
-   —es trabajo real, una tarde por examen—; (b) subir el PDF y **transcribirlo con el mismo motor
-   de OCR** que las entregas, guardando el LaTeX resultante en `referenceSolution`; (c) subir el
-   PDF y enviarlo como imagen al modelo en cada corrección, lo que exige almacenamiento y cambia el
-   contrato. La (b) es elegante y reutiliza HU-10. **`[bloqueante]`: hay una discrepancia entre el
-   README y el contrato.**
+2. **¿Puede la solución de referencia entrar como fichero?** Muchos profesores la tienen escaneada
+   o en PDF, no escrita. `activity_files` ya existe y la pantalla ya deja subir ficheros, pero el
+   almacenamiento es un marcador: no se guarda el contenido ni llega al modelo. Opciones: (a) sólo
+   texto, y que el profesor transcriba —es trabajo real, una tarde por actividad—; (b) subir el
+   fichero y **transcribirlo con el mismo motor de OCR** que las entregas (HU-10), guardando el
+   resultado en `referenceSolution`; (c) almacenar el fichero y enviarlo como imagen al modelo en
+   cada corrección, lo que exige almacenamiento real y encarece cada llamada. Consecuencia: (b)
+   reutiliza HU-10 y no cambia el contrato; (c) sí lo cambia. **`[bloqueante]`: hoy la UI ofrece
+   subir ficheros que no sirven para nada.**
 
-3. **¿Debe avisarse cuando la suma del reparto no cuadra, o bloquearse?** RN-3 dice avisar. Pero un
-   buzón mal configurado produce notas mal escaladas para todos sus alumnos, y el aviso se ignora.
-   ¿Debería bloquearse la **validación** de la primera entrega del buzón hasta que el profesor
-   confirme que la discrepancia es intencionada? Sería un freno en el sitio donde importa.
+3. **¿Debe avisarse cuando la suma del reparto no cuadra, o bloquearse?** RN-6 dice avisar. Pero una
+   actividad mal configurada produce notas mal escaladas para todos sus alumnos, y el aviso se
+   ignora. Opciones: (a) avisar y ya; (b) bloquear la **validación** de la primera entrega hasta que
+   el profesor confirme que la discrepancia es intencionada, que es un freno en el sitio donde
+   importa; (c) exigir que cuadre, incompatible con los apartados opcionales que motivaron RN-6.
 
-4. **¿Cómo se reparten los puntos dentro de un apartado?** `contexts/task-types/simulacro_problema.md`
-   propone 30/50/20 para planteamiento, desarrollo y resultado. Hoy eso vive en Markdown, no en
-   datos. ¿Basta? ¿O hace falta que el profesor pueda fijar ese reparto por apartado, lo que
-   significaría estructurar la rúbrica y ampliar `PointsAllocation`?
+4. **¿Debe poder reutilizarse un reparto entre actividades?** Los apartados de un comentario de
+   texto se repiten en todos los comentarios de texto del curso. Copiar y pegar funciona pero se
+   desincroniza. Opciones: (a) plantillas de reparto como entidad nueva; (b) copiar el reparto de
+   otra actividad al configurarla, sin vínculo posterior; (c) nada, y que el reparto viva en el
+   contexto del tipo de actividad como texto. Consecuencia: (a) es una tabla y una pantalla más para
+   un problema que quizá resuelva (b).
 
-5. **¿Qué relación hay entre `gradingNotes` y el contexto de nivel `mailbox`?** Los dos son Markdown
-   con indicaciones del mismo buzón, y hoy no hay frontera. Opciones: (a) `gradingNotes` es el
-   apunte rápido desde el móvil y el contexto es el documento serio versionado; (b) se elimina
-   `gradingNotes` y todo va al contexto; (c) `gradingNotes` desaparece de la UI y queda como campo
-   heredado. Mantener los dos sin criterio garantiza que la información acabe partida por la mitad.
-   Ver también HU-04 y HU-06.
-
-6. **¿Debe poder reutilizarse un reparto de puntos entre buzones?** Los cuatro apartados de
-   `problema12` se repiten en `problema13` y `problema14`. Copiar y pegar funciona pero se
-   desincroniza. ¿Merece la pena una plantilla de reparto, o es complejidad prematura?
+5. **¿Qué hace la IA cuando no encuentra en la entrega un apartado del reparto?** El alumno deja el
+   apartado 3 en blanco. Opciones: (a) generar el `CorrectionItem` con `aiPoints = 0` y feedback
+   explicando que no aparece, que es lo que hoy instruye `contexts/global.md`; (b) no generar el
+   ítem, dejando la corrección con menos apartados de los esperados y una nota que no se puede
+   comparar entre alumnos. La (a) es coherente con el contexto global, pero conviene que quede
+   escrito como regla del sistema y no sólo como instrucción al modelo. **`[bloqueante]` para
+   HU-12.**

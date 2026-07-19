@@ -1,7 +1,17 @@
 # Modelo de datos
 
-Derivado de `apps/api/migrations/0001_init.sql` y de `packages/shared/src/domain.ts`. El SQL manda:
-si algo aquí no cuadra con la migración, el error está en este documento.
+Derivado de `apps/api/migrations/0001_init.sql`, de `apps/api/migrations/0002_activities.sql` y de
+`packages/shared/src/domain.ts`. El SQL manda: si algo aquí no cuadra con las migraciones, el error
+está en este documento.
+
+`0002_activities.sql` cambió el eje del modelo. Los antiguos «buzones» son ahora **actividades de
+Moodle** de dos tipos —entrega (`assignment`) y foro (`forum`)—, la nota pasó a ser opcional y cada
+actividad lleva su grado de autonomía. `mailboxes` y `task_type` no existen: la migración renombra
+en lugar de recrear, de modo que el despliegue aplica el cambio sobre una base ya poblada sin pasos
+manuales.
+
+Las migraciones se aplican al arrancar el contenedor del API y quedan registradas con su suma de
+comprobación en `_vega_migrations`, tabla de fontanería que no forma parte del dominio.
 
 ## Diagrama entidad-relación
 
@@ -9,10 +19,13 @@ si algo aquí no cuadra con la migración, el error está en este documento.
 erDiagram
   users ||--o{ corrections : "valida"
   users ||--o{ grading_contexts : "edita"
-  mailboxes ||--o{ submissions : "agrupa"
-  submissions ||--o| transcriptions : "tiene"
+  users ||--o{ batch_runs : "lanza"
+  users ||--o{ app_settings : "edita"
+  activities ||--o{ submissions : "agrupa"
+  activities ||--o{ activity_files : "adjunta"
+  submissions ||--o| transcriptions : "tiene (sólo assignment)"
   submissions ||--o| corrections : "tiene"
-  corrections ||--o{ correction_items : "desglosa en"
+  corrections ||--o{ correction_items : "desglosa en (sólo si graded)"
 
   users {
     uuid id PK
@@ -25,29 +38,41 @@ erDiagram
     timestamptz last_login_at "nullable"
   }
 
-  mailboxes {
+  activities {
     uuid id PK
-    text slug UK "tema04, problema12"
+    text slug UK "tema04, forum-dudas-analisis"
     text name
-    text task_type "simulacro_problema | simulacro_tema"
-    numeric max_score "> 0"
+    text kind "assignment | forum"
+    text course_name "texto libre · default cadena vacía"
+    text moodle_ref "nullable · id en Moodle"
+    boolean enabled "default true · si no, el lote la ignora"
+    boolean graded "default true"
+    numeric max_score "nullable · NULL si no se puntúa"
     text reference_solution "nullable · LaTeX o texto"
-    text grading_notes "nullable · Markdown"
     jsonb points_allocation "PointsAllocation[]"
-    text connector "default mock"
-    text lms_ref "nullable"
-    boolean active "default true"
+    text autonomy "review_all | review_low_confidence | autonomous"
     timestamptz created_at
+  }
+
+  activity_files {
+    uuid id PK
+    uuid activity_id FK
+    text filename
+    text mime_type "default application/octet-stream"
+    integer size_bytes ">= 0"
+    text storage_path "nullable · hoy siempre NULL"
+    timestamptz uploaded_at
   }
 
   submissions {
     uuid id PK
-    uuid mailbox_id FK
+    uuid activity_id FK
     text student_ref "id interno, nunca el nombre"
     text student_alias "nullable · sólo para el profesor"
     text status "SubmissionStatus"
-    text original_filename
-    integer page_count
+    text original_filename "nullable · NULL en foros"
+    integer page_count "0 en foros"
+    text text_content "nullable · el texto del foro"
     text error_message "nullable"
     timestamptz submitted_at
     timestamptz updated_at
@@ -66,7 +91,9 @@ erDiagram
   corrections {
     uuid id PK
     uuid submission_id FK,UK "1:1"
-    numeric max_score "> 0"
+    numeric max_score "nullable · NULL si no se puntúa"
+    text ai_latex "la corrección redactada"
+    text teacher_latex "nullable · la versión del profesor"
     text ai_summary
     text teacher_summary "nullable"
     numeric confidence "0..1"
@@ -75,6 +102,8 @@ erDiagram
     integer output_tokens
     integer cached_input_tokens
     numeric cost_cents
+    text annotated_file_url "nullable · NULL en foros"
+    boolean published_automatically "default false"
     uuid validated_by FK "nullable"
     timestamptz validated_at "nullable"
     timestamptz published_at "nullable"
@@ -101,8 +130,10 @@ erDiagram
     timestamptz started_at
     timestamptz finished_at "nullable"
     text status "running | done | failed"
+    uuid triggered_by FK "nullable · NULL si fue el planificador"
     integer submissions_processed
     integer submissions_failed
+    integer submissions_auto_published
     integer input_tokens
     integer output_tokens
     integer cached_input_tokens
@@ -111,136 +142,194 @@ erDiagram
 
   grading_contexts {
     uuid id PK
-    text level "global | task_type | mailbox"
-    text key "global | TaskType | slug del buzón"
+    text level "global | activity_kind | activity"
+    text key "global | ActivityKind | slug de la actividad"
     text content "Markdown"
     timestamptz updated_at
     uuid updated_by FK "nullable"
     string _uk "UNIQUE (level, key)"
   }
+
+  app_settings {
+    text key PK "anthropic.gradingModel, schedule.everyMinutes…"
+    text value
+    boolean is_secret "la API nunca devuelve el valor"
+    timestamptz updated_at
+    uuid updated_by FK "nullable"
+  }
 ```
 
-`batch_runs` y `grading_contexts` aparecen sin aristas porque no tienen clave foránea hacia el
-resto del grafo. La relación existe, pero es lógica, no referencial:
+`grading_contexts` aparece sin arista hacia `activities` porque la relación es lógica, no
+referencial:
 
-- `grading_contexts.key` apunta al `TaskType` o al `mailboxes.slug` según el nivel. **No hay FK a
-  propósito**: un contexto de buzón puede existir antes de que el buzón se cree (por ejemplo, el
-  que viene del repositorio en `contexts/mailboxes/`), y borrar un buzón no debe llevarse por
-  delante unas instrucciones que costaron escribir.
+- `grading_contexts.key` apunta al `ActivityKind` o al `activities.slug` según el nivel. **No hay FK
+  a propósito**: un contexto de actividad puede existir antes de que la actividad se cree (por
+  ejemplo, el que viene del repositorio en `contexts/activities/`), y borrar una actividad no debe
+  llevarse por delante unas instrucciones que costaron escribir.
 - `batch_runs` agrega el consumo de una ejecución; qué entregas procesó se deduce por ventana
-  temporal. Si esa trazabilidad hace falta, requiere una columna `batch_run_id` en `submissions`
-  y una migración nueva — está en las preguntas abiertas de `HU-09`.
+  temporal. Si esa trazabilidad hace falta, requiere una columna `batch_run_id` en `submissions` y
+  una migración nueva — está en las preguntas abiertas de `HU-09`.
 
 ## Cardinalidades y restricciones que importan
 
 | Regla | Dónde vive | Consecuencia |
 |---|---|---|
+| Una actividad puntuable **necesita** nota máxima | `CHECK activities_graded_needs_max_score` | No hay actividades a medio configurar. La API valida lo mismo antes, para devolver un 422 explicable en vez de un error de Postgres en crudo. |
+| La nota máxima, si existe, es positiva | `CHECK activities_max_score_check` | `max_score IS NULL OR max_score > 0`. En `corrections`, igual. |
+| Sólo dos tipos de actividad y tres autonomías | `CHECK activities_kind_check`, `activities_autonomy_check` | Añadir un tipo o un modo es una migración, no un despliegue. |
 | Una entrega tiene **como mucho una** transcripción | `transcriptions.submission_id UNIQUE` | Reprocesar sustituye, no acumula. No hay historial de transcripciones. |
-| Una entrega tiene **como mucho una** corrección | `corrections.submission_id UNIQUE` | Idem: no hay historial de correcciones. |
-| No se importa dos veces la misma entrega | `UNIQUE (mailbox_id, student_ref, original_filename)` | La ingesta es idempotente y se puede relanzar sin miedo. Si el alumno re-sube el examen con **otro** nombre de fichero, entra como entrega nueva. |
-| Borrar un buzón borra sus entregas | `ON DELETE CASCADE` | Y en cascada, sus transcripciones y correcciones. Operación destructiva. |
-| Borrar un usuario no borra lo que validó | `validated_by ... ON DELETE SET NULL` | Se pierde el quién, no el qué. Por eso los usuarios se **desactivan** (`active = false`) en lugar de borrarse. |
+| Una entrega tiene **como mucho una** corrección | `corrections.submission_id UNIQUE` | Ídem: no hay historial de correcciones. El lote borra la anterior antes de insertar. |
+| No se importa dos veces la misma entrega | `UNIQUE (activity_id, student_ref, original_filename)` | La ingesta es idempotente **en actividades con fichero**. Ver el aviso de abajo. |
+| Borrar una actividad borra sus entregas y sus ficheros | `ON DELETE CASCADE` | Y en cascada, transcripciones y correcciones. Operación destructiva. |
+| Borrar un usuario no borra lo que validó, lanzó o configuró | `validated_by`, `triggered_by`, `updated_by` … `ON DELETE SET NULL` | Se pierde el quién, no el qué. Por eso los usuarios se **desactivan** (`active = false`) en lugar de borrarse. |
 | Los puntos nunca son negativos | `CHECK (ai_points >= 0)`, `CHECK (teacher_points >= 0)` | No existe la penalización con puntos negativos a nivel de apartado. |
 | Las confianzas están en `[0, 1]` | `CHECK (confidence BETWEEN 0 AND 1)` | En transcripción, corrección y apartado. |
 | El coste se guarda en céntimos | `cost_cents numeric(10,4)` | Nada de flotantes para dinero. `UsageMetrics.costCents`. |
 
+> **La clave natural no protege los foros.** `original_filename` dejó de ser `NOT NULL` en la
+> migración `0002`, y en PostgreSQL dos `NULL` no colisionan en un índice único (`NULLS DISTINCT` es
+> el comportamiento por defecto). Como en un foro esa columna siempre es `NULL`, ese índice único
+> **no deduplica nada** ahí: reingerir el mismo foro crea entregas nuevas
+> del mismo alumno. Resolverlo requiere una migración —`NULLS NOT DISTINCT`, o un índice parcial por
+> tipo de actividad, o llevar la clave natural al `remoteId` del conector— y es una decisión
+> pendiente.
+
 ### Lo que el esquema *no* impone
 
 - **`SUM(points_allocation.maxPoints)` no tiene por qué ser `max_score`.** Es deliberado
-  (`domain.ts` lo dice explícitamente): hay enunciados con apartados opcionales. La UI avisa de la
-  discrepancia; no la bloquea.
+  (`domain.ts` lo dice explícitamente): hay enunciados con apartados opcionales. El motor emite un
+  aviso `allocation_mismatch`; no lo bloquea.
 - **`SUM(correction_items.max_points)` tampoco.** Y por tanto la nota total efectiva puede superar
-  `max_score` si el profesor sube puntuaciones sin criterio. Es responsabilidad de la UI avisar.
+  `max_score` si el profesor sube puntuaciones sin criterio. La API sí impide que un apartado
+  concreto pase de su propio `max_points`.
+- **Nada obliga a que una actividad no puntuable tenga la corrección sin apartados.** Que `items`
+  venga vacío cuando `graded = false` lo garantiza el motor y lo defiende la API (un `PATCH` con
+  puntos sobre una actividad no puntuable devuelve 422), pero no hay `CHECK` que lo imponga.
+- **Nada relaciona `submissions.text_content` con el tipo de actividad.** Que un `assignment` traiga
+  fichero y un `forum` traiga texto es responsabilidad del conector y del lote, no del esquema.
 - **No hay transiciones de estado en la base de datos.** El `CHECK` de `submissions.status` sólo
   valida el conjunto de valores, no el orden. La máquina de estados se hace cumplir en `apps/api`.
 
 ## Ciclo de vida de una entrega
 
+El camino depende del tipo de actividad, y eso lo decide `hasStudentFile(kind)`: **sólo un
+`assignment` pasa por transcripción**. Un foro va de `pending` directo a `grading`.
+
 ```mermaid
 stateDiagram-v2
   [*] --> pending : ingesta — descargada del conector
 
-  pending --> transcribing : arranca el OCR (lote o reproceso)
-  transcribing --> transcribed : OCR terminado, hay Transcription
+  pending --> transcribing : assignment — hay fichero que transcribir
+  pending --> grading : forum — no hay nada que transcribir
+
+  transcribing --> graded : corrección lista — espera al profesor
+  transcribing --> published : la autonomía publica sin revisión
   transcribing --> error : fallo de visión, PDF corrupto, timeout
 
-  transcribed --> grading : arranca la corrección
-  grading --> graded : hay Correction con items — espera al profesor
-  grading --> error : fallo del modelo, respuesta no parseable
+  grading --> graded : corrección lista — espera al profesor
+  grading --> published : la autonomía publica sin revisión
+  grading --> error : texto vacío, fallo del modelo, respuesta no parseable
 
   graded --> graded : el profesor guarda cambios (PATCH correction)
   graded --> validated : el profesor valida
-  graded --> transcribing : reproceso desde el OCR
-  graded --> grading : reproceso sólo de la corrección
+  graded --> pending : reproceso — el siguiente lote la recoge
 
   validated --> published : publicación en el LMS correcta
-  validated --> error : el LMS rechaza la publicación
-  validated --> graded : el profesor reabre para seguir editando
+  validated --> pending : reproceso
 
-  error --> transcribing : reproceso
-  error --> grading : reproceso
-  error --> pending : reintento desde cero
+  error --> pending : reproceso
 
   published --> [*]
 ```
+
+`transcribing` y `grading` son **el mismo paso visto desde fuera**: el lote los escribe al empezar a
+procesar una entrega y no vuelve a tocar el estado hasta tener la corrección guardada. Por eso no
+hay arista de `transcribing` a `grading`.
+
+> **Un estado que ninguna ejecución real alcanza.** `transcribed` figura en `SubmissionStatus`, en el
+> `CHECK` de la tabla, en `SUBMISSION_STATUS_LABEL` y en los recuentos de la cola, pero el lote nunca
+> lo escribe: encadena transcripción y corrección dentro de la misma operación y salta de
+> `transcribing` a `graded`. Sólo aparece porque el seed de demostración lo siembra para que la cola
+> tenga ejemplos de todos los estados. Y `grading` es real, pero únicamente en el camino del foro.
+> Ambos son restos de un circuito por pasos separados; mientras el lote sea una sola función, la
+> entrega con fichero no los necesita.
 
 ### Qué dispara cada transición
 
 | Origen | Destino | Disparador | Efecto en datos |
 |---|---|---|---|
-| — | `pending` | `LMSConnector.download()` completado durante la ingesta | `INSERT submissions`, se guarda el escaneo y `page_count` |
-| `pending` | `transcribing` | El lote toma la entrega, o `POST /api/submissions/{id}/reprocess` | `status`, `updated_at` |
-| `transcribing` | `transcribed` | `core.transcribe()` devuelve una `Transcription` válida | `INSERT`/`UPDATE transcriptions` |
-| `transcribed` | `grading` | El lote encadena la corrección | `status` |
-| `grading` | `graded` | `core.grade()` devuelve una `Correction` con al menos un item | `INSERT corrections` + `correction_items`, `usage` |
-| `graded` | `graded` | `PATCH /api/submissions/{id}/correction` | `teacher_points`, `teacher_feedback`, `teacher_summary`. **No** toca `validated_*` |
+| — | `pending` | Ingesta desde el conector | `INSERT submissions`; fichero y `page_count` en un `assignment`, `text_content` en un `forum` |
+| `pending` | `transcribing` | El lote toma una entrega de actividad `assignment` | `status`, `updated_at` |
+| `pending` | `grading` | El lote toma una entrega de actividad `forum` | `status`, `updated_at` |
+| `transcribing` / `grading` | `graded` | `gradeSubmission()` termina y la autonomía decide `review` | `INSERT corrections` (+ `correction_items` si se puntúa), `INSERT transcriptions` si hubo fichero, `usage` |
+| `transcribing` / `grading` | `published` | Ídem, pero la autonomía decide `publish` | Lo anterior más `published_at` y `published_automatically = true`. **Sin `validated_at`** |
+| `graded` | `graded` | `PATCH /api/submissions/{id}/correction` | `teacher_points`, `teacher_feedback`, `teacher_summary`, `teacher_latex`. **No** toca `validated_*` |
 | `graded` | `validated` | `POST /api/submissions/{id}/validate` | Guarda los cambios pendientes + `validated_by`, `validated_at` |
-| `validated` | `published` | `POST /api/submissions/{id}/publish` con éxito en el conector | `published_at` |
-| `validated` | `graded` | Reapertura por el profesor | Limpia `validated_by` y `validated_at` |
+| `validated` | `published` | `POST /api/submissions/{id}/publish` con éxito en el conector | `published_at`, `published_automatically = false` |
 | cualquiera | `error` | Excepción no recuperable en el paso en curso | `error_message` con texto legible en español |
-| `error` | `transcribing` / `grading` / `pending` | `POST /api/submissions/{id}/reprocess` | Limpia `error_message` |
+| cualquiera salvo `published` | `pending` | `POST /api/submissions/{id}/reprocess` | Limpia `error_message`. El siguiente lote la recoge y **sustituye** transcripción y corrección |
 
 ### Invariantes de estado
 
-1. `status = 'graded'` implica que existe fila en `corrections` con al menos un `correction_item`.
+1. `status = 'graded'` implica que existe fila en `corrections`. Con al menos un `correction_item`
+   **sólo si la actividad se puntúa**: en una no puntuable la corrección es únicamente `ai_latex`.
 2. `status = 'validated'` implica `corrections.validated_at IS NOT NULL` y `validated_by IS NOT NULL`.
-3. `status = 'published'` implica `published_at IS NOT NULL` **y** `validated_at IS NOT NULL`.
-   Nunca se publica sin validar: no existe arista `graded -> published`.
+3. `status = 'published'` implica `published_at IS NOT NULL`. **No implica `validated_at`**: una
+   publicación autónoma se salta la validación y se distingue por
+   `published_automatically = true`. Por la ruta manual (`POST .../publish`) la validación previa
+   sigue siendo obligatoria y se comprueba en el API.
 4. `status = 'error'` implica `error_message IS NOT NULL`.
-5. `published` es terminal. Republicar exige reabrir explícitamente, y eso no está resuelto —
-   ver preguntas abiertas de `HU-17`.
+5. `published` es terminal. No se puede editar la corrección, ni validar, ni reprocesar; las tres
+   rutas devuelven 409. Republicar exige reabrir explícitamente, y eso no está resuelto — ver
+   preguntas abiertas de `HU-17`.
 6. `REVIEWABLE_STATUSES = ['graded', 'validated', 'error']` es lo que la cola muestra por defecto.
    `pending`, `transcribing`, `transcribed` y `grading` son estados de máquina: se ven filtrando
    explícitamente, no en la bandeja de trabajo del profesor.
+7. `transcriptions` sólo tiene filas de entregas de actividades `assignment`. En un foro,
+   `SubmissionDetail.transcription` y `scanUrls` vienen vacíos por contrato.
 
 ## Correspondencia SQL ↔ TypeScript
 
-El SQL usa `snake_case`; el contrato HTTP, `camelCase`. La capa de acceso a datos traduce.
+El SQL usa `snake_case`; el contrato HTTP, `camelCase`. La capa de acceso a datos traduce
+(`apps/api/src/db/mappers.ts`).
 
 | Tabla | Tipo de `@vega/shared` | Observaciones |
 |---|---|---|
 | `users` | `User` | `password_hash` **nunca** sale por la API |
-| `mailboxes` | `Mailbox` | `points_allocation` (jsonb) ↔ `PointsAllocation[]` |
+| `activities` | `Activity` | `points_allocation` (jsonb) ↔ `PointsAllocation[]`; los ficheros adjuntos se cargan aparte y se sirven en `files` |
+| `activity_files` | `ActivityFile` | `storage_path` no se expone; en su lugar la API calcula `url` |
 | `submissions` | `Submission` | 1:1 en columnas |
 | `transcriptions` | `Transcription` | `pages` y `flags` son jsonb ↔ `TranscriptionPage[]` / `TranscriptionFlag[]` |
-| `corrections` | `Correction` | Las cuatro columnas de consumo se agrupan en `usage: UsageMetrics` |
+| `corrections` | `Correction` | Las cuatro columnas de consumo se agrupan en `usage: UsageMetrics`; los apartados llegan en `items` |
 | `correction_items` | `CorrectionItem` | Se sirven ordenados por `position` |
 | `grading_contexts` | `GradingContext` | |
 | `batch_runs` | `BatchRun` | Mismo agrupamiento de `usage` |
+| `app_settings` | `AppSettings` | **No es 1:1**: la tabla es clave/valor plana y el DTO va anidado (`anthropic.apiKey` ↔ `{ anthropic: { … } }`). Los valores con `is_secret` se sustituyen por un booleano `…Configured` |
 
 Las fechas se guardan como `timestamptz` y viajan como ISO 8601 con offset (`IsoDate`). Los
-`numeric` se serializan como `number`; los importes en céntimos con hasta cuatro decimales.
+`numeric` se serializan como `number` —el driver los entrega como cadena para no perder precisión y
+el mapeador los convierte una sola vez—; los importes en céntimos con hasta cuatro decimales.
 
 ## Cálculos derivados
 
 No se persisten: se calculan a partir de los items, siempre con las funciones de `domain.ts`.
 
 ```ts
-effectivePoints(item) = item.teacherPoints ?? item.aiPoints
-effectiveSource(item) = item.teacherPoints === null ? 'ai' : 'teacher'
-totalScore(items)     = redondeo a 2 decimales de la suma de effectivePoints
+effectivePoints(item)  = item.teacherPoints ?? item.aiPoints
+effectiveSource(item)  = item.teacherPoints === null ? 'ai' : 'teacher'
+totalScore(items)      = redondeo a 2 decimales de la suma de effectivePoints
+effectiveLatex(corr)   = corr.teacherLatex ?? corr.aiLatex
 ```
 
-Y la desviación que alimenta el panel (`OverviewResponse.avgTeacherDeviation`), sobre correcciones
-ya validadas: media de `SUM(effectivePoints) - SUM(aiPoints)`. Positiva significa que el profesor
-sube la nota respecto a la IA.
+En una actividad no puntuable `items` está vacío, así que `totalScore` da 0 y **no significa un
+cero**: significa que no hay nota. La cola lo respeta y devuelve `score: null` cuando
+`activities.graded` es `false`, aunque la agregación SQL sume cero apartados.
+
+Las dos métricas del panel (`OverviewResponse`), ambas sobre correcciones ya validadas:
+
+- `avgTeacherDeviation` — media de `SUM(effectivePoints) - SUM(aiPoints)` por corrección. Positiva
+  significa que el profesor sube la nota respecto a la IA.
+- `untouchedRatio` — proporción de correcciones validadas que el profesor no tocó en absoluto: ni
+  puntos, ni feedback de apartado, ni resumen, ni LaTeX. Es la señal de que una actividad se puede
+  pasar a un modo con más autonomía. Sin correcciones validadas vale 0, que aquí significa «aún no
+  sabemos».
