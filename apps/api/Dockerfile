@@ -47,14 +47,12 @@ FROM deps AS build
 COPY . .
 # `@vega/api...` = el paquete y todas sus dependencias de workspace
 # (@vega/shared, @vega/core, connectors/*…), en orden topológico.
+# apps/api/tsup.config.ts empaqueta DOS entradas —el servidor y el migrador— y
+# mete el código de los paquetes @vega/* dentro del bundle (`noExternal`). Eso
+# último no es cosmético: esos paquetes publican TypeScript en crudo, así que
+# dejarlos como externos hacía que Node 22 tumbara el arranque al importar un
+# .ts desde node_modules (ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING).
 RUN pnpm --filter "@vega/api..." build
-
-# El script `build` del API sólo empaqueta src/index.ts, así que el migrador se
-# queda fuera de dist/ (en desarrollo se ejecuta con tsx, que no existe en la
-# imagen final). Lo empaquetamos aparte —sin --clean, para no borrar el bundle
-# del servidor— porque las migraciones tienen que poder correr en runtime.
-RUN pnpm --filter "@vega/api" exec tsup src/db/migrate.ts \
-      --format esm --target node22 --no-splitting --out-dir dist
 
 # `pnpm deploy` genera un directorio autocontenido (código + node_modules de
 # producción, con las deps de workspace ya materializadas) listo para copiar a

@@ -13,15 +13,16 @@
 #
 #  Puertos publicados por los stacks de Portainer (deploy/*/docker-compose.yml):
 #
-#    entorno   servicio   host    contenedor
-#    ───────   ────────   ─────   ──────────
-#    prod      api        20701   3000
-#    prod      web        20702   8080
-#    test      api        20703   3000
-#    test      web        20704   8080
+#    servicio   host    contenedor
+#    ────────   ─────   ──────────
+#    api        20701   3000
+#    web        20702   8080
 #
-#  Este fichero cubre PRODUCCIÓN. Para test, duplica el bloque cambiando el
-#  server_name a test.vega.subdomain.tld y los puertos a 20703 / 20704.
+#  Son los mismos en test y en producción: cada entorno tiene su propia máquina
+#  y su propio Portainer, así que no compiten por el host.
+#
+#  Este fichero cubre PRODUCCIÓN. Para test vale tal cual, cambiando sólo el
+#  server_name a test.vega.subdomain.tld y los certificados.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── Redirección a HTTPS ──────────────────────────────────────────────────────

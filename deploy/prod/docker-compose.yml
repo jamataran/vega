@@ -7,7 +7,8 @@
 #  Ver deploy/README.md.
 #
 #  Diferencias deliberadas frente a test:
-#    · puertos publicados 20701/20702 (test usa 20703/20704)
+#    · puertos publicados 20701 (api) / 20702 (web), los mismos que test: los
+#      dos entornos viven en máquinas distintas, cada una con su Portainer
 #    · más CPU y memoria, logs en info, NODE_ENV=production
 #    · restart: always → tras reiniciar el host el stack vuelve solo, aunque
 #      alguien hubiera parado un contenedor a mano

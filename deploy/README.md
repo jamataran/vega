@@ -5,8 +5,13 @@ Portainer y por su propio fichero compose de este repositorio:
 
 | Entorno | Compose | Variables | Stack Portainer | Puertos publicados |
 |---|---|---|---|---|
-| Test | `deploy/test/docker-compose.yml` | `deploy/test/stack.env` | `vega-test` | web `20704`, api `20703` |
+| Test | `deploy/test/docker-compose.yml` | `deploy/test/stack.env` | `vega-test` | web `20702`, api `20701` |
 | Producción | `deploy/prod/docker-compose.yml` | `deploy/prod/stack.env` | `vega-prod` | web `20702`, api `20701` |
+
+Los puertos coinciden a propósito: cada entorno vive en su propia máquina, con su propio
+Portainer, así que no compiten por el host y el proxy inverso de cada uno usa la misma
+configuración. Si algún día los dos stacks acabaran en la misma máquina, hay que darle
+otro par de valores a `VEGA_API_PORT` / `VEGA_WEB_PORT` en uno de los dos.
 
 La regla que ordena todo lo demás: **el tag desplegado está escrito en git**. Nunca se
 despliega un `:latest` opaco. `deploy/<entorno>/stack.env` contiene un `VEGA_IMAGE_TAG`
@@ -223,8 +228,8 @@ Dos detalles que cuestan una tarde si se pasan por alto:
 - **`proxy_read_timeout 120s`.** El defecto de nginx son 60 s: con él una corrección larga
   muere con 504 mientras el API sigue gastando tokens.
 
-El entorno de test es el mismo fichero con `test.vega.subdomain.tld` y los puertos `20703` /
-`20704`.
+El entorno de test es el mismo fichero con `test.vega.subdomain.tld`; los puertos no cambian,
+porque el stack de test corre en otra máquina.
 
 ### Plesk
 
@@ -300,8 +305,8 @@ Los mismos nombres en los dos entornos, con valores **distintos**:
 | `NODE_ENV` | `test` | `production` |
 | `LOG_LEVEL` | `debug` | `info` |
 | `NODE_OPTIONS` | `--max-old-space-size=512` | `--max-old-space-size=768` |
-| `VEGA_API_PORT` | `20703` | `20701` |
-| `VEGA_WEB_PORT` | `20704` | `20702` |
+| `VEGA_API_PORT` | `20701` | `20701` |
+| `VEGA_WEB_PORT` | `20702` | `20702` |
 | `AI_PROVIDER` | `mock` | `anthropic` |
 | `ANTHROPIC_API_KEY` | vacío | `sk-ant-…` |
 | `AI_MODEL_TRANSCRIPTION` | `claude-opus-4-8` | `claude-opus-4-8` |
