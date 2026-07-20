@@ -43,10 +43,13 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '1.50'
-          memory: 2G
+          # Medido: 66 MiB en marcha con la base ocupando 9 MB. Con 1 o 2
+          # profesores esto no crece en años. 1 GB es holgura para el
+          # `shared_buffers` por defecto y para un VACUUM, no una previsión.
+          cpus: '1.00'
+          memory: 1G
         reservations:
-          memory: 512M
+          memory: 256M
     logging:
       driver: json-file
       options:
@@ -68,6 +71,11 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER:-vega}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-vega}
       NODE_ENV: ${NODE_ENV:-production}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Tope de heap por debajo del límite del contenedor, a propósito. Si Node
+      # se pasa, queremos un error de heap: se registra, muere la petición y el
+      # proceso sigue. Sin esto, quien mata es el kernel con SIGKILL: sin
+      # traza, con el contenedor reiniciado y el lote nocturno a medias.
+      NODE_OPTIONS: ${NODE_OPTIONS:---max-old-space-size=768}
       API_HOST: 0.0.0.0
       API_PORT: '3000'
       JWT_SECRET: ${JWT_SECRET:?define JWT_SECRET en las variables del stack de Portainer}
@@ -104,10 +112,15 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '2.00'
-          memory: 2G
+          # El lote procesa las entregas EN SERIE (`for … of` con await en
+          # routes/batch.ts), así que el pico no es 25 entregas sino una: la
+          # más gorda, con sus páginas en base64 camino del modelo. Con una
+          # base de Node de ~120 MB, 1 GB deja margen de sobra y además acota
+          # el daño de una fuga.
+          cpus: '1.50'
+          memory: 1G
         reservations:
-          memory: 512M
+          memory: 384M
     logging:
       driver: json-file
       options:
@@ -132,8 +145,9 @@ services:
     deploy:
       resources:
         limits:
+          # nginx sirviendo ficheros estáticos. No hay nada que pueda crecer.
           cpus: '0.50'
-          memory: 256M
+          memory: 128M
     logging:
       driver: json-file
       options:

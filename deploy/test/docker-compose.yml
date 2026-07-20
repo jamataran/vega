@@ -39,6 +39,7 @@ services:
     deploy:
       resources:
         limits:
+          # La base de test se borra a menudo y nunca crece.
           cpus: '0.50'
           memory: 512M
     logging:
@@ -64,6 +65,9 @@ services:
       # enum development|test|production y cualquier otro valor tumba el arranque.
       NODE_ENV: ${NODE_ENV:-test}
       LOG_LEVEL: ${LOG_LEVEL:-debug}
+      # Igual que en prod pero más ajustado: si algo se va de memoria, que se
+      # note aquí y no la primera noche en producción.
+      NODE_OPTIONS: ${NODE_OPTIONS:---max-old-space-size=512}
       API_HOST: 0.0.0.0
       API_PORT: '3000'
       JWT_SECRET: ${JWT_SECRET:?define JWT_SECRET en las variables del stack de Portainer}
@@ -104,8 +108,11 @@ services:
     deploy:
       resources:
         limits:
+          # Por encima del tope de heap (512M) para dejar sitio a lo que Node
+          # no cuenta como heap: buffers, el propio runtime y `pino-pretty` si
+          # alguien lo activa.
           cpus: '0.75'
-          memory: 640M
+          memory: 768M
     logging:
       driver: json-file
       options:

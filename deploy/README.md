@@ -313,6 +313,7 @@ Los mismos nombres en los dos entornos, con valores **distintos**:
 | `WEB_ORIGIN` | `https://test.vega.ejemplo.es` | `https://vega.ejemplo.es` |
 | `NODE_ENV` | `test` | `production` |
 | `LOG_LEVEL` | `debug` | `info` |
+| `NODE_OPTIONS` | `--max-old-space-size=512` | `--max-old-space-size=768` |
 | `VEGA_API_PORT` | `18001` | `18000` |
 | `VEGA_WEB_PORT` | `18081` | `18080` |
 | `AI_PROVIDER` | `mock` | `anthropic` |

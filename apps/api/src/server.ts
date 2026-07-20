@@ -15,6 +15,7 @@ import { statsRoutes } from './routes/stats.js';
 import { submissionRoutes } from './routes/submissions.js';
 import { userRoutes } from './routes/users.js';
 import type { AppContext } from './context.js';
+import { loggerOptions } from './logging.js';
 import type { Config } from './config.js';
 
 export interface BuiltServer {
@@ -27,10 +28,7 @@ export async function buildServer(config: Config): Promise<BuiltServer> {
   const ctx: AppContext = { db, sql, config, startedAt: Date.now() };
 
   const app = Fastify({
-    logger:
-      config.NODE_ENV === 'development'
-        ? { level: 'info', transport: undefined }
-        : { level: 'info' },
+    logger: loggerOptions(config),
     // El proxy inverso es quien termina TLS; necesitamos la IP real en los logs.
     trustProxy: true,
     /**
