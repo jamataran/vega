@@ -39,6 +39,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
 import { EmptyState, ErrorState, PageHeader } from '@/components/common/Feedback';
 import { Field } from '@/components/common/Field';
+import { MoodleConnectionResult } from '@/components/settings/MoodleConnectionResult';
 import { KEEP, SecretField, secretPatch } from '@/components/settings/SecretField';
 import type { SecretState } from '@/components/settings/SecretField';
 
@@ -352,18 +353,7 @@ function UserMoodleToken({ user }: { user: User }) {
         Decide qué cursos ve. Sin token, esta persona no puede dar de alta actividades.
       </p>
 
-      {result ? (
-        <p
-          className={cn('text-ui', result.ok ? 'text-success-ink' : 'text-destructive-ink')}
-          aria-live="polite"
-        >
-          {result.ok
-            ? `${result.message} ${result.siteName} · ${result.username} · ${
-                result.courseCount === 1 ? '1 curso' : `${result.courseCount ?? 0} cursos`
-              }`
-            : result.message}
-        </p>
-      ) : null}
+      {result ? <MoodleConnectionResult result={result} /> : null}
 
       <div className="flex flex-wrap gap-2">
         <Button size="sm" disabled={!pending} loading={save.isPending} onClick={() => save.mutate()}>

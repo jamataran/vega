@@ -6,6 +6,7 @@ import type {
   ActivityRef,
   DownloadedFile,
   FeedbackFile,
+  LmsConnectionCheck,
   LmsConnectionInfo,
   LmsConnectorConfig,
   RemoteGrade,
@@ -50,6 +51,11 @@ const SUBMISSION_FILE_AREA = 'submission_files';
 
 /** Las entregas antes que los foros: es el orden en que el profesor los busca. */
 const KIND_ORDER: Readonly<Record<ActivityKind, number>> = { assignment: 0, forum: 1 };
+
+/** El mensaje del error del LMS, que ya viene redactado para el profesor. */
+function describe(error: unknown): string {
+  return error instanceof Error ? error.message : 'Error desconocido.';
+}
 
 export class Moodle3Connector implements LmsConnector {
   readonly name = 'moodle3';
@@ -106,17 +112,129 @@ export class Moodle3Connector implements LmsConnector {
   }
 
   /**
-   * Prueba de vida de la credencial. `core_webservice_get_site_info` es la
-   * llamada más barata del web service y no lleva parámetros, así que si falla
-   * el problema es el token o el sitio, nunca lo que se ha pedido.
+   * Comprueba la credencial **función por función**, sin parar en la primera
+   * que falle.
+   *
+   * Moodle no añade ninguna función al crear un servicio externo: hay que
+   * listarlas a mano, y lo habitual es que falten varias. Si esto se detuviera
+   * en el primer fallo, configurar el servicio serían tantos viajes al panel de
+   * Moodle como funciones faltasen, descubiertas de una en una. Se prueban
+   * todas y se devuelve el parte completo.
+   *
+   * Se comprueban también las que todavía no usa ninguna pantalla —ingesta y
+   * publicación—: mejor enterarse ahora que la primera noche que corra el
+   * proceso, cuando no haya nadie mirando.
    */
   async verifyConnection(): Promise<LmsConnectionInfo> {
-    const [siteInfo, courses] = await Promise.all([this.#requireSiteInfo(), this.listCourses()]);
+    const checks: LmsConnectionCheck[] = [];
+
+    // Identificación: de aquí sale el `userid`, que sólo hace falta para listar
+    // cursos. Las de tareas y foros no dependen de él, así que se prueban igual
+    // aunque esta falle — es la diferencia entre enterarse de todo lo que falta
+    // de una vez o descubrirlo de una en una.
+    let siteInfo: GetSiteInfoResponse | undefined;
+    try {
+      siteInfo = await this.#requireSiteInfo();
+      checks.push({
+        name: WS_FUNCTIONS.getSiteInfo,
+        label: 'Identificar el token',
+        status: 'ok',
+        detail: `${siteInfo.sitename} · conectado como ${siteInfo.username}`,
+        required: true,
+      });
+    } catch (error) {
+      checks.push({
+        name: WS_FUNCTIONS.getSiteInfo,
+        label: 'Identificar el token',
+        status: 'failed',
+        detail: describe(error),
+        required: true,
+      });
+    }
+
+    let courses: DiscoveredCourse[] = [];
+    if (siteInfo === undefined) {
+      checks.push({
+        name: WS_FUNCTIONS.getUserCourses,
+        label: 'Listar tus cursos',
+        status: 'skipped',
+        detail: `No se ha podido comprobar: necesita el identificador de usuario que devuelve ${WS_FUNCTIONS.getSiteInfo}.`,
+        required: true,
+      });
+    } else {
+      try {
+        courses = await this.listCourses();
+        checks.push({
+          name: WS_FUNCTIONS.getUserCourses,
+          label: 'Listar tus cursos',
+          status: 'ok',
+          detail:
+            courses.length === 0
+              ? 'Responde correctamente, pero este token no ve ningún curso.'
+              : `${courses.length} ${courses.length === 1 ? 'curso' : 'cursos'}`,
+          required: true,
+        });
+      } catch (error) {
+        checks.push({
+          name: WS_FUNCTIONS.getUserCourses,
+          label: 'Listar tus cursos',
+          status: 'failed',
+          detail: describe(error),
+          required: true,
+        });
+      }
+    }
+
+    // Con un curso de verdad la prueba es representativa; sin ninguno se manda
+    // la lista vacía, que Moodle acepta y sirve igual para saber si la función
+    // está habilitada, que es justo lo que se está comprobando.
+    const courseIds = courses.length > 0 ? [parseCourseId(courses[0]!.moodleCourseId)] : [];
+
+    checks.push(
+      await this.#probe(
+        WS_FUNCTIONS.getAssignments,
+        'Leer las entregas del curso',
+        () =>
+          this.#client.call(
+            WS_FUNCTIONS.getAssignments,
+            { courseids: courseIds },
+            GetAssignmentsResponse,
+          ),
+        (result) =>
+          `${result.courses.length} ${result.courses.length === 1 ? 'curso' : 'cursos'} con tareas`,
+      ),
+    );
+
+    checks.push(
+      await this.#probe(
+        WS_FUNCTIONS.getForums,
+        'Leer los foros del curso',
+        () =>
+          this.#client.call(WS_FUNCTIONS.getForums, { courseids: courseIds }, GetForumsResponse),
+        (result) => `${result.length} ${result.length === 1 ? 'foro' : 'foros'}`,
+      ),
+    );
+
     return {
-      siteName: siteInfo.sitename,
-      username: siteInfo.username,
+      siteName: siteInfo?.sitename ?? '',
+      username: siteInfo?.username ?? '',
       courseCount: courses.length,
+      checks,
     };
+  }
+
+  /** Una comprobación suelta: no propaga el fallo, lo convierte en parte. */
+  async #probe<T>(
+    name: string,
+    label: string,
+    call: () => Promise<T>,
+    describeOk: (result: T) => string,
+  ): Promise<LmsConnectionCheck> {
+    try {
+      return { name, label, status: 'ok', detail: describeOk(await call()), required: true };
+    } catch (error) {
+      return { name, label, status: 'failed', detail: describe(error), required: true };
+    }
   }
 
   /**

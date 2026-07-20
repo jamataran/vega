@@ -1,12 +1,12 @@
 import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { CheckCircle2, XCircle } from 'lucide-react';
 import type { MeResponse, MoodleConnectionResponse } from '@vega/shared';
 import { api } from '@/lib/api';
 import { queryKeys } from '@/lib/queryKeys';
 import { notify } from '@/lib/notify';
 import { Button } from '@/components/ui/button';
 import { Section } from '@/components/common/Feedback';
+import { MoodleConnectionResult } from '@/components/settings/MoodleConnectionResult';
 import { KEEP, SecretField, secretPatch } from '@/components/settings/SecretField';
 import type { SecretState } from '@/components/settings/SecretField';
 
@@ -71,30 +71,7 @@ export function MoodleConnectionCard({ configured }: { configured: boolean }) {
           <code className="font-mono text-[0.9em]">mod_forum_get_forums_by_courses</code>.
         </p>
 
-        {result ? (
-          <div
-            className="flex items-start gap-2 rounded-md border border-border px-3 py-2.5"
-            aria-live="polite"
-          >
-            {result.ok ? (
-              <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-success-ink" aria-hidden />
-            ) : (
-              // `-ink` y no el plano: el valor plano se reserva a rellenos y en
-              // modo oscuro no se aclara, quedándose por debajo del contraste
-              // del resto de indicadores de estado.
-              <XCircle className="mt-0.5 size-4 shrink-0 text-destructive-ink" aria-hidden />
-            )}
-            <div className="min-w-0 flex-1">
-              <p className="text-base">{result.message}</p>
-              {result.ok ? (
-                <p className="mt-0.5 text-ui text-muted-foreground">
-                  {result.siteName} · conectado como {result.username} ·{' '}
-                  {result.courseCount === 1 ? '1 curso' : `${result.courseCount ?? 0} cursos`}
-                </p>
-              ) : null}
-            </div>
-          </div>
-        ) : null}
+        {result ? <MoodleConnectionResult result={result} /> : null}
 
         <div className="flex flex-wrap gap-2">
           <Button

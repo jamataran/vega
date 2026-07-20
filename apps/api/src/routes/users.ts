@@ -17,6 +17,27 @@ import { badRequest, conflict, notFound, parseOrThrow } from '../http/errors.js'
 import { asHttpError, connectorForUser } from '../lms/factory.js';
 import type { AppContext } from '../context.js';
 
+/**
+ * Titular de la comprobación.
+ *
+ * Nombrar las funciones que fallan —y no un «no se ha podido conectar»— es lo
+ * que convierte el mensaje en algo accionable: son exactamente las que hay que
+ * añadir al servicio web en Moodle.
+ */
+function summarize(failed: readonly { name: string }[], courseCount: number): string {
+  if (failed.length === 1) {
+    return `Moodle rechaza «${failed[0]!.name}». Añádela al servicio web del token en Moodle.`;
+  }
+  if (failed.length > 1) {
+    return `Moodle rechaza estas funciones: ${failed
+      .map((check) => check.name)
+      .join(', ')}. Añádelas al servicio web del token en Moodle.`;
+  }
+  return courseCount === 0
+    ? 'La conexión funciona, pero este token no está matriculado en ningún curso.'
+    : 'Conexión correcta.';
+}
+
 export async function userRoutes(app: FastifyInstance, ctx: AppContext): Promise<void> {
   const { db } = ctx;
   const adminOnly = app.requireRole('admin');
@@ -125,12 +146,13 @@ export async function userRoutes(app: FastifyInstance, ctx: AppContext): Promise
       try {
         const connector = await connectorForUser(ctx, row.id);
         const info = await connector.verifyConnection();
+        const failed = info.checks.filter((check) => check.required && check.status === 'failed');
         return {
-          ok: true,
-          message:
-            info.courseCount === 0
-              ? 'El token es válido pero no ve ningún curso. Revisa en Moodle las funciones habilitadas y en qué cursos está matriculado.'
-              : 'Conexión correcta.',
+          ok: failed.length === 0,
+          checks: [...info.checks],
+          // El detalle de cada función va en `checks`; aquí sólo el titular, que
+          // es lo que se lee primero y lo que decide si hay que seguir mirando.
+          message: summarize(failed, info.courseCount),
           siteName: info.siteName,
           username: info.username,
           courseCount: info.courseCount,
@@ -142,6 +164,7 @@ export async function userRoutes(app: FastifyInstance, ctx: AppContext): Promise
           siteName: null,
           username: null,
           courseCount: null,
+          checks: [],
         };
       }
     },

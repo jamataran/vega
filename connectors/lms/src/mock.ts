@@ -181,6 +181,18 @@ export class MockLmsConnector implements LmsConnector {
       siteName: 'Moodle simulado',
       username: 'profesora.simulada',
       courseCount: COURSES.length,
+      // Se devuelve el mismo parte que el conector real para que la pantalla de
+      // Ajustes se pueda diseñar y revisar sin un Moodle delante.
+      checks: [
+        { name: 'mock.site', label: 'Identificar el token', status: 'ok' as const,
+          detail: 'Moodle simulado · conectado como profesora.simulada', required: true },
+        { name: 'mock.courses', label: 'Listar tus cursos', status: 'ok' as const,
+          detail: `${COURSES.length} cursos`, required: true },
+        { name: 'mock.assignments', label: 'Leer las entregas del curso', status: 'ok' as const,
+          detail: 'Catálogo simulado', required: true },
+        { name: 'mock.forums', label: 'Leer los foros del curso', status: 'ok' as const,
+          detail: 'Catálogo simulado', required: true },
+      ],
     });
   }
 

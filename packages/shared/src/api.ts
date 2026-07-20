@@ -418,20 +418,53 @@ export const UpdateMoodleTokenRequest = z.object({
 export type UpdateMoodleTokenRequest = z.infer<typeof UpdateMoodleTokenRequest>;
 
 /**
+ * Una función del servicio web, comprobada por separado.
+ *
+ * Se prueban **una a una y no se para en la primera que falle**: Moodle no
+ * añade ninguna función al crear un servicio externo, hay que listarlas a mano,
+ * y lo normal es que falten varias. Parar en la primera obligaría a ir
+ * arreglando de una en una, con un viaje al panel de Moodle por cada una.
+ */
+export const MoodleCheck = z.object({
+  /** Nombre exacto de la función, para poder buscarlo en Moodle. */
+  name: z.string(),
+  /** Para qué la usa Vega, en cristiano. */
+  label: z.string(),
+  /**
+   * `skipped` no es `failed`: hay comprobaciones que dependen de otra —listar
+   * cursos necesita el id de usuario que devuelve `get_site_info`— y darlas por
+   * fallidas mandaría al profesor a habilitar funciones que quizá ya están.
+   */
+  status: z.enum(['ok', 'failed', 'skipped']),
+  /** Qué ha pasado: el error de Moodle, o qué se ha obtenido si fue bien. */
+  detail: z.string(),
+  /**
+   * `false` en las que todavía no usa ninguna pantalla —ingesta y publicación,
+   * que llegan en hitos posteriores—. Se comprueban igual, porque es mejor
+   * enterarse al configurar que la primera noche que corra el proceso.
+   */
+  required: z.boolean(),
+});
+export type MoodleCheck = z.infer<typeof MoodleCheck>;
+
+/**
  * Resultado de probar la conexión con Moodle con el token del usuario.
  *
  * No es 200/500: un token inválido es una respuesta legítima de esta ruta, y el
  * profesor necesita leer *por qué* falla. Por eso el fallo viaja en el cuerpo.
  */
 export const MoodleConnectionResponse = z.object({
+  /** `true` sólo si pasan **todas** las funciones imprescindibles. */
   ok: z.boolean(),
   /** Qué ha fallado, en un lenguaje que lleve a la solución. */
   message: z.string(),
-  /** Sólo si `ok`: con qué Moodle y como quién se ha conectado. */
+  /** Sólo si se pudo identificar: con qué Moodle y como quién. */
   siteName: z.string().nullable(),
   username: z.string().nullable(),
   /** Cursos que ese token alcanza. Es la señal de que el token sirve de algo. */
   courseCount: z.number().int().min(0).nullable(),
+  /** Una entrada por función probada, en el orden en que se necesitan. */
+  checks: z.array(MoodleCheck),
 });
 export type MoodleConnectionResponse = z.infer<typeof MoodleConnectionResponse>;
 

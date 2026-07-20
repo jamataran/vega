@@ -107,11 +107,23 @@ export class FilesystemConnector implements LmsConnector {
       );
     }
 
+    const courses = await this.listCourses();
     return {
       siteName: `Carpeta de entregas · ${this.#root}`,
       // No hay usuario: se lee el disco con los permisos del propio proceso.
       username: 'local',
-      courseCount: (await this.listCourses()).length,
+      courseCount: courses.length,
+      // Aquí no hay funciones que habilitar: o la carpeta se lee o no. Una sola
+      // comprobación, para que la pantalla no tenga que distinguir conectores.
+      checks: [
+        {
+          name: 'filesystem.root',
+          label: 'Leer la carpeta de entregas',
+          status: 'ok',
+          detail: `${this.#root} · ${courses.length} ${courses.length === 1 ? 'curso' : 'cursos'}`,
+          required: true,
+        },
+      ],
     };
   }
 

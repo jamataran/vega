@@ -119,6 +119,29 @@ export interface LmsConnectionInfo {
   readonly siteName: string;
   readonly username: string;
   readonly courseCount: number;
+  /**
+   * Una entrada por operación comprobada. Probar sólo que la credencial vale
+   * deja pasar el caso más frecuente: un servicio web al que le faltan la mitad
+   * de las funciones. El profesor daría la configuración por buena y se
+   * estrellaría al importar, o —peor— la primera noche que corriera el proceso.
+   */
+  readonly checks: readonly LmsConnectionCheck[];
+}
+
+export interface LmsConnectionCheck {
+  /** Identificador técnico: el nombre de la función en el LMS. */
+  readonly name: string;
+  /** Para qué la usa Vega. */
+  readonly label: string;
+  /**
+   * `skipped` no es `failed`: listar cursos necesita el id de usuario que
+   * devuelve la identificación del token, y darlo por fallido mandaría a
+   * habilitar funciones que quizá ya están puestas.
+   */
+  readonly status: 'ok' | 'failed' | 'skipped';
+  readonly detail: string;
+  /** `false` si aún no la usa ninguna pantalla, pero hará falta más adelante. */
+  readonly required: boolean;
 }
 
 /**
