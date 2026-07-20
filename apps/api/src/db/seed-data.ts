@@ -22,6 +22,18 @@ export const COURSES = {
   tarde: 'Academia Hipatia · Secundaria Matemáticas · Grupo de tarde',
 } as const;
 
+/**
+ * Identificador de cada curso en el Moodle simulado.
+ *
+ * Tiene que coincidir con el que devuelve `listCourses()` del conector `mock`:
+ * si no, re-sincronizar desde la aplicación crearía cursos duplicados en vez de
+ * reconocer los sembrados.
+ */
+export const COURSE_MOODLE_IDS: Record<string, string> = {
+  [COURSES.manana]: '101',
+  [COURSES.tarde]: '102',
+};
+
 // ── Actividades ─────────────────────────────────────────────────────────────
 
 export interface SeedActivity {
@@ -841,3 +853,53 @@ export const SUBMISSION_PLAN: Record<string, SeedSubmissionPlan[]> = {
     { status: 'pending' },
   ],
 };
+
+// ── Ficheros de contexto ────────────────────────────────────────────────────
+
+/**
+ * Enunciado en LaTeX de una entrega puntuable.
+ *
+ * Es el caso real del producto: el profesor sube el `.tex` con el que preparó
+ * el examen y Vega lo tiene delante al corregir, sin transcribirlo ni pagarlo
+ * en cada llamada.
+ */
+export const SEED_ENUNCIADO_TEMA04 = String.raw`\documentclass{article}
+\begin{document}
+\section*{Tema 04 · Derivadas y aplicaciones}
+
+\textbf{Ejercicio 1.} Sea $f(x) = \dfrac{3x^{2} - 5x}{x + 2}$.
+
+\begin{enumerate}
+  \item[a)] Calcula $f'(x)$ aplicando la regla del cociente. \hfill (2,5 puntos)
+  \item[b)] Determina los puntos críticos de $f$. \hfill (2 puntos)
+  \item[c)] Estudia la monotonía e identifica los extremos relativos. \hfill (2,5 puntos)
+  \item[d)] Halla las asíntotas y esboza la gráfica. \hfill (3 puntos)
+\end{enumerate}
+
+\textbf{Nota:} se admite la solución exacta con radical o su aproximación
+decimal con dos cifras. Todo resultado debe ir justificado.
+\end{document}`;
+
+/**
+ * Material asociado a un foro de dudas.
+ *
+ * En una actividad no puntuable no hay solución que contrastar: lo que se sube
+ * es aquello sobre lo que los alumnos preguntan. Mismo campo, otro papel.
+ */
+export const SEED_MATERIAL_FORO = String.raw`\section*{Análisis · material de referencia}
+
+\subsection*{Definición de límite}
+$\displaystyle\lim_{x \to a} f(x) = L$ si para todo $\varepsilon > 0$ existe
+$\delta > 0$ tal que $0 < |x - a| < \delta \implies |f(x) - L| < \varepsilon$.
+
+\subsection*{Continuidad}
+$f$ es continua en $a$ si $\displaystyle\lim_{x \to a} f(x) = f(a)$. Exige las
+tres condiciones: que exista $f(a)$, que exista el límite y que coincidan.
+
+\subsection*{Derivabilidad implica continuidad}
+Si $f$ es derivable en $a$, entonces es continua en $a$. El recíproco es falso:
+$f(x) = |x|$ es continua en $0$ y no derivable ahí.
+
+\subsection*{Teorema del valor medio}
+Si $f$ es continua en $[a,b]$ y derivable en $(a,b)$, existe $c \in (a,b)$ con
+$f'(c) = \dfrac{f(b) - f(a)}{b - a}$.`;

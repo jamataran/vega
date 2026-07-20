@@ -33,6 +33,14 @@ export async function buildServer(config: Config): Promise<BuiltServer> {
         : { level: 'info' },
     // El proxy inverso es quien termina TLS; necesitamos la IP real en los logs.
     trustProxy: true,
+    /**
+     * Explícito y no el defecto de Fastify (1 MiB), para que el tope sea una
+     * decisión y no un accidente. Los ficheros de contexto suben troceados en
+     * trozos de `UPLOAD_CHUNK_BYTES`, así que ninguna petición legítima se
+     * acerca a esto; el margen cubre el JSON que envuelve al trozo y el escapado
+     * de las contrabarras, que en LaTeX son muchas y se duplican.
+     */
+    bodyLimit: 2 * 1024 * 1024,
   });
 
   registerErrorHandler(app);

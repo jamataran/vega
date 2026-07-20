@@ -1,10 +1,12 @@
 import { z } from 'zod';
-import type { DiscoveredActivity } from '@vega/shared';
+import type { ActivityKind, DiscoveredActivity, DiscoveredCourse } from '@vega/shared';
 import type { LmsConnector, LmsConnectorFactory } from '@vega/connector-lms';
+import { LmsAuthError } from '@vega/connector-lms';
 import type {
   ActivityRef,
   DownloadedFile,
   FeedbackFile,
+  LmsConnectionInfo,
   LmsConnectorConfig,
   RemoteGrade,
   RemoteSubmission,
@@ -13,6 +15,7 @@ import type {
 import {
   GetAssignmentsResponse,
   GetForumsResponse,
+  GetSiteInfoResponse,
   GetSubmissionsResponse,
   GetUserCoursesResponse,
   MoodleClient,
@@ -33,51 +36,118 @@ export const Moodle3Config = z.object({
   baseUrl: z.string().url(),
   /** `MOODLE_TOKEN`: token de un usuario con permisos de corrección. */
   token: z.string().min(1),
-  /** Curso al que pertenecen las actividades, si hay que listar tareas. */
-  courseId: z.number().int().positive().optional(),
 });
 export type Moodle3Config = z.infer<typeof Moodle3Config>;
+// `courseId` se ha eliminado de la configuración: el curso lo elige el profesor
+// en cada consulta (`listActivities(moodleCourseId)`), no el operador en el
+// entorno. Fijarlo en un despliegue con varios cursos escondería el resto del
+// catálogo sin decirlo, y contradiría a `listCourses()`, que existe justo para
+// enseñarlos todos. Tampoco llegaba a usarse: ni `.env.example` ni los compose
+// de `deploy/` ni `apps/api/src/config.ts` lo poblaban nunca.
 
 /** Área de ficheros donde Moodle guarda lo que sube el alumno. */
 const SUBMISSION_FILE_AREA = 'submission_files';
+
+/** Las entregas antes que los foros: es el orden en que el profesor los busca. */
+const KIND_ORDER: Readonly<Record<ActivityKind, number>> = { assignment: 0, forum: 1 };
 
 export class Moodle3Connector implements LmsConnector {
   readonly name = 'moodle3';
 
   readonly #client: MoodleClient;
-  readonly #courseId: number | undefined;
   /** Cache por sesión: `remoteId` → URL del fichero, para no re-listar al descargar. */
   readonly #fileUrls = new Map<string, string>();
+  #siteInfo: Promise<GetSiteInfoResponse> | undefined;
 
   constructor(config: Moodle3Config) {
     this.#client = new MoodleClient({ baseUrl: config.baseUrl, token: config.token });
-    this.#courseId = config.courseId;
   }
 
   /**
-   * Tareas del curso, para que el profesor pueda emparejar una actividad de
-   * Vega con un `assignment` de Moodle.
+   * Tareas en crudo, tal y como las devuelve Moodle. No la usa el flujo normal
+   * —para eso está `listActivities()`—, pero es lo más útil que hay para
+   * depurar una instalación concreta sin montar la aplicación entera.
    *
    * TODO(vega): sin verificar contra Moodle real — falta comprobar que el token
    * de un profesor ve todos los cursos esperados y el formato de `duedate`.
    */
-  async listAssignments(): Promise<GetAssignmentsResponse> {
+  async listAssignments(moodleCourseId?: string): Promise<GetAssignmentsResponse> {
+    const courseIds = moodleCourseId === undefined ? [] : [parseCourseId(moodleCourseId)];
     return this.#client.call(
       WS_FUNCTIONS.getAssignments,
-      this.#courseId !== undefined ? { courseids: [this.#courseId] } : { courseids: [] },
+      { courseids: courseIds },
       GetAssignmentsResponse,
     );
   }
 
   /**
+   * Cursos en los que está matriculado el dueño del token.
+   *
+   * TODO(vega): sin verificar contra Moodle real — falta comprobar que un
+   * profesor ve aquí los cursos que imparte (y no sólo aquellos en los que
+   * figura como alumno) y qué pasa con los cursos ocultos o ya archivados.
+   */
+  async listCourses(): Promise<DiscoveredCourse[]> {
+    const { userid } = await this.#requireSiteInfo();
+
+    const courses = await this.#client.call(
+      WS_FUNCTIONS.getUserCourses,
+      { userid },
+      GetUserCoursesResponse,
+    );
+
+    return courses
+      .map((course) => ({
+        moodleCourseId: String(course.id),
+        name: course.fullname ?? course.shortname ?? '',
+        shortName: course.shortname ?? '',
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name, 'es'));
+  }
+
+  /**
+   * Prueba de vida de la credencial. `core_webservice_get_site_info` es la
+   * llamada más barata del web service y no lleva parámetros, así que si falla
+   * el problema es el token o el sitio, nunca lo que se ha pedido.
+   */
+  async verifyConnection(): Promise<LmsConnectionInfo> {
+    const [siteInfo, courses] = await Promise.all([this.#requireSiteInfo(), this.listCourses()]);
+    return {
+      siteName: siteInfo.sitename,
+      username: siteInfo.username,
+      courseCount: courses.length,
+    };
+  }
+
+  /**
+   * Los datos del token: quién es y contra qué sitio habla. Se resuelven una
+   * sola vez por instancia porque el token no cambia durante su vida; si la
+   * llamada falla no se cachea el fallo, para que reintentar tras arreglar el
+   * token en Ajustes no exija reiniciar el proceso.
+   */
+  async #requireSiteInfo(): Promise<GetSiteInfoResponse> {
+    this.#siteInfo ??= this.#client
+      .call(WS_FUNCTIONS.getSiteInfo, {}, GetSiteInfoResponse)
+      .catch((error: unknown) => {
+        this.#siteInfo = undefined;
+        throw error;
+      });
+    return this.#siteInfo;
+  }
+
+  /**
    * Catálogo de actividades de Moodle a las que Vega puede reaccionar: las
-   * entregas (`mod_assign`) y los foros (`mod_forum`) de los cursos visibles
-   * para el token. Es lo que se le enseña al profesor para que elija.
+   * entregas (`mod_assign`) y los foros (`mod_forum`). Es lo que se le enseña
+   * al profesor para que elija.
+   *
+   * Con `moodleCourseId` se pregunta por ese curso y sólo por ese: en una
+   * instalación con decenas de cursos, pedir las actividades de todos para
+   * enseñar las de uno es la diferencia entre una pantalla que abre y otra que
+   * caduca. El catálogo de cursos se pide en paralelo y sólo sirve para poner
+   * nombre al curso, porque `mod_forum_get_forums_by_courses` devuelve el id
+   * del curso pero no su nombre.
    *
    * TODO(vega): sin verificar contra Moodle real — quedan por comprobar:
-   *  - que `core_enrol_get_users_courses` necesita el `userid` del dueño del
-   *    token (habría que sacarlo antes de `core_webservice_get_site_info`), y
-   *    si con `courseId` configurado conviene saltarse esta llamada;
    *  - de dónde sale el recuento de pendientes de una entrega sin bajarse
    *    todas las entregas: `mod_assign_get_submissions` las trae enteras y en
    *    un curso grande eso es una petición muy cara sólo para contar;
@@ -88,20 +158,20 @@ export class Moodle3Connector implements LmsConnector {
    *  - el nombre de curso que se enseña: aquí se usa `fullname`, pero en
    *    instalaciones con nombres muy largos puede convenir `shortname`.
    */
-  async listActivities(): Promise<DiscoveredActivity[]> {
-    const courses =
-      this.#courseId !== undefined
-        ? [{ id: this.#courseId, fullname: undefined, shortname: undefined }]
-        : await this.#client.call(WS_FUNCTIONS.getUserCourses, {}, GetUserCoursesResponse);
+  async listActivities(moodleCourseId?: string): Promise<DiscoveredActivity[]> {
+    const coursesPromise = this.listCourses();
 
-    const courseIds = courses.map((course) => course.id);
+    // Con curso elegido no hace falta esperar al catálogo para saber a quién
+    // preguntar; sin él, los cursos matriculados SON la lista de destinos.
+    const courseIds =
+      moodleCourseId !== undefined
+        ? [parseCourseId(moodleCourseId)]
+        : (await coursesPromise).map((course) => Number(course.moodleCourseId));
+
     if (courseIds.length === 0) return [];
 
-    const courseNames = new Map(
-      courses.map((course) => [course.id, course.fullname ?? course.shortname ?? ''] as const),
-    );
-
-    const [assignments, forums] = await Promise.all([
+    const [courses, assignments, forums] = await Promise.all([
+      coursesPromise,
       this.#client.call(
         WS_FUNCTIONS.getAssignments,
         { courseids: courseIds },
@@ -110,15 +180,23 @@ export class Moodle3Connector implements LmsConnector {
       this.#client.call(WS_FUNCTIONS.getForums, { courseids: courseIds }, GetForumsResponse),
     ]);
 
+    const courseNames = new Map(courses.map((course) => [course.moodleCourseId, course.name]));
+    const wanted = new Set(courseIds);
+
     const activities: DiscoveredActivity[] = [];
 
     for (const course of assignments.courses) {
+      // Moodle ignora `courseids` en algunas versiones si el token ve el curso
+      // por otra vía; se vuelve a filtrar aquí para no colar actividades de un
+      // curso que el profesor no ha elegido.
+      if (!wanted.has(course.id)) continue;
       for (const assignment of course.assignments) {
         activities.push({
-          moodleRef: String(assignment.id),
+          moodleRef: moodleRefFor('assignment', assignment.id),
           name: assignment.name,
           kind: 'assignment',
-          courseName: courseNames.get(course.id) ?? course.shortname ?? '',
+          moodleCourseId: String(course.id),
+          courseName: courseNames.get(String(course.id)) ?? course.shortname ?? '',
           // TODO(vega): sin verificar contra Moodle real — de momento 0; ver
           // arriba por qué contar pendientes aquí saldría caro.
           pendingCount: 0,
@@ -128,17 +206,26 @@ export class Moodle3Connector implements LmsConnector {
     }
 
     for (const forum of forums) {
+      if (!wanted.has(forum.course)) continue;
       activities.push({
-        moodleRef: String(forum.id),
+        moodleRef: moodleRefFor('forum', forum.id),
         name: forum.name,
         kind: 'forum',
-        courseName: courseNames.get(forum.course) ?? '',
+        moodleCourseId: String(forum.course),
+        courseName: courseNames.get(String(forum.course)) ?? '',
         pendingCount: forum.numdiscussions ?? 0,
         alreadyImported: false,
       });
     }
 
-    return activities;
+    // Orden estable: la lista no debería bailar entre recargas, y Moodle no
+    // garantiza ninguno. El `moodleRef` desempata los nombres repetidos.
+    return activities.sort(
+      (a, b) =>
+        KIND_ORDER[a.kind] - KIND_ORDER[b.kind] ||
+        a.name.localeCompare(b.name, 'es') ||
+        a.moodleRef.localeCompare(b.moodleRef),
+    );
   }
 
   /**
@@ -265,25 +352,90 @@ export class Moodle3Connector implements LmsConnector {
 
 export const createMoodle3Connector: LmsConnectorFactory = (config: LmsConnectorConfig) => {
   // El fallo más probable en producción es un token sin configurar; que el
-  // mensaje lo diga en vez de reventar luego con un 401 de Moodle.
+  // mensaje lo diga, y como error de credencial, en vez de reventar luego con
+  // un 401 de Moodle que la interfaz ya no sabría de dónde viene.
   if (config['token'] === undefined || config['token'] === '') {
-    throw new Error(
+    throw new LmsAuthError(
       'Falta MOODLE_TOKEN. Configúralo en el entorno o usa LMS_CONNECTOR=mock / filesystem.',
     );
   }
   return new Moodle3Connector(Moodle3Config.parse(config));
 };
 
+// ── Referencias de actividad ────────────────────────────────────────────────
+
+/**
+ * Prefijo por tipo de módulo. `mod_assign` y `mod_forum` numeran en tablas
+ * distintas de Moodle, así que la tarea 5 y el foro 5 existen a la vez: sin
+ * prefijo comparten `moodleRef`, y la segunda importación se pierde en silencio
+ * contra el índice único. El prefijo es el propio nombre del módulo de Moodle
+ * menos el `mod_`, que es como los nombra el resto del sistema.
+ */
+const KIND_PREFIX: Readonly<Record<ActivityKind, string>> = {
+  assignment: 'assign',
+  forum: 'forum',
+};
+
+const PREFIX_KIND: Readonly<Record<string, ActivityKind>> = {
+  assign: 'assignment',
+  forum: 'forum',
+};
+
+/** Referencia estable de una actividad de Moodle: `assign-42`, `forum-42`. */
+export function moodleRefFor(kind: ActivityKind, id: number | string): string {
+  return `${KIND_PREFIX[kind]}-${String(id)}`;
+}
+
+/**
+ * El inverso de `moodleRefFor`. Devuelve `null` —y no lanza— para cualquier
+ * cosa que no sea una referencia de Moodle: los conectores mock y filesystem
+ * usan refs con el mismo prefijo pero id no numérico (`assign-tema04`), y quien
+ * llama tiene que poder distinguirlas sin capturar excepciones.
+ */
+export function parseMoodleRef(ref: string): { kind: ActivityKind; id: number } | null {
+  const separator = ref.indexOf('-');
+  if (separator <= 0) return null;
+
+  const kind = PREFIX_KIND[ref.slice(0, separator)];
+  if (kind === undefined) return null;
+
+  const rest = ref.slice(separator + 1);
+  // `Number.parseInt` aceptaría "42abc"; aquí sólo vale un id entero completo.
+  if (!/^\d+$/.test(rest)) return null;
+
+  const id = Number(rest);
+  return Number.isSafeInteger(id) ? { kind, id } : null;
+}
+
 // ── Utilidades ──────────────────────────────────────────────────────────────
 
-function assignmentIdOf(activityRef: ActivityRef): number {
-  const parsed = Number.parseInt(activityRef.lmsRef ?? '', 10);
-  if (!Number.isFinite(parsed)) {
-    throw new Error(
-      `La actividad "${activityRef.slug}" no tiene asignada una tarea de Moodle (lmsRef vacío).`,
-    );
+function parseCourseId(moodleCourseId: string): number {
+  if (!/^\d+$/.test(moodleCourseId)) {
+    throw new Error(`Identificador de curso de Moodle no válido: "${moodleCourseId}".`);
   }
-  return parsed;
+  return Number(moodleCourseId);
+}
+
+function assignmentIdOf(activityRef: ActivityRef): number {
+  const lmsRef = activityRef.lmsRef ?? '';
+
+  const parsed = parseMoodleRef(lmsRef);
+  if (parsed !== null) {
+    if (parsed.kind !== 'assignment') {
+      throw new Error(
+        `La actividad "${activityRef.slug}" apunta a un foro de Moodle ("${lmsRef}"), no a una tarea.`,
+      );
+    }
+    return parsed.id;
+  }
+
+  // Compatibilidad: las actividades dadas de alta antes del prefijo guardaron
+  // el id pelado ("42"). Se siguen aceptando para no romperlas.
+  if (/^\d+$/.test(lmsRef)) return Number(lmsRef);
+
+  throw new Error(
+    `La actividad "${activityRef.slug}" no tiene asignada una tarea de Moodle (lmsRef vacío o con formato desconocido: "${lmsRef}").`,
+  );
 }
 
 function parseRemoteId(remoteId: string): {

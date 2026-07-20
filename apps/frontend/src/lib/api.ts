@@ -1,20 +1,24 @@
 import { z } from 'zod';
 import {
+  ActivityFileContentResponse,
   ActivityFileListResponse,
   ActivityFileResponse,
   ActivityListResponse,
   ActivityResponse,
   ApiError,
+  AppendActivityFileChunkResponse,
   BatchRunListResponse,
   ContextListResponse,
   ContextResponse,
   CorrectionResponse,
   CostBreakdownResponse,
   DiscoverActivitiesResponse,
+  DiscoverCoursesResponse,
   HealthResponse,
   ImportActivitiesResponse,
   LoginResponse,
   MeResponse,
+  MoodleConnectionResponse,
   OverviewResponse,
   QueueCounts,
   QueueResponse,
@@ -39,6 +43,9 @@ import type {
   SubmissionStatus,
   UpdateActivityRequest,
   UpdateContextRequest,
+  AppendActivityFileChunkRequest,
+  BeginActivityFileUploadRequest,
+  UpdateMoodleTokenRequest,
   UpdateSettingsRequest,
   UpdateUserRequest,
 } from '@vega/shared';
@@ -47,16 +54,6 @@ const TOKEN_KEY = 'vega.token';
 
 /** El contrato no exporta el tipo del código de error por separado; lo derivamos. */
 export type ApiErrorCode = ApiError['error']['code'];
-
-/**
- * Alta de un fichero de contexto. El API todavía no almacena el binario: recibe
- * los metadatos en JSON y devuelve el registro creado (ver `activities.ts`).
- */
-export interface UploadActivityFileRequest {
-  filename: string;
-  mimeType: string;
-  sizeBytes: number;
-}
 
 // ── Token ───────────────────────────────────────────────────────────────────
 
@@ -337,8 +334,16 @@ export const api = {
   updateActivity: (id: string, body: UpdateActivityRequest) =>
     request(routes.activity(id), { schema: ActivityResponse, method: 'PATCH', body }),
 
-  discoverActivities: (signal?: AbortSignal) =>
-    request(routes.discoverActivities, { schema: DiscoverActivitiesResponse, signal }),
+  /** Cursos que ve el token del profesor. Primer paso del alta de actividades. */
+  discoverCourses: (signal?: AbortSignal) =>
+    request(routes.discoverCourses, { schema: DiscoverCoursesResponse, signal }),
+
+  discoverActivities: (moodleCourseId: string, signal?: AbortSignal) =>
+    request(routes.discoverActivities, {
+      schema: DiscoverActivitiesResponse,
+      query: { moodleCourseId },
+      signal,
+    }),
 
   importActivities: (body: ImportActivitiesRequest) =>
     request(routes.importActivities, { schema: ImportActivitiesResponse, method: 'POST', body }),
@@ -346,14 +351,61 @@ export const api = {
   activityFiles: (id: string, signal?: AbortSignal) =>
     request(routes.activityFiles(id), { schema: ActivityFileListResponse, signal }),
 
-  addActivityFile: (id: string, body: UploadActivityFileRequest) =>
+  /** Paso 1 de la subida troceada: reserva el fichero y devuelve su id. */
+  beginActivityFileUpload: (id: string, body: BeginActivityFileUploadRequest) =>
     request(routes.activityFiles(id), { schema: ActivityFileResponse, method: 'POST', body }),
+
+  /** Paso 2, repetido: un trozo por petición. */
+  appendActivityFileChunk: (
+    activityId: string,
+    fileId: string,
+    body: AppendActivityFileChunkRequest,
+  ) =>
+    request(routes.activityFileChunk(activityId, fileId), {
+      schema: AppendActivityFileChunkResponse,
+      method: 'PUT',
+      body,
+    }),
+
+  /** Paso 3: hasta que no se cierra, el fichero no se lista ni se envía. */
+  completeActivityFileUpload: (activityId: string, fileId: string) =>
+    request(routes.activityFileComplete(activityId, fileId), {
+      schema: ActivityFileResponse,
+      method: 'POST',
+    }),
 
   removeActivityFile: (activityId: string, fileId: string) =>
     requestEmpty(routes.activityFile(activityId, fileId), 'DELETE'),
 
+  activityFileContent: (activityId: string, fileId: string, signal?: AbortSignal) =>
+    request(routes.activityFileContent(activityId, fileId), {
+      schema: ActivityFileContentResponse,
+      signal,
+    }),
+
   downloadActivityFile: (activityId: string, fileId: string, fallbackName: string) =>
     downloadFile(routes.activityFile(activityId, fileId), fallbackName),
+
+  // ── Mi conexión con Moodle ────────────────────────────────────────────────
+
+  updateMyMoodleToken: (body: UpdateMoodleTokenRequest) =>
+    request(routes.myMoodleToken, { schema: MeResponse, method: 'PUT', body }),
+
+  testMyMoodleConnection: () =>
+    request(routes.testMyMoodleConnection, {
+      schema: MoodleConnectionResponse,
+      method: 'POST',
+    }),
+
+  /** Sólo administración: escribir el token de otro. Nunca leerlo. */
+  updateUserMoodleToken: (id: string, body: UpdateMoodleTokenRequest) =>
+    request(routes.userMoodleToken(id), { schema: UserResponse, method: 'PUT', body }),
+
+  testUserMoodleConnection: (id: string) =>
+    request(routes.testUserMoodleConnection(id), {
+      schema: MoodleConnectionResponse,
+      method: 'POST',
+    }),
 
   // ── Contextos ─────────────────────────────────────────────────────────────
 

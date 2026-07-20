@@ -158,6 +158,9 @@ export function ActivityDetailPage() {
   };
 
   const maxScoreError = fieldError(mutation.error, 'maxScore');
+  // El tipo no se edita (viene de Moodle), así que sale de la actividad y no
+  // del formulario.
+  const isForum = activity.kind === 'forum';
 
   const onSubmit = () => {
     const maxScore = parseMaxScore(form.maxScore);
@@ -318,14 +321,29 @@ export function ActivityDetailPage() {
           </div>
         </Section>
 
-        <Section title="Solución de referencia">
+        {/*
+          El mismo campo con dos papeles. En una entrega es la solución contra la
+          que se contrasta lo que escribe el alumno; en un foro no hay nada que
+          contrastar, es el material sobre el que preguntan. Llamarlo por su
+          nombre en cada caso evita que el profesor crea que está redactando la
+          respuesta que Vega va a copiar.
+        */}
+        <Section title={isForum ? 'Material asociado' : 'Solución de referencia'}>
           <PreviewEditor
-            label="Solución del profesor"
+            label={isForum ? 'Material del profesor' : 'Solución del profesor'}
             mode="latex"
             value={form.referenceSolution}
             onChange={(value) => update('referenceSolution', value)}
-            placeholder={"La derivada es $f'(x) = 2x + 3$…"}
-            hint="Texto o LaTeX. Escribe las fórmulas entre $…$ para verlas renderizadas."
+            placeholder={
+              isForum
+                ? 'El tema sobre el que preguntan: $\\lim_{x \\to 0} \\frac{\\sin x}{x} = 1$…'
+                : "La derivada es $f'(x) = 2x + 3$…"
+            }
+            hint={
+              isForum
+                ? 'Texto o LaTeX. Orienta lo que Vega responde; no reparte puntos ni produce nota.'
+                : 'Texto o LaTeX. Escribe las fórmulas entre $…$ para verlas renderizadas.'
+            }
           />
         </Section>
       </div>
@@ -392,7 +410,7 @@ export function ActivityDetailPage() {
 
         <Section
           title="Ficheros de contexto"
-          description="Enunciado, solución escaneada o criterios del departamento."
+          description="El enunciado o el material en .tex o .md viajan al modelo al corregir. Otros formatos se guardan como referencia tuya."
         >
           <ActivityFilesEditor activityId={activity.id} files={activity.files} />
         </Section>

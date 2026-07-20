@@ -20,6 +20,8 @@ tomó, **la decisión** y **las consecuencias** — incluidas las malas.
 | [0003](0003-contexto-tres-niveles.md) | Contexto de corrección en tres niveles | Aceptado |
 | [0004](0004-validacion-humana-obligatoria.md) | El profesor siempre valida antes de publicar | Aceptado |
 | [0005](0005-proveedor-ia-intercambiable.md) | Proveedor de IA intercambiable, mock por defecto | Aceptado |
-| [0006](0006-conectores-lms-interfaz-minima.md) | Conectores LMS tras una interfaz mínima | Aceptado |
+| [0006](0006-conectores-lms-interfaz-minima.md) | Conectores LMS tras una interfaz mínima | Sustituido por ADR 0009 |
 | [0007](0007-dos-entornos-portainer.md) | Dos entornos desplegados por dos Portainer | Aceptado |
 | [0008](0008-separar-puntos-ia-y-profesor.md) | Separar `aiPoints` de `teacherPoints` | Aceptado |
+| [0009](0009-interfaz-lms-siete-operaciones.md) | La interfaz `LmsConnector` crece a siete operaciones | Aceptado |
+| [0010](0010-credencial-moodle-por-usuario.md) | La credencial de Moodle es de cada profesor | Aceptado |

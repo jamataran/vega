@@ -1,11 +1,19 @@
 import { eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
-import { LoginRequest, type LoginResponse, type MeResponse, routes } from '@vega/shared';
+import {
+  LoginRequest,
+  type LoginResponse,
+  type MeResponse,
+  type MoodleConnectionResponse,
+  UpdateMoodleTokenRequest,
+  routes,
+} from '@vega/shared';
 import { verifyPassword } from '../auth/password.js';
 import { currentUser } from '../auth/plugin.js';
 import { schema } from '../db/client.js';
 import { toUser } from '../db/mappers.js';
 import { parseOrThrow, unauthorized } from '../http/errors.js';
+import { asHttpError, connectorForUser } from '../lms/factory.js';
 import type { AppContext } from '../context.js';
 
 export async function authRoutes(app: FastifyInstance, ctx: AppContext): Promise<void> {
@@ -52,4 +60,70 @@ export async function authRoutes(app: FastifyInstance, ctx: AppContext): Promise
     if (!row || !row.active) throw unauthorized('Tu usuario ya no está activo.');
     return { user: toUser(row) };
   });
+
+  /**
+   * Token de Moodle del usuario en sesión.
+   *
+   * Cualquier rol, y sólo el suyo: no hay ruta para que un administrador ponga
+   * el token de otro. Un token de Moodle es una credencial personal —da acceso
+   * a los cursos de quien lo emitió— y quien lo pega debe ser su dueño.
+   */
+  app.put(
+    routes.myMoodleToken,
+    { preHandler: app.authenticate },
+    async (request): Promise<MeResponse> => {
+      const session = currentUser(request);
+      const body = parseOrThrow(UpdateMoodleTokenRequest, request.body, 'El token de Moodle');
+
+      const [row] = await ctx.db
+        .update(schema.users)
+        .set({
+          moodleToken: body.token === null ? null : body.token.trim(),
+          moodleTokenUpdatedAt: body.token === null ? null : new Date(),
+        })
+        .where(eq(schema.users.id, session.sub))
+        .returning();
+
+      if (!row) throw unauthorized('Tu usuario ya no está activo.');
+      return { user: toUser(row) };
+    },
+  );
+
+  /**
+   * Prueba la conexión con el token guardado.
+   *
+   * Un token inválido **no es un error de esta ruta**: es su respuesta. Por eso
+   * devuelve 200 con `ok: false` y un mensaje, en vez de un código de error —
+   * el profesor está precisamente comprobando si funciona, y necesita leer por
+   * qué no en el mismo sitio donde lo acaba de pegar.
+   */
+  app.post(
+    routes.testMyMoodleConnection,
+    { preHandler: app.authenticate },
+    async (request): Promise<MoodleConnectionResponse> => {
+      const session = currentUser(request);
+      try {
+        const connector = await connectorForUser(ctx, session.sub);
+        const info = await connector.verifyConnection();
+        return {
+          ok: true,
+          message:
+            info.courseCount === 0
+              ? 'Conexión correcta, pero tu token no ve ningún curso. Revisa en Moodle que el servicio tenga habilitada la función core_enrol_get_users_courses.'
+              : 'Conexión correcta.',
+          siteName: info.siteName,
+          username: info.username,
+          courseCount: info.courseCount,
+        };
+      } catch (error) {
+        return {
+          ok: false,
+          message: asHttpError(error).message,
+          siteName: null,
+          username: null,
+          courseCount: null,
+        };
+      }
+    },
+  );
 }

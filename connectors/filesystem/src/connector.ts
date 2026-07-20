@@ -1,13 +1,15 @@
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
-import type { ActivityKind, DiscoveredActivity } from '@vega/shared';
+import type { ActivityKind, DiscoveredActivity, DiscoveredCourse } from '@vega/shared';
 import { hasStudentFile } from '@vega/shared';
 import type { LmsConnector, LmsConnectorFactory } from '@vega/connector-lms';
+import { LmsUnavailableError } from '@vega/connector-lms';
 import type {
   ActivityRef,
   DownloadedFile,
   FeedbackFile,
+  LmsConnectionInfo,
   LmsConnectorConfig,
   RemoteGrade,
   RemoteSubmission,
@@ -31,6 +33,9 @@ import type {
  * El tipo de actividad se declara en `<root>/<slug-actividad>/actividad.json`
  * (`{"kind":"forum","name":"…","courseName":"…"}`). Si no está, se deduce de lo
  * que hay dentro: carpetas con PDF o imagen son entregas; con .txt/.md, foros.
+ *
+ * No hay nivel de curso en el árbol: los cursos se derivan de los `courseName`
+ * que declaran las actividades, y su identificador es un slug de ese nombre.
  */
 
 export const FilesystemConfig = z.object({
@@ -65,11 +70,57 @@ export class FilesystemConnector implements LmsConnector {
   }
 
   /**
+   * Aquí no hay cursos de verdad: el "curso" es el `courseName` que declara
+   * cada `actividad.json`, y su identificador se deriva del propio nombre. Es
+   * estable mientras nadie renombre el curso, que es exactamente la misma
+   * limitación que tiene agrupar por cadena de texto; a cambio, quien monta el
+   * árbol no tiene que inventarse ids.
+   */
+  async listCourses(): Promise<DiscoveredCourse[]> {
+    const byId = new Map<string, DiscoveredCourse>();
+
+    for (const slug of await safeReaddir(this.#root)) {
+      const activityDir = join(this.#root, slug);
+      const info = await safeStat(activityDir);
+      if (info === undefined || !info.isDirectory()) continue;
+
+      const courseName = (await this.#readActivityMeta(activityDir))?.courseName ?? '';
+      const course = courseFor(courseName);
+      // El primero gana: dos actividades del mismo curso describen el mismo.
+      if (!byId.has(course.moodleCourseId)) byId.set(course.moodleCourseId, course);
+    }
+
+    return [...byId.values()].sort((a, b) => a.name.localeCompare(b.name, 'es'));
+  }
+
+  /**
+   * Lo único que puede fallar en este conector es que la raíz no exista o no se
+   * pueda leer: un `LMS_FILESYSTEM_ROOT` mal escrito o un volumen sin montar.
+   * Se señala como indisponibilidad y no como error de credencial porque no hay
+   * ninguna que revisar, sólo una ruta que corregir o un disco que montar.
+   */
+  async verifyConnection(): Promise<LmsConnectionInfo> {
+    const info = await safeStat(this.#root);
+    if (info === undefined || !info.isDirectory()) {
+      throw new LmsUnavailableError(
+        `No se puede leer la carpeta de entregas "${this.#root}". Comprueba la ruta y que el volumen esté montado.`,
+      );
+    }
+
+    return {
+      siteName: `Carpeta de entregas · ${this.#root}`,
+      // No hay usuario: se lee el disco con los permisos del propio proceso.
+      username: 'local',
+      courseCount: (await this.listCourses()).length,
+    };
+  }
+
+  /**
    * Cada carpeta de primer nivel es una actividad. El recuento de pendientes es
    * el número de alumnos con algo entregado, que es lo que el profesor espera
    * ver antes de dar de alta la actividad en Vega.
    */
-  async listActivities(): Promise<DiscoveredActivity[]> {
+  async listActivities(moodleCourseId?: string): Promise<DiscoveredActivity[]> {
     const entries = await safeReaddir(this.#root);
 
     const activities: DiscoveredActivity[] = [];
@@ -79,6 +130,11 @@ export class FilesystemConnector implements LmsConnector {
       if (info === undefined || !info.isDirectory()) continue;
 
       const meta = await this.#readActivityMeta(activityDir);
+      const course = courseFor(meta?.courseName ?? '');
+      // Se filtra antes de contar entregas: recorrer las carpetas de alumno de
+      // una actividad que no se va a devolver es el grueso del trabajo.
+      if (moodleCourseId !== undefined && course.moodleCourseId !== moodleCourseId) continue;
+
       const kind = meta?.kind ?? (await inferKind(activityDir));
       const pendingCount = await countStudentsWithSubmission(activityDir, kind);
 
@@ -86,6 +142,7 @@ export class FilesystemConnector implements LmsConnector {
         moodleRef: slug,
         name: meta?.name ?? slug,
         kind,
+        moodleCourseId: course.moodleCourseId,
         courseName: meta?.courseName ?? '',
         pendingCount,
         // Qué está dado de alta en Vega no lo sabe el conector.
@@ -237,6 +294,35 @@ export const createFilesystemConnector: LmsConnectorFactory = (config: LmsConnec
   new FilesystemConnector(FilesystemConfig.parse(config));
 
 // ── Utilidades ──────────────────────────────────────────────────────────────
+
+/** Cajón de las actividades sin `courseName`, para que nunca falte el curso. */
+const UNASSIGNED_COURSE_ID = 'sin-curso';
+const UNASSIGNED_COURSE_NAME = 'Sin curso asignado';
+
+/**
+ * El curso que le corresponde a un `courseName` del `actividad.json`. El id es
+ * un slug del nombre: sin tildes y sin mayúsculas, para que "Matemáticas 2º" y
+ * "matematicas 2º" no acaben siendo dos cursos distintos por un acento.
+ */
+function courseFor(courseName: string): DiscoveredCourse {
+  const slug = courseName
+    .normalize('NFD')
+    // Se quitan los diacríticos ya separados por la descomposición NFD.
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+
+  if (slug === '') {
+    return {
+      moodleCourseId: UNASSIGNED_COURSE_ID,
+      name: UNASSIGNED_COURSE_NAME,
+      shortName: '',
+    };
+  }
+  // No hay nombre corto: el árbol de carpetas sólo declara uno.
+  return { moodleCourseId: slug, name: courseName, shortName: '' };
+}
 
 async function safeReaddir(path: string): Promise<string[]> {
   // Una actividad sin carpeta todavía no es un error: simplemente no tiene entregas.

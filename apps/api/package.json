@@ -20,6 +20,9 @@
   "dependencies": {
     "@fastify/cors": "^10.0.2",
     "@fastify/jwt": "^9.0.3",
+    "@vega/connector-filesystem": "workspace:*",
+    "@vega/connector-lms": "workspace:*",
+    "@vega/connector-moodle3": "workspace:*",
     "@vega/core": "workspace:*",
     "@vega/shared": "workspace:*",
     "drizzle-orm": "^0.38.3",

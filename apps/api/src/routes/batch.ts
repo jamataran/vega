@@ -1,4 +1,4 @@
-import { asc, desc, eq } from 'drizzle-orm';
+import { and, asc, desc, eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import {
   hasStudentFile,
@@ -213,10 +213,35 @@ async function processOne(
   // se lee una vez por lote y no una vez por entrega.
   let context = contextCache.get(activity.id);
   if (context === undefined) {
+    // Sólo lo subido del todo: una subida a medias metida en el prompt haría
+    // corregir contra medio enunciado sin que nadie se enterase.
+    const fileRows = await db
+      .select({
+        filename: schema.activityFiles.filename,
+        content: schema.activityFiles.content,
+      })
+      .from(schema.activityFiles)
+      .where(
+        and(
+          eq(schema.activityFiles.activityId, activity.id),
+          eq(schema.activityFiles.uploadComplete, true),
+        ),
+      )
+      .orderBy(asc(schema.activityFiles.uploadedAt));
+
     context = {
       global: await readContextLevel(ctx, 'global', 'global'),
       activityKind: await readContextLevel(ctx, 'activity_kind', activity.kind),
       activity: await readContextLevel(ctx, 'activity', activity.slug),
+      // Hasta ahora la solución de referencia y los ficheros se guardaban, se
+      // enseñaban en «contexto efectivo»… y no llegaban al modelo: la pantalla
+      // prometía más de lo que el lote hacía. Con esto, lo que el profesor ve
+      // ahí es de verdad lo que se envía.
+      referenceSolution: activity.referenceSolution,
+      graded: activity.graded,
+      fileContents: fileRows.filter(
+        (row): row is { filename: string; content: string } => row.content !== null,
+      ),
     };
     contextCache.set(activity.id, context);
   }

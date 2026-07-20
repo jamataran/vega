@@ -67,11 +67,27 @@ El resultado se puede ver tal cual, sin gastar tokens, en `GET /api/contexts/res
 (`ResolvedContextResponse`), que devuelve los tres niveles por separado y el `merged` final. Si una
 corrección sale rara, **el primer sitio donde mirar es ahí**.
 
-> **Ojo con `referenceSolution`.** El campo existe en la actividad y se edita desde la aplicación,
-> pero hoy **no llega al modelo**: el lote no se lo pasa al motor y `GradeInput` no lo contempla. Si
-> quieres que la solución de referencia pese en la corrección, escríbela dentro del fichero de nivel
-> `activity`. Lo mismo con los ficheros adjuntos (`activity_files`): aparecen en el contexto
-> resuelto que ve el profesor, pero el lote no los envía.
+Además de los tres niveles, `resolveContext()` añade al final dos cosas que **no** son Markdown de
+esta carpeta:
+
+- **La solución de referencia de la actividad**, en su propia sección. Se titula **«Solución de
+  referencia»** si la actividad se puntúa y **«Material asociado»** si no: en un foro de dudas ese
+  campo no es la respuesta correcta a nada, sino el material del que preguntan los alumnos, y
+  llamarlo «solución» invita al modelo a tratarlo como plantilla de respuesta.
+- **El contenido de los ficheros de contexto de texto**, una sección «Material adjunto · *nombre*»
+  por fichero. Sólo `.tex`, `.md`, `.markdown` y `.txt`: un `.tex` ya es texto, entra literal en el
+  prompt y se cachea con el resto. De un PDF o una imagen **no se guarda el contenido**, y la
+  aplicación lo dice en vez de fingir que llegan.
+
+Van al final, y no es capricho: son lo más concreto y lo que más cambia entre actividades, así que
+ponerlos antes acortaría el prefijo cacheable sin ganar nada.
+
+> **Ojo: el lote todavía no envía nada de eso.** `resolveContext()` sabe montarlo y
+> `GET /api/contexts/resolved/{activityId}` lo enseña, pero `apps/api/src/routes/batch.ts` construye
+> el contexto que manda al motor con **sólo los tres niveles de Markdown**. Hoy, si quieres que la
+> solución de referencia o el material adjunto pesen en la corrección, **escríbelos dentro del
+> fichero de nivel `activity`**. Es una carencia declarada, no una decisión: hasta que se cierre, la
+> pantalla de contexto efectivo enseña más de lo que el modelo lee.
 
 Ver [ADR 0003](../docs/decisiones/0003-contexto-tres-niveles.md).
 

@@ -12,6 +12,11 @@ const STATUS_BY_CODE: Record<ErrorCode, number> = {
   CONFLICT: 409,
   UNPROCESSABLE: 422,
   INTERNAL: 500,
+  // 422 y no 401: un token de Moodle caducado es configuración del profesor,
+  // no una sesión inválida de Vega. Con 401 el cliente lo echaría de la app.
+  LMS_AUTH: 422,
+  // 502: el fallo es de un sistema de aguas arriba, no de esta petición.
+  LMS_UNAVAILABLE: 502,
 };
 
 /** Error de dominio que el manejador global sabe convertir en respuesta HTTP. */
@@ -43,6 +48,8 @@ export const notFound = (message = 'No se ha encontrado el recurso.') => new Htt
 export const conflict = (message: string) => new HttpError('CONFLICT', message);
 export const unprocessable = (message: string, fields?: Record<string, string>) =>
   new HttpError('UNPROCESSABLE', message, fields);
+export const lmsAuth = (message: string) => new HttpError('LMS_AUTH', message);
+export const lmsUnavailable = (message: string) => new HttpError('LMS_UNAVAILABLE', message);
 
 /** Aplana los errores de Zod a `{ campo: mensaje }` para que el front los pinte junto al input. */
 function fieldsFromZod(error: ZodError): Record<string, string> {

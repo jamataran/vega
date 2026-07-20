@@ -40,7 +40,7 @@ graph TB
   SHARED["packages/shared<br/>esquemas Zod + tipos<br/>+ objeto routes"]
 
   subgraph conectores["connectors/"]
-    LMSIF["interfaz LmsConnector<br/>5 operaciones"]
+    LMSIF["interfaz LmsConnector<br/>7 operaciones"]
     MOCK["mock<br/>(por defecto)"]
     FS["filesystem"]
     M3["moodle3<br/>sin verificar contra Moodle real"]
@@ -55,7 +55,7 @@ graph TB
   DB[("PostgreSQL 16<br/>Drizzle ORM")]
   SEED["pnpm db:seed<br/>script de desarrollo"]
   CTX[["contexts/<br/>Markdown versionado en git"]]
-  FILES[["Almacén de ficheros<br/>PENDIENTE: hoy no se<br/>guardan bytes en ningún sitio"]]
+  FILES[["Almacén de binarios<br/>PENDIENTE: los ficheros de texto<br/>viven en activity_files.content;<br/>de un binario no se guardan bytes"]]
   LMS(["LMS de la academia<br/>Moodle 3.x"])
 
   PWA -->|"HTTPS · /api/*"| API
@@ -66,13 +66,14 @@ graph TB
   API --> DB
   API --> CORE
   SCHED --> CORE
-  API -.->|pendiente| FILES
+  API -.->|"pendiente: sólo binarios"| FILES
   SEED --> CTX
   SEED --> DB
   CORE --> AIIF
   AIIF --> AIMOCK
   AIIF --> ANTH
-  API -.->|"sin cablear todavía"| LMSIF
+  API -->|"catálogo: cursos y actividades"| LMSIF
+  API -.->|"ingesta y publicación: sin cablear"| LMSIF
   LMSIF --> MOCK
   LMSIF --> FS
   LMSIF --> M3
@@ -85,8 +86,15 @@ Dos flechas que no son sólidas y conviene leer despacio:
   script de siembra (`apps/api/src/db/seed.ts`) y los vuelca en la tabla `grading_contexts`. A
   partir de ahí manda la base de datos: `readContextLevel()` consulta la tabla y nada más. Ver
   [`contexts/README.md`](../contexts/README.md).
-- **El API todavía no llama a ningún conector.** La interfaz existe y tiene tres implementaciones,
-  pero ni la ingesta ni la publicación están cableadas. Ver «Estado real» al final.
+- **El API llama al conector, pero sólo para el catálogo.** Desde H2, `GET /api/courses/discover`,
+  `GET /api/activities/discover` y `POST /api/activities/import` hablan de verdad con el LMS a través
+  de `apps/api/src/lms/factory.ts`, igual que la prueba de conexión de Ajustes. **La ingesta de
+  entregas y la publicación siguen sin cablear**: ninguna ruta llama a `listSubmissions()`,
+  `download()`, `publishGrade()` ni `publishFeedbackFile()`. Ver «Estado real» al final.
+- **El conector se construye por usuario, no por instalación.** La URL y el nombre del conector salen
+  de `app_settings`; el token, de `users.moodle_token` del usuario en sesión, porque
+  `core_enrol_get_users_courses` devuelve los cursos del dueño del token. Ver
+  [ADR 0010](decisiones/0010-credencial-moodle-por-usuario.md).
 
 **Lo que no aparece en el diagrama a propósito**: no hay cola de mensajes externa, ni Redis, ni
 worker separado. El planificador de lotes vive dentro del proceso de `apps/api` y se protege con
@@ -340,14 +348,22 @@ El paquete se llama `@vega/frontend` y su imagen `vega-frontend`.
 ### `connectors/` — fuera de `packages/` a propósito
 
 Están al mismo nivel que `apps` y `packages` porque son **puntos de extensión de terceros**: la
-invitación es que quien tenga otro LMS añada un directorio aquí, implemente cinco métodos y abra
+invitación es que quien tenga otro LMS añada un directorio aquí, implemente siete métodos y abra
 un PR, sin entender el resto del monorepo. Enterrarlos en `packages/` los haría parecer detalle
-interno. Ver [ADR 0006](decisiones/0006-conectores-lms-interfaz-minima.md).
+interno. Ver [ADR 0009](decisiones/0009-interfaz-lms-siete-operaciones.md), que sustituye al
+[ADR 0006](decisiones/0006-conectores-lms-interfaz-minima.md).
 
-La interfaz `LmsConnector` son cinco operaciones: `listActivities`, `listSubmissions`, `download`,
-`publishGrade` y `publishFeedbackFile`. Los tipos que cruzan esa frontera son deliberadamente pobres
+La interfaz `LmsConnector` son siete operaciones: `listCourses`, `verifyConnection`,
+`listActivities`, `listSubmissions`, `download`, `publishGrade` y `publishFeedbackFile`. Las dos
+primeras y el filtro por curso de la tercera entraron en H2, cuando el alta de actividades pasó de
+un catálogo simulado a un Moodle real. Los tipos que cruzan esa frontera son deliberadamente pobres
 (`ActivityRef`, `SubmissionRef`, `RemoteSubmission`, `RemoteGrade`): un conector mueve ficheros,
 textos y notas; corregir no es asunto suyo.
+
+**Los modos de fallo sí son parte del contrato**, y no lo eran: `LmsAuthError` («tu credencial no
+vale, pasa por Ajustes») y `LmsUnavailableError` («el LMS no responde, reinténtalo») se reconocen por
+su `code` y no con `instanceof` —entre dos copias del paquete `instanceof` falla en silencio— y
+llegan al cliente como `LMS_AUTH` (422) y `LMS_UNAVAILABLE` (502).
 
 Dos decisiones de esa frontera que sostienen el caso del foro:
 
@@ -387,14 +403,18 @@ datos) y ver el consumo. Lo que no:
 |---|---|---|
 | Ingesta desde el LMS | `apps/api` | **Sin cablear.** Ninguna ruta llama a `listSubmissions()` ni a `download()`. Las entregas de desarrollo las crea `pnpm db:seed`. |
 | Publicación en el LMS | `routes/submissions.ts` | **Sin cablear.** `POST .../publish` marca `published_at` y el estado, con un `TODO(vega)` donde irían `publishGrade` y `publishFeedbackFile`. |
-| Catálogo de actividades de Moodle | `routes/activities.ts` | **Mock.** `GET /api/activities/discover` devuelve una constante `MOODLE_CATALOGUE`. El comentario que dice que `@vega/connector-lms` «todavía no existe» está caduco: el paquete existe y ya no importa `TaskType`. |
-| `moodle3` · listar cursos, tareas y foros | `connectors/moodle3` | **Implementado, sin verificar contra un Moodle real.** Usa `core_enrol_get_users_courses`, `mod_assign_get_assignments` y `mod_forum_get_forums_by_courses`. `pendingCount` de una entrega se devuelve a 0 a propósito: contarlo obligaría a bajarse todas las entregas. |
+| Catálogo de actividades de Moodle | `routes/activities.ts` · `lms/factory.ts` | **Cableado.** `GET /api/courses/discover`, `GET /api/activities/discover` y `POST /api/activities/import` llaman al conector de verdad; `MOODLE_CATALOGUE` ha desaparecido. `apps/api` depende ya de `@vega/connector-{lms,moodle3,filesystem}`. |
+| `moodle3` · listar cursos, tareas y foros | `connectors/moodle3` | **Implementado, sin verificar contra un Moodle real.** Usa `core_enrol_get_users_courses`, `mod_assign_get_assignments` y `mod_forum_get_forums_by_courses`, y ya conserva el id del curso. Tiene tests unitarios con `fetchImpl` inyectado y varios `TODO(vega)` abiertos. `pendingCount` de una entrega se devuelve a 0 a propósito: contarlo obligaría a bajarse todas las entregas. **Sigue siendo el riesgo principal del proyecto.** |
+| `moodle3` · comprobar la credencial | `connectors/moodle3` | **Implementado**, sin verificar contra un Moodle real. `verifyConnection()` usa `core_webservice_get_site_info` y devuelve sitio, usuario y número de cursos. No distingue «no tienes cursos» de «al servicio le falta habilitar `core_enrol_get_users_courses`». |
 | `moodle3` · leer intervenciones de un foro | `connectors/moodle3` | **Sin implementar.** `listSubmissions()` lanza un error si el `kind` es `forum`. Falta el camino `mod_forum_get_forum_discussions_paginated` + posts de cada debate, concatenados por alumno en `textContent`. Para probar foros hay que usar el conector `mock` o `filesystem`. |
-| `moodle3` · subir el PDF de feedback | `connectors/moodle3` | **Sin resolver.** `publishFeedbackFile()` rechaza siempre: Moodle 3 no expone un web service limpio para `assignfeedback_file`. `publishGrade()` sí incluye el feedback en HTML. Es el riesgo conocido del proyecto. |
-| Almacén de ficheros | `apps/api` | **Sin implementar.** `activity_files` guarda metadatos y `storage_path` a `null`; los bytes no se guardan. Las páginas escaneadas de la UI son SVG generados al vuelo (`routes/scans.ts`). |
+| `moodle3` · subir el PDF de feedback | `connectors/moodle3` | **Sin resolver.** `publishFeedbackFile()` rechaza siempre: Moodle 3 no expone un web service limpio para `assignfeedback_file`. `publishGrade()` sí incluye el feedback en HTML. Es un riesgo conocido desde el ADR 0006. |
+| Ficheros de contexto · texto | `routes/activities.ts` | **Implementado.** `.tex`, `.md`, `.markdown` y `.txt` guardan su contenido en `activity_files.content`. Subida troceada de 256 KiB, tope de 4 MiB, y `upload_complete` para que una subida a medias no se liste ni entre en el contexto. |
+| Almacén de binarios | `apps/api` | **Sin implementar.** `storage_path` sigue siempre a `null`: de un PDF o una imagen no se guardan bytes. Se registran como referencia, con `hasContent: false`, y la UI lo dice. Las páginas escaneadas de la UI son SVG generados al vuelo (`routes/scans.ts`). |
 | Compilación de LaTeX | `feedback/pdf.ts` | **Simulada.** Se vuelca el LaTeX como texto legible; el «original del alumno» del PDF se reconstruye a partir de la transcripción y va etiquetado como reproducción. |
-| `referenceSolution` | `activities` | **Se guarda y se edita, pero no llega al modelo.** `GradeInput` no tiene ese campo y el lote no lo pasa. Hoy la solución de referencia sólo influye si el profesor la escribe dentro del Markdown de nivel `activity`. |
-| `GET /api/health` | `routes/health.ts` | Verifica **sólo la base de datos** (`SELECT 1`, y 503 si falla). `aiProvider` y `lmsConnector` son el valor de configuración, no una comprobación. |
+| `referenceSolution` y ficheros en el prompt | `packages/core` · `routes/batch.ts` | **A medias, y esto engaña.** `resolveContext()` monta la sección —«Solución de referencia» si se puntúa, **«Material asociado»** si no— y `GET /api/contexts/resolved/{id}` la enseña. Pero **el lote construye el contexto con sólo los tres niveles de Markdown**: ni la solución ni el contenido de los ficheros llegan al modelo al corregir. Lo que el profesor ve en la pantalla de contexto y lo que lee el modelo no coinciden. |
+| Alcance por curso | `auth/scope.ts` | **Implementado.** Un `teacher` sólo alcanza las actividades, las entregas y los agregados del panel de sus cursos (`course_teachers`) más lo que él importó; un `admin` lo ve todo, y sólo él ve `lastBatchRun`. Antes `GET /api/activities` devolvía todo a cualquier autenticado. **Nada limpia `course_teachers`**: el acceso se anota al listar cursos y no caduca. |
+| `POST /api/batch/run` | `routes/batch.ts` | **Síncrono**, pese a lo que sugiere el nombre: espera a que el lote termine. Con llamadas reales, la petición puede colgarse minutos. Tampoco está restringido a administrador. |
+| `GET /api/health` | `routes/health.ts` | Verifica **sólo la base de datos** (`SELECT 1`, y 503 si falla). `aiProvider` y `lmsConnector` son el valor de configuración, no una comprobación, y no dicen nada del token de nadie. |
 
 ## Despliegue
 

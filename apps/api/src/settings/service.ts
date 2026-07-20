@@ -15,7 +15,9 @@ import type { AppContext } from '../context.js';
  * informa de si están configurados.
  */
 
-const SECRET_KEYS = new Set(['anthropic.apiKey', 'moodle.token', 'smtp.password']);
+// `moodle.token` ya no está aquí: el token de Moodle es de cada usuario
+// (`users.moodle_token`), porque decide qué cursos ve. Ver `lms/factory.ts`.
+const SECRET_KEYS = new Set(['anthropic.apiKey', 'smtp.password']);
 
 type SettingsMap = Map<string, { value: string; isSecret: boolean }>;
 
@@ -61,7 +63,6 @@ export async function getSettings(ctx: AppContext): Promise<AppSettings> {
     },
     moodle: {
       baseUrl: str(map, 'moodle.baseUrl', config.MOODLE_BASE_URL ?? ''),
-      tokenConfigured: configured(map, 'moodle.token') || Boolean(config.MOODLE_TOKEN),
       connector: str(map, 'moodle.connector', config.LMS_CONNECTOR) as
         | 'mock'
         | 'filesystem'

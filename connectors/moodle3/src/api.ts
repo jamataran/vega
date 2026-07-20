@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { LmsAuthError, LmsUnavailableError } from '@vega/connector-lms';
 
 /**
  * Cliente de los web services REST de Moodle 3.
@@ -6,6 +7,9 @@ import { z } from 'zod';
  * ⚠️ NADA de este fichero se ha probado contra un Moodle real. Las URLs, los
  * nombres de función y la forma de las respuestas están sacados de la
  * documentación de Moodle 3.x, no de una ejecución. Ver los `TODO(vega)`.
+ * Lo que sí está cubierto por `api.test.ts` es la clasificación del fallo
+ * (credencial contra indisponibilidad), que se prueba con un `fetchImpl` de
+ * laboratorio y no depende de acertar con la forma de las respuestas.
  *
  * Particularidades de Moodle que condicionan el diseño:
  *  - Todos los servicios cuelgan del MISMO endpoint y se distinguen por el
@@ -19,6 +23,12 @@ export const WS_PATH = '/webservice/rest/server.php';
 
 /** Funciones de web service que usa Vega. */
 export const WS_FUNCTIONS = {
+  /**
+   * Sitio, usuario y capacidades del dueño del token. Es la llamada más barata
+   * que existe y la única que no necesita ningún parámetro, así que sirve de
+   * prueba de vida de la credencial.
+   */
+  getSiteInfo: 'core_webservice_get_site_info',
   /** Cursos y módulos visibles para el token: de aquí sale el catálogo. */
   getCourseContents: 'core_course_get_contents',
   /** Cursos en los que el usuario del token está matriculado. */
@@ -103,6 +113,23 @@ export const GetAssignmentsResponse = z.object({
   warnings: z.array(z.object({ item: z.string().optional(), message: z.string() })).optional(),
 });
 export type GetAssignmentsResponse = z.infer<typeof GetAssignmentsResponse>;
+
+/**
+ * `core_webservice_get_site_info` devuelve muchísimos campos; aquí sólo se
+ * declaran los tres que se usan y Zod descarta el resto. `userid` no es
+ * decorativo: `core_enrol_get_users_courses` lo exige, y el token no lo revela
+ * por ningún otro sitio.
+ *
+ * TODO(vega): sin verificar contra Moodle real — falta comprobar que los tres
+ * campos llegan siempre. Si alguna instalación omite `sitename` o `username`,
+ * habría que relajarlos a opcionales antes que romper la verificación entera.
+ */
+export const GetSiteInfoResponse = z.object({
+  sitename: z.string(),
+  username: z.string(),
+  userid: z.number(),
+});
+export type GetSiteInfoResponse = z.infer<typeof GetSiteInfoResponse>;
 
 /**
  * `core_enrol_get_users_courses` devuelve la lista pelada de cursos, sin
@@ -195,35 +222,115 @@ export class MoodleClient {
     });
     for (const [key, value] of flatten(params)) body.append(key, value);
 
-    const response = await this.#fetch(this.endpoint, {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body,
-    });
-
-    if (!response.ok) {
-      throw new Error(`Moodle respondió ${response.status} al llamar a ${wsfunction}.`);
-    }
-
-    const payload: unknown = await response.json();
-
-    const error = MoodleError.safeParse(payload);
-    if (error.success) {
-      throw new Error(
-        `Moodle rechazó ${wsfunction}: ${error.data.errorcode} — ${error.data.message}`,
+    let response: Response;
+    try {
+      response = await this.#fetch(this.endpoint, {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body,
+      });
+    } catch (cause) {
+      // DNS, TLS, timeout, host caído: el token puede ser perfectamente bueno.
+      throw new LmsUnavailableError(
+        `No se ha podido contactar con Moodle en ${this.endpoint}. Comprueba la dirección y que el servidor esté accesible.`,
+        { cause },
       );
     }
 
-    return schema.parse(payload);
+    if (!response.ok) {
+      throw httpFailure(response.status, wsfunction);
+    }
+
+    let payload: unknown;
+    try {
+      payload = await response.json();
+    } catch (cause) {
+      // Un HTTP 200 que no es JSON casi siempre es la página de login o la de
+      // mantenimiento de Moodle servida en lugar del web service.
+      throw new LmsUnavailableError(
+        `Moodle ha devuelto una respuesta que no es JSON al llamar a ${wsfunction}. Comprueba que los web services están activados en el sitio.`,
+        { cause },
+      );
+    }
+
+    const error = MoodleError.safeParse(payload);
+    if (error.success) {
+      throw moodleFailure(error.data, wsfunction);
+    }
+
+    const parsed = schema.safeParse(payload);
+    if (!parsed.success) {
+      // Que la forma no cuadre no es culpa de la credencial: o es otra versión
+      // de Moodle, o un plugin que altera la respuesta. Reintentar es inútil,
+      // pero mandar al profesor a revisar el token lo sería todavía más.
+      throw new LmsUnavailableError(
+        `Moodle ha devuelto algo inesperado al llamar a ${wsfunction}: la respuesta no tiene la forma que Vega espera.`,
+        { cause: parsed.error },
+      );
+    }
+    return parsed.data;
   }
 
   async downloadFile(fileUrl: string): Promise<Uint8Array> {
-    const response = await this.#fetch(this.signFileUrl(fileUrl));
+    let response: Response;
+    try {
+      response = await this.#fetch(this.signFileUrl(fileUrl));
+    } catch (cause) {
+      throw new LmsUnavailableError(
+        'No se ha podido contactar con Moodle para descargar la entrega. Vuelve a intentarlo en unos minutos.',
+        { cause },
+      );
+    }
     if (!response.ok) {
-      throw new Error(`No se pudo descargar el fichero de Moodle (${response.status}).`);
+      throw httpFailure(response.status, 'la descarga de la entrega');
     }
     return new Uint8Array(await response.arrayBuffer());
   }
+}
+
+/**
+ * Errorcodes de Moodle que significan "esta credencial no vale". La lista
+ * explícita cubre los habituales; la heurística por subcadena existe porque
+ * cada plugin inventa los suyos y es preferible mandar al profesor a Ajustes
+ * de más que enseñarle un "reinténtalo" que nunca va a funcionar.
+ */
+const AUTH_ERRORCODES = new Set([
+  'invalidtoken',
+  'accessexception',
+  'invalidlogin',
+  'requireloginerror',
+  'nopermissions',
+  'accessdenied',
+]);
+
+function isAuthErrorcode(errorcode: string): boolean {
+  const lower = errorcode.toLowerCase();
+  if (AUTH_ERRORCODES.has(lower)) return true;
+  return ['token', 'permission', 'access'].some((needle) => lower.includes(needle));
+}
+
+/** Moodle contesta a un token malo con 401/403; el resto son caídas suyas. */
+function httpFailure(status: number, what: string): LmsAuthError | LmsUnavailableError {
+  if (status === 401 || status === 403) {
+    return new LmsAuthError(
+      `Moodle ha rechazado el token (HTTP ${status}) en ${what}. Genera uno nuevo en Moodle y actualízalo en Ajustes.`,
+    );
+  }
+  return new LmsUnavailableError(
+    `Moodle ha respondido con un error ${status} en ${what}. Vuelve a intentarlo en unos minutos.`,
+  );
+}
+
+/** Los errores de Moodle llegan con HTTP 200: manda el `errorcode`, no el estado. */
+function moodleFailure(error: MoodleError, wsfunction: string): LmsAuthError | LmsUnavailableError {
+  if (isAuthErrorcode(error.errorcode)) {
+    return new LmsAuthError(
+      `Moodle ha rechazado la credencial al llamar a ${wsfunction} (${error.errorcode}): ${error.message}. Revisa el token y sus permisos en Ajustes.`,
+    );
+  }
+  return new LmsUnavailableError(
+    `Moodle ha rechazado la llamada a ${wsfunction} (${error.errorcode}): ${error.message}`,
+  );
 }
 
 /**

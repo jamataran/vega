@@ -58,9 +58,17 @@ export function App() {
                     <Route path="/procesos" element={<ProcessesPage />} />
                     <Route path="/panel" element={<OverviewPage />} />
 
+                    {/*
+                      Ajustes deja de ser sólo de administración: el token de
+                      Moodle es de cada profesor —decide qué cursos ve— y tiene
+                      que poder ponerlo él. Lo que sí es de instalación (IA,
+                      URL de Moodle, SMTP, planificador) se oculta dentro de la
+                      pantalla según el rol.
+                    */}
+                    <Route path="/ajustes" element={<SettingsPage />} />
+
                     <Route element={<RequireAdmin />}>
                       <Route path="/usuarios" element={<UsersPage />} />
-                      <Route path="/ajustes" element={<SettingsPage />} />
                     </Route>
 
                     <Route path="*" element={<NotFoundPage />} />

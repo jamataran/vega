@@ -1,6 +1,14 @@
 # ADR 0006 — Conectores LMS tras una interfaz mínima
 
-**Estado**: Aceptado
+**Estado**: Sustituido por [ADR 0009](0009-interfaz-lms-siete-operaciones.md)
+
+> La interfaz de cuatro operaciones que fija este ADR ya no es la que implementan los conectores.
+> H2 la amplió a siete —`listCourses`, `verifyConnection` y un `listActivities(moodleCourseId?)`
+> con filtro por curso— y le añadió un contrato de modos de fallo (`LmsAuthError`,
+> `LmsUnavailableError`), que este documento reclamaba en sus consecuencias sin resolverlo. Lo que
+> sigue vigente —conectores fuera de `packages/`, `mock`/`filesystem`/`moodle3`, publicación de nota
+> y de fichero separadas— se recoge en el ADR 0009. Se conserva aquí por el contexto, que no ha
+> cambiado.
 
 ## Contexto
 

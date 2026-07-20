@@ -7,6 +7,12 @@ import { createMoodle3Connector } from './connector.js';
  */
 registerConnector('moodle3', createMoodle3Connector);
 
-export { Moodle3Connector, Moodle3Config, createMoodle3Connector } from './connector.js';
+export {
+  Moodle3Connector,
+  Moodle3Config,
+  createMoodle3Connector,
+  moodleRefFor,
+  parseMoodleRef,
+} from './connector.js';
 export { MoodleClient, WS_FUNCTIONS, WS_PATH, flatten } from './api.js';
 export type { MoodleClientOptions, MoodleFile, MoodleSubmission } from './api.js';
