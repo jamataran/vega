@@ -70,7 +70,14 @@ COPY --from=build /repo/apps/frontend/dist /usr/share/nginx/html
 # único que el usuario `nginx` puede escribir. Los directorios de caché y de
 # configuración se le ceden para que el entrypoint de la imagen oficial no
 # reviente al arrancar.
-RUN sed -i 's|/var/run/nginx.pid|/tmp/nginx.pid|' /etc/nginx/nginx.conf \
+#
+# La sustitución del pidfile ataca la directiva `pid ...;` sea cual sea su valor
+# actual: la imagen oficial la fijaba en /var/run/nginx.pid, pero las versiones
+# recientes (nginx:alpine ≥1.25) ya la traen en /run/nginx.pid, y un sed atado
+# al valor viejo dejaba de casar en silencio → el usuario `nginx` no puede
+# escribir en /run y el contenedor entra en crash-loop con "open() /run/nginx.pid
+# failed (13: Permission denied)".
+RUN sed -i -E 's|^\s*pid\s+\S+;|pid /tmp/nginx.pid;|' /etc/nginx/nginx.conf \
  && chown -R nginx:nginx /var/cache/nginx /etc/nginx/conf.d /usr/share/nginx/html \
  && touch /tmp/nginx.pid \
  && chown nginx:nginx /tmp/nginx.pid
