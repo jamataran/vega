@@ -96,6 +96,12 @@ services:
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SMTP_FROM: ${SMTP_FROM:-}
       BRAND_NAME: ${BRAND_NAME:-Vega}
+      # Administrador inicial, sólo si la base está vacía. La contraseña es
+      # OBLIGATORIA aquí: un despliegue accesible desde fuera que arranque con
+      # `admin/admin` es una cuenta de administración regalada, y el descuido
+      # no se nota hasta que alguien entra. Mejor que el stack no levante.
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-admin@vega.local}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?define BOOTSTRAP_ADMIN_PASSWORD en las variables del stack de Portainer}
     ports:
       - '${VEGA_API_PORT:-18000}:3000'
     volumes:
