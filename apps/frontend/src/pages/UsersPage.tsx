@@ -224,10 +224,19 @@ function CreateUserSheet({
   const [name, setName] = useState('');
   const [password, setPassword] = useState('');
   const [role, setRole] = useState<UserRole>('teacher');
+  const [moodleToken, setMoodleToken] = useState('');
   const [errors, setErrors] = useState<Record<string, string>>({});
 
   const submit = () => {
-    const parsed = CreateUserRequest.safeParse({ email, name, password, role });
+    const parsed = CreateUserRequest.safeParse({
+      email,
+      name,
+      password,
+      role,
+      // Vacío es «sin token», no cadena vacía: el contrato lo exige no vacío
+      // cuando viene, para que no se guarde un token en blanco por descuido.
+      moodleToken: moodleToken.trim() === '' ? null : moodleToken.trim(),
+    });
     if (!parsed.success) {
       const fields = parsed.error.flatten().fieldErrors;
       setErrors({
@@ -284,6 +293,26 @@ function CreateUserSheet({
             )}
           </Field>
           <RoleField value={role} onChange={setRole} />
+
+          {/*
+            Aquí es un campo normal y no un `SecretField`: en un usuario que aún
+            no existe no hay nada que conservar ni que sustituir, así que las tres
+            opciones de aquel componente sobrarían.
+          */}
+          <Field
+            label="Token de Moodle"
+            hint="Opcional. Sin él, esta persona no verá ningún curso hasta que lo añada. Lo emites en Moodle a su nombre, en Administración del sitio → Servidor → Servicios web → Administrar credenciales."
+          >
+            {(field) => (
+              <Input
+                {...field}
+                type="password"
+                autoComplete="off"
+                value={moodleToken}
+                onChange={(event) => setMoodleToken(event.target.value)}
+              />
+            )}
+          </Field>
         </SheetBody>
 
         <SheetFooter>

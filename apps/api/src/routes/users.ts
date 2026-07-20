@@ -54,6 +54,7 @@ export async function userRoutes(app: FastifyInstance, ctx: AppContext): Promise
     const [existing] = await db.select().from(schema.users).where(eq(schema.users.email, email)).limit(1);
     if (existing) throw conflict('Ya existe un usuario con ese correo.');
 
+    const moodleToken = body.moodleToken?.trim() ?? null;
     const [row] = await db
       .insert(schema.users)
       .values({
@@ -61,6 +62,10 @@ export async function userRoutes(app: FastifyInstance, ctx: AppContext): Promise
         name: body.name,
         role: body.role,
         passwordHash: await hashPassword(body.password),
+        // Opcional: quien se cree sin token no podrá dar de alta actividades
+        // hasta que lo ponga él o se lo pongan desde su ficha.
+        moodleToken: moodleToken === '' ? null : moodleToken,
+        moodleTokenUpdatedAt: moodleToken ? new Date() : null,
       })
       .returning();
     if (!row) throw badRequest('No se ha podido crear el usuario.');

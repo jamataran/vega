@@ -346,6 +346,15 @@ export const CreateUserRequest = z.object({
   name: z.string().min(1),
   password: z.string().min(8, 'Mínimo 8 caracteres'),
   role: UserRole,
+  /**
+   * Token de Moodle, opcional, en el momento del alta.
+   *
+   * Sin esto, un profesor recién creado entra en Vega y no puede hacer **nada**
+   * —sin token no ve ningún curso— hasta que alguien vuelva a su ficha. Como es
+   * el administrador quien lo emite en Moodle, dejarlo en el mismo formulario
+   * ahorra el viaje de vuelta.
+   */
+  moodleToken: z.string().min(1).nullable().optional(),
 });
 export type CreateUserRequest = z.infer<typeof CreateUserRequest>;
 
