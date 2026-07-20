@@ -53,7 +53,7 @@ graph TB
   end
 
   DB[("PostgreSQL 16<br/>Drizzle ORM")]
-  SEED["pnpm db:seed<br/>script de desarrollo"]
+  SEED["pnpm db:demo<br/>script de desarrollo"]
   CTX[["contexts/<br/>Markdown versionado en git"]]
   FILES[["Almacén de binarios<br/>PENDIENTE: los ficheros de texto<br/>viven en activity_files.content;<br/>de un binario no se guardan bytes"]]
   LMS(["LMS de la academia<br/>Moodle 3.x"])
@@ -83,7 +83,7 @@ graph TB
 Dos flechas que no son sólidas y conviene leer despacio:
 
 - **`contexts/` no lo lee el API en tiempo de ejecución.** Los Markdown del repositorio los lee el
-  script de siembra (`apps/api/src/db/seed.ts`) y los vuelca en la tabla `grading_contexts`. A
+  script de siembra (`apps/api/src/db/demo.ts`) y los vuelca en la tabla `grading_contexts`. A
   partir de ahí manda la base de datos: `readContextLevel()` consulta la tabla y nada más. Ver
   [`contexts/README.md`](../contexts/README.md).
 - **El API llama al conector, pero sólo para el catálogo.** Desde H2, `GET /api/courses/discover`,
@@ -118,7 +118,7 @@ sequenceDiagram
   participant PROF as Profesor (PWA)
 
   rect rgb(245, 245, 245)
-    Note over LMS,DB: Ingesta — SIN CABLEAR: hoy las entregas entran por `pnpm db:seed`
+    Note over LMS,DB: Ingesta — SIN CABLEAR: hoy las entregas entran por `pnpm db:demo`
     API->>CN: listSubmissions(activityRef)
     CN->>LMS: consulta entregas
     LMS-->>CN: entregas nuevas
@@ -376,7 +376,7 @@ Dos decisiones de esa frontera que sostienen el caso del foro:
 ### `contexts/` — en el repositorio, no en la base de datos
 
 Los contextos de corrección son ficheros Markdown versionados con git. El repositorio guarda el
-juego por defecto, que es el que `pnpm db:seed` vuelca en la tabla `grading_contexts`. A partir de
+juego por defecto, que es el que `pnpm db:demo` vuelca en la tabla `grading_contexts`. A partir de
 ahí, la aplicación lee siempre de la base de datos y la edición desde la UI escribe allí.
 
 El motivo de tener los dos: git da historial, diff y revisión por pares sobre unas instrucciones
@@ -401,7 +401,7 @@ datos) y ver el consumo. Lo que no:
 
 | Qué | Dónde | Estado |
 |---|---|---|
-| Ingesta desde el LMS | `apps/api` | **Sin cablear.** Ninguna ruta llama a `listSubmissions()` ni a `download()`. Las entregas de desarrollo las crea `pnpm db:seed`. |
+| Ingesta desde el LMS | `apps/api` | **Sin cablear.** Ninguna ruta llama a `listSubmissions()` ni a `download()`. Las entregas de desarrollo las crea `pnpm db:demo`. |
 | Publicación en el LMS | `routes/submissions.ts` | **Sin cablear.** `POST .../publish` marca `published_at` y el estado, con un `TODO(vega)` donde irían `publishGrade` y `publishFeedbackFile`. |
 | Catálogo de actividades de Moodle | `routes/activities.ts` · `lms/factory.ts` | **Cableado.** `GET /api/courses/discover`, `GET /api/activities/discover` y `POST /api/activities/import` llaman al conector de verdad; `MOODLE_CATALOGUE` ha desaparecido. `apps/api` depende ya de `@vega/connector-{lms,moodle3,filesystem}`. |
 | `moodle3` · listar cursos, tareas y foros | `connectors/moodle3` | **Implementado, sin verificar contra un Moodle real.** Usa `core_enrol_get_users_courses`, `mod_assign_get_assignments` y `mod_forum_get_forums_by_courses`, y ya conserva el id del curso. Tiene tests unitarios con `fetchImpl` inyectado y varios `TODO(vega)` abiertos. `pendingCount` de una entrega se devuelve a 0 a propósito: contarlo obligaría a bajarse todas las entregas. **Sigue siendo el riesgo principal del proyecto.** |

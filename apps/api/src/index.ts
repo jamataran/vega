@@ -1,6 +1,7 @@
 import './env.js';
 import { loadConfig } from './config.js';
 import { createDb } from './db/client.js';
+import { bootstrap } from './db/bootstrap.js';
 import { runMigrations } from './db/migrate.js';
 import { buildServer } from './server.js';
 
@@ -12,14 +13,18 @@ import { buildServer } from './server.js';
  */
 const config = loadConfig();
 
-const { sql: migrationSql } = createDb(config.DATABASE_URL, { max: 1 });
+const { sql: migrationSql, db: migrationDb } = createDb(config.DATABASE_URL, { max: 1 });
 try {
   const result = await runMigrations(migrationSql, (line) => console.log(line));
   if (result.applied.length > 0) {
     console.log(`✔ ${result.applied.length} migración(es) aplicada(s) al arrancar.`);
   }
+  // Tras migrar y antes de escuchar: una instalación vacía necesita contextos
+  // de corrección y un administrador con el que entrar. No siembra datos de
+  // ejemplo ni pisa nada existente.
+  await bootstrap(migrationDb, config, (line) => console.log(line));
 } catch (error) {
-  console.error(`✖ No se han podido aplicar las migraciones: ${(error as Error).message}`);
+  console.error(`✖ No se ha podido preparar la base de datos: ${(error as Error).message}`);
   process.exit(1);
 } finally {
   await migrationSql.end();

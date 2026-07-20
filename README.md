@@ -148,10 +148,24 @@ docs/            design docs, user stories, decision records
 git clone https://github.com/<your-user>/vega && cd vega
 cp .env.example .env            # at minimum, ANTHROPIC_API_KEY
 pnpm install
-pnpm setup                      # starts postgres, applies migrations, seeds demo data
+pnpm setup                      # starts postgres, applies migrations
 pnpm dev                        # api :3000 · frontend :5174
-pnpm create-admin               # create the first admin user
 ```
+
+The API creates an initial admin on first boot **only when the database has no users at all** —
+`admin@vega.local` / `admin` unless you override `BOOTSTRAP_ADMIN_EMAIL` and
+`BOOTSTRAP_ADMIN_PASSWORD`. Change that password immediately; it is printed as a warning on every
+boot until you do. Everyone else is created from the Users screen.
+
+**A fresh install starts empty**: no courses, no activities, no submissions. Nothing is ever seeded
+automatically beyond the grading contexts from `contexts/`, which are configuration rather than
+sample data. To get demo content while working on the UI without a Moodle in front of you:
+
+```bash
+pnpm db:demo                    # WIPES the database, then loads sample data
+```
+
+It refuses to run with `NODE_ENV=production`.
 
 Grade one submission from the CLI, no LMS involved:
 
@@ -301,7 +315,7 @@ MOODLE_BASE_URL=https://moodle.example.org   # site root, no /webservice/... suf
 Both are the *initial* values only: once an admin saves them in Settings they live in `app_settings`
 and that copy wins over the environment.
 
-`MOODLE_TOKEN` also exists but is **a development seed, nothing more**. `pnpm db:seed` assigns it to
+`MOODLE_TOKEN` also exists but is **a development seed, nothing more**. `pnpm db:demo` assigns it to
 the two demo users so that testing against a real Moodle does not mean re-pasting a token after
 every reseed; no runtime path reads it. For local credentials use `.env.local` — it is gitignored
 and loaded after `.env`, so it overrides the shared file without editing it.

@@ -26,6 +26,7 @@ import { Field } from '@/components/common/Field';
 import { PreviewEditor } from '@/components/PreviewEditor';
 import { PointsAllocationEditor } from '@/components/activity/PointsAllocationEditor';
 import { ActivityFilesEditor } from '@/components/activity/ActivityFilesEditor';
+import { DeleteActivity } from '@/components/activity/DeleteActivity';
 
 /**
  * La nota máxima vive como texto en el formulario: el campo puede estar vacío
@@ -414,6 +415,8 @@ export function ActivityDetailPage() {
         >
           <ActivityFilesEditor activityId={activity.id} files={activity.files} />
         </Section>
+
+        <DeleteActivity activity={activity} />
       </div>
     </div>
   );

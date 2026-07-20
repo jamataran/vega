@@ -1,9 +1,9 @@
 <component name="ProjectRunConfigurationManager">
-  <configuration default="false" name="Vega · BD sembrar" type="js.build_tools.npm" nameIsGenerated="false">
+  <configuration default="false" name="Vega · BD datos de demostración" type="js.build_tools.npm" nameIsGenerated="false">
     <package-json value="$PROJECT_DIR$/package.json" />
     <command value="run" />
     <scripts>
-      <script value="db:seed" />
+      <script value="db:demo" />
     </scripts>
     <node-interpreter value="project" />
     <package-manager value="/opt/homebrew/bin/pnpm" />

@@ -1,7 +1,7 @@
 # Contextos de corrección
 
 Aquí vive lo que la IA lee antes de corregir. Son ficheros Markdown, versionados con git, y son
-**el juego por defecto que carga la aplicación**: `pnpm db:seed` los vuelca en la tabla
+**el juego por defecto que carga la aplicación**: `pnpm db:demo` los vuelca en la tabla
 `grading_contexts`.
 
 No son documentación. Son instrucciones ejecutables: lo que se escribe aquí determina las notas de
@@ -36,7 +36,7 @@ Los `ActivityKind` son exactamente dos, `assignment` y `forum`, así que el nive
 tener más de dos ficheros. Cualquier otro nombre en `activity-kinds/` no lo lee nadie.
 
 > **Estado real de esta carpeta.** Falta `activity-kinds/forum.md`: mientras no exista, la siembra
-> usa un texto de reserva escrito en `apps/api/src/db/seed.ts`. Y `activity-kinds/assignment-tema.md`
+> usa un texto de reserva escrito en `apps/api/src/db/demo.ts`. Y `activity-kinds/assignment-tema.md`
 > es un resto del enum viejo (`simulacro_tema`) que ya no corresponde a ningún `ActivityKind` y que
 > no se carga nunca. Tampoco hay fichero de nivel `activity` para las actividades de foro del juego
 > de datos (`foro-didactica`, `foro-dudas-analisis`).
@@ -96,7 +96,7 @@ Ver [ADR 0003](../docs/decisiones/0003-contexto-tres-niveles.md).
 Los contextos existen en dos sitios: estos ficheros y la tabla `grading_contexts`. La regla
 provisional es **el fichero siembra, la base de datos manda**:
 
-1. `pnpm db:seed` lee estos ficheros y crea las filas. Es un script de desarrollo: vacía las tablas
+1. `pnpm db:demo` lee estos ficheros y crea las filas. Es un script de desarrollo: vacía las tablas
    antes de escribir.
 2. En ejecución, la aplicación lee **siempre** la fila (`readContextLevel()` consulta
    `grading_contexts` y nada más). El fichero se ignora.

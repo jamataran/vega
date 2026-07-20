@@ -125,8 +125,8 @@ mal puesto: es un asunto de protección de datos.
     correcto, pero significa que el lote de una noche puede usar varias credenciales distintas.
 - **Reponer un token es trabajo manual y personal.** Nadie puede hacerlo por el profesor, ni
   siquiera en una urgencia.
-- **En desarrollo hay que pegar el token tras cada `db:seed`.** Se mitiga con `MOODLE_TOKEN`, que
-  pasa a ser **sólo semilla**: `db:seed` se lo asigna a los dos usuarios de ejemplo. No es
+- **En desarrollo hay que pegar el token tras cada `db:demo`.** Se mitiga con `MOODLE_TOKEN`, que
+  pasa a ser **sólo semilla**: `db:demo` se lo asigna a los dos usuarios de ejemplo. No es
   configuración de producción, y ningún camino de la aplicación lo lee en tiempo de ejecución.
 - **`GET /api/health` sigue sin decir nada sobre credenciales.** Expone el conector configurado, no
   si el token de nadie sirve. Comprobarlo es, por definición, por usuario.

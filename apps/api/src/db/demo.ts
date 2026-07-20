@@ -20,7 +20,7 @@ import {
   SUBMISSION_PLAN,
   TRANSCRIPTION_FLAGS,
   TRANSCRIPTION_PAGES,
-} from './seed-data.js';
+} from './demo-data.js';
 
 /**
  * Siembra la base de datos con un escenario de trabajo completo.
@@ -102,6 +102,16 @@ se corrige el texto que el alumno ha escrito.
 
 async function main(): Promise<void> {
   const config = loadConfig();
+
+  // Esto vacía la base entera. Es útil delante de una pantalla que estás
+  // diseñando y catastrófico contra datos reales, así que en producción no se
+  // ejecuta: ni por descuido, ni «sólo esta vez».
+  if (config.NODE_ENV === 'production') {
+    console.error(
+      '✖ `db:demo` borra todos los datos y no se ejecuta con NODE_ENV=production.',
+    );
+    process.exit(1);
+  }
   const { sql, db } = createDb(config.DATABASE_URL, { max: 1 });
 
   try {

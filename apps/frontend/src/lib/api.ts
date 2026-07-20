@@ -12,6 +12,7 @@ import {
   ContextResponse,
   CorrectionResponse,
   CostBreakdownResponse,
+  DeleteActivityResponse,
   DiscoverActivitiesResponse,
   DiscoverCoursesResponse,
   HealthResponse,
@@ -333,6 +334,10 @@ export const api = {
 
   updateActivity: (id: string, body: UpdateActivityRequest) =>
     request(routes.activity(id), { schema: ActivityResponse, method: 'PATCH', body }),
+
+  /** Borra la actividad **de Vega**. No toca el LMS: ver la ruta en el API. */
+  deleteActivity: (id: string) =>
+    request(routes.activity(id), { schema: DeleteActivityResponse, method: 'DELETE' }),
 
   /** Cursos que ve el token del profesor. Primer paso del alta de actividades. */
   discoverCourses: (signal?: AbortSignal) =>

@@ -12,6 +12,7 @@ import {
   BeginActivityFileUploadRequest,
   DiscoverActivitiesQuery,
   type DiscoverActivitiesResponse,
+  type DeleteActivityResponse,
   type DiscoverCoursesResponse,
   ImportActivitiesRequest,
   type ImportActivitiesResponse,
@@ -412,6 +413,61 @@ export async function activityRoutes(app: FastifyInstance, ctx: AppContext): Pro
       }
 
       return { activity: await requireActivity(ctx, request.params.id, currentUser(request)) };
+    },
+  );
+
+  /**
+   * Da de baja una actividad **de Vega**.
+   *
+   * LÍNEA ROJA: esto **no toca el LMS**. No se construye conector, no se llama a
+   * ninguna operación remota y no hay forma de que esta ruta borre nada en
+   * Moodle. La actividad sigue allí, y una nota ya publicada sigue publicada:
+   * borrar aquí no la retira ni avisa a nadie. Si algún día hiciera falta
+   * retractar una publicación, será otra operación con otro nombre.
+   *
+   * Lo que sí destruye, en cascada, es todo lo que Vega guardaba de ella:
+   * entregas, transcripciones y correcciones, incluidas las que el profesorado
+   * validó. No hay papelera. Por eso la respuesta dice cuánto se llevó por
+   * delante y la pantalla lo avisa antes, con esos mismos números.
+   */
+  app.delete<{ Params: { id: string } }>(
+    routes.activity(':id'),
+    { preHandler: app.authenticate },
+    async (request): Promise<DeleteActivityResponse> => {
+      const activity = await requireActivity(ctx, request.params.id, currentUser(request));
+
+      // Se cuenta antes de borrar: después ya no hay a quién preguntar.
+      const [counts] = await ctx.sql<
+        { submissions: number; corrections: number; published: number }[]
+      >`
+        SELECT
+          COUNT(*)::int                                       AS submissions,
+          COUNT(c.id)::int                                    AS corrections,
+          -- Por el estado de la entrega, que es la misma definición que usa la
+          -- cola: si las dos pantallas contaran distinto, el aviso previo y el
+          -- resultado no cuadrarían.
+          COUNT(*) FILTER (WHERE s.status = 'published')::int  AS published
+        FROM submissions s
+        LEFT JOIN corrections c ON c.submission_id = s.id
+        WHERE s.activity_id = ${activity.id}
+      `;
+
+      // `ON DELETE CASCADE` se lleva entregas, transcripciones, correcciones,
+      // apartados y ficheros de contexto. El contexto de nivel `activity` NO se
+      // borra: no tiene clave ajena a propósito, cuesta una tarde escribirlo y
+      // reimportar la misma actividad lo recupera tal cual.
+      await db.delete(schema.activities).where(eq(schema.activities.id, activity.id));
+
+      request.log.warn(
+        { activityId: activity.id, slug: activity.slug, ...counts },
+        'Actividad borrada de Vega (no del LMS)',
+      );
+
+      return {
+        submissions: counts?.submissions ?? 0,
+        corrections: counts?.corrections ?? 0,
+        published: counts?.published ?? 0,
+      };
     },
   );
 

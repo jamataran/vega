@@ -13,7 +13,7 @@
     "lint": "echo \"(sin linter todavía)\"",
     "test": "tsx --test src/**/*.test.ts",
     "migrate": "tsx src/db/migrate.ts",
-    "seed": "tsx src/db/seed.ts",
+    "demo": "tsx src/db/demo.ts",
     "reset": "tsx src/db/reset.ts",
     "create-admin": "tsx src/scripts/create-admin.ts"
   },

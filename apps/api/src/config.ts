@@ -22,6 +22,13 @@ const EnvSchema = z.object({
   MOODLE_BASE_URL: z.string().optional(),
   MOODLE_TOKEN: z.string().optional(),
   BRAND_NAME: z.string().default('Vega'),
+  /**
+   * Administrador que se crea **sólo** si la instalación no tiene ningún
+   * usuario. Es la única forma de entrar en un despliegue recién levantado;
+   * a partir de ahí los usuarios se dan de alta desde la aplicación.
+   */
+  BOOTSTRAP_ADMIN_EMAIL: z.string().email().default('admin@vega.local'),
+  BOOTSTRAP_ADMIN_PASSWORD: z.string().min(1).default('admin'),
 });
 
 export type Config = z.infer<typeof EnvSchema> & { version: string };

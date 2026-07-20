@@ -11,12 +11,6 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Field } from '@/components/common/Field';
 
-/** Cuentas del seed de desarrollo. El API real las rechazará en producción. */
-const DEV_ACCOUNTS = [
-  { email: 'profe@vega.test', password: 'vega1234', role: 'Profesor' },
-  { email: 'admin@vega.test', password: 'vega1234', role: 'Administrador' },
-];
-
 export function LoginPage() {
   const { user, isLoading, login } = useAuth();
   const navigate = useNavigate();
@@ -113,31 +107,6 @@ export function LoginPage() {
           Entrar
         </Button>
       </form>
-
-      <div className="mt-8 rounded-md border border-dashed border-border px-3.5 py-3">
-        <p className="eyebrow">Sólo en desarrollo</p>
-        <ul className="mt-2 flex flex-col gap-1.5">
-          {DEV_ACCOUNTS.map((account) => (
-            <li key={account.email}>
-              <button
-                type="button"
-                onClick={() => {
-                  setEmail(account.email);
-                  setPassword(account.password);
-                  setFieldErrors({});
-                }}
-                className="flex w-full items-baseline justify-between gap-3 rounded-sm px-1 py-0.5 text-left transition-colors hover:bg-muted"
-              >
-                <span className="font-mono text-ui">{account.email}</span>
-                <span className="font-mono text-ui text-muted-foreground">{account.password}</span>
-              </button>
-            </li>
-          ))}
-        </ul>
-        <p className="mt-2 px-1 text-ui text-muted-foreground">
-          Toca una cuenta para rellenar el formulario.
-        </p>
-      </div>
     </div>
   );
 }

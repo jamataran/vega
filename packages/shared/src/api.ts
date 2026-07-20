@@ -245,6 +245,24 @@ export type ImportActivitiesRequest = z.infer<typeof ImportActivitiesRequest>;
 export const ImportActivitiesResponse = z.object({ items: z.array(Activity) });
 export type ImportActivitiesResponse = z.infer<typeof ImportActivitiesResponse>;
 
+/**
+ * Lo que se ha destruido al borrar una actividad.
+ *
+ * Se devuelve para poder decirlo después —«se han borrado 12 entregas»— en vez
+ * de un «hecho» que no permite comprobar si se borró lo que se creía.
+ *
+ * **El borrado es sólo dentro de Vega.** No se llama al LMS en ningún momento:
+ * la actividad sigue en Moodle, y las notas que ya se hubieran publicado siguen
+ * publicadas allí. Borrar aquí no retira nada de lo que el alumnado ya ha visto.
+ */
+export const DeleteActivityResponse = z.object({
+  submissions: z.number().int().min(0),
+  corrections: z.number().int().min(0),
+  /** De las anteriores, cuántas llegaron a publicarse en el LMS. */
+  published: z.number().int().min(0),
+});
+export type DeleteActivityResponse = z.infer<typeof DeleteActivityResponse>;
+
 export const ActivityFileListResponse = z.object({ items: z.array(ActivityFile) });
 export type ActivityFileListResponse = z.infer<typeof ActivityFileListResponse>;
 
