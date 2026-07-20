@@ -87,8 +87,10 @@ function LmsErrorState({
     return (
       <Alert variant="destructive">
         <AlertTitle>Revisa la conexión con Moodle</AlertTitle>
+        {/* El mensaje del conector ya dice qué revisar y dónde; añadirle una
+            coletilla genérica sólo lo alarga y lo hace sonar a plantilla. */}
         <AlertDescription className="mt-1 text-muted-foreground">
-          {errorMessage(error)} Comprueba la URL y el token en Ajustes.
+          {errorMessage(error)}
         </AlertDescription>
         <Button size="sm" variant="outline" className="mt-3" asChild>
           {/* Sin cerrar el diálogo, Ajustes se abriría debajo de él. */}

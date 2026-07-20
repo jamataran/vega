@@ -324,8 +324,19 @@ function httpFailure(status: number, what: string): LmsAuthError | LmsUnavailabl
 /** Los errores de Moodle llegan con HTTP 200: manda el `errorcode`, no el estado. */
 function moodleFailure(error: MoodleError, wsfunction: string): LmsAuthError | LmsUnavailableError {
   if (isAuthErrorcode(error.errorcode)) {
+    /**
+     * `accessexception` con un token que Moodle acepta casi siempre significa
+     * que **la función no está en el servicio**, no que el token esté mal: al
+     * crear un servicio externo, Moodle no añade ninguna función sola y hay que
+     * listarlas una a una. Decir «revisa el token» manda a mirar donde no es y
+     * cuesta una tarde, así que el mensaje nombra la función y dónde añadirla.
+     */
+    const hint =
+      error.errorcode === 'accessexception'
+        ? `Lo más habitual es que «${wsfunction}» no esté añadida al servicio web del token: compruébalo en Moodle, en Administración del sitio → Servidor → Servicios web → Servicios externos → Funciones. Si está, revisa que el usuario dueño del token tenga la capacidad webservice/rest:use y esté autorizado en el servicio.`
+        : 'Revisa el token y sus permisos en Moodle.';
     return new LmsAuthError(
-      `Moodle ha rechazado la credencial al llamar a ${wsfunction} (${error.errorcode}): ${error.message}. Revisa el token y sus permisos en Ajustes.`,
+      `Moodle ha rechazado la llamada a ${wsfunction} (${error.errorcode}): ${error.message}. ${hint}`,
     );
   }
   return new LmsUnavailableError(
