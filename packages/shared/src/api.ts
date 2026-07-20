@@ -5,6 +5,7 @@ import {
   AppSettings,
   BatchRun,
   Correction,
+  DiscoveredCourse,
   GradingContext,
   Id,
   IsoDate,
@@ -34,6 +35,15 @@ export const ApiErrorCode = z.enum([
   'CONFLICT',
   'UNPROCESSABLE',
   'INTERNAL',
+  /**
+   * El LMS ha rechazado la credencial. Es un problema de configuración, no de
+   * sesión, y por eso **no es `UNAUTHORIZED`**: el cliente cierra la sesión al
+   * recibir un 401, y echar al profesor de Vega porque su token de Moodle ha
+   * caducado sería absurdo. La UI lleva a Ajustes y no ofrece reintentar.
+   */
+  'LMS_AUTH',
+  /** El LMS no responde. Se puede reintentar sin cambiar nada. */
+  'LMS_UNAVAILABLE',
 ]);
 export type ApiErrorCode = z.infer<typeof ApiErrorCode>;
 
@@ -194,11 +204,18 @@ export type UpdateActivityRequest = z.infer<typeof UpdateActivityRequest>;
  * profesor elige de esta lista a cuáles quiere que reaccione la aplicación.
  */
 export const DiscoveredActivity = z.object({
+  /** Con prefijo de tipo: `assign-42`, `forum-42`. Ver `Activity.moodleRef`. */
   moodleRef: z.string(),
   name: z.string(),
   kind: ActivityKind,
+  /** Curso del que cuelga, para poder filtrar en origen. */
+  moodleCourseId: z.string(),
   courseName: z.string(),
-  /** Entregas pendientes que Moodle reporta ahora mismo. */
+  /**
+   * Lo que el LMS reporta pendiente ahora mismo, **orientativo**: en una
+   * entrega son entregas y en un foro son debates, así que los dos números no
+   * son comparables y ninguna decisión del sistema depende de ellos.
+   */
   pendingCount: z.number().int().min(0),
   /** `true` si ya está dada de alta en Vega. */
   alreadyImported: z.boolean(),
@@ -208,7 +225,19 @@ export type DiscoveredActivity = z.infer<typeof DiscoveredActivity>;
 export const DiscoverActivitiesResponse = z.object({ items: z.array(DiscoveredActivity) });
 export type DiscoverActivitiesResponse = z.infer<typeof DiscoverActivitiesResponse>;
 
+/** Query de `GET /api/activities/discover`: el curso es obligatorio. */
+export const DiscoverActivitiesQuery = z.object({
+  moodleCourseId: z.string().min(1, 'Elige primero un curso'),
+});
+export type DiscoverActivitiesQuery = z.infer<typeof DiscoverActivitiesQuery>;
+
+/** Cursos que el token del profesor ve en Moodle. */
+export const DiscoverCoursesResponse = z.object({ items: z.array(DiscoveredCourse) });
+export type DiscoverCoursesResponse = z.infer<typeof DiscoverCoursesResponse>;
+
 export const ImportActivitiesRequest = z.object({
+  /** Curso del que se importan. Se crea en Vega si aún no existe. */
+  moodleCourseId: z.string().min(1),
   moodleRefs: z.array(z.string()).min(1, 'Selecciona al menos una actividad'),
 });
 export type ImportActivitiesRequest = z.infer<typeof ImportActivitiesRequest>;
@@ -216,11 +245,88 @@ export type ImportActivitiesRequest = z.infer<typeof ImportActivitiesRequest>;
 export const ImportActivitiesResponse = z.object({ items: z.array(Activity) });
 export type ImportActivitiesResponse = z.infer<typeof ImportActivitiesResponse>;
 
+/**
+ * Lo que se ha destruido al borrar una actividad.
+ *
+ * Se devuelve para poder decirlo después —«se han borrado 12 entregas»— en vez
+ * de un «hecho» que no permite comprobar si se borró lo que se creía.
+ *
+ * **El borrado es sólo dentro de Vega.** No se llama al LMS en ningún momento:
+ * la actividad sigue en Moodle, y las notas que ya se hubieran publicado siguen
+ * publicadas allí. Borrar aquí no retira nada de lo que el alumnado ya ha visto.
+ */
+export const DeleteActivityResponse = z.object({
+  submissions: z.number().int().min(0),
+  corrections: z.number().int().min(0),
+  /** De las anteriores, cuántas llegaron a publicarse en el LMS. */
+  published: z.number().int().min(0),
+});
+export type DeleteActivityResponse = z.infer<typeof DeleteActivityResponse>;
+
 export const ActivityFileListResponse = z.object({ items: z.array(ActivityFile) });
 export type ActivityFileListResponse = z.infer<typeof ActivityFileListResponse>;
 
 export const ActivityFileResponse = z.object({ file: ActivityFile });
 export type ActivityFileResponse = z.infer<typeof ActivityFileResponse>;
+
+/** Tope del contenido guardado por fichero, sumando todos sus trozos. */
+export const MAX_FILE_CONTENT_BYTES = 4 * 1024 * 1024;
+
+/**
+ * Tamaño de cada trozo de subida.
+ *
+ * La subida va **troceada**, y no por capricho: entre el navegador y Vega hay un
+ * proxy inverso —Cloudflare en el despliegue real— con su propio tope de cuerpo
+ * de petición, y Fastify trae además un `bodyLimit` de 1 MiB por defecto. Un
+ * fichero mediano mandado de una vez se rechazaría con un 413 que no depende de
+ * Vega y que el profesor no puede arreglar. 256 KiB entra con holgura en
+ * cualquiera de los dos.
+ */
+export const UPLOAD_CHUNK_BYTES = 256 * 1024;
+
+/**
+ * Comienzo de una subida.
+ *
+ * El contenido no viaja aquí: esta llamada sólo reserva el fichero y devuelve
+ * su identificador, y los trozos van después. Los ficheros que llegan al modelo
+ * son `.tex` y `.md`, que ya son texto, así que se manda texto en JSON y no
+ * `multipart/form-data`.
+ */
+export const BeginActivityFileUploadRequest = z.object({
+  filename: z.string().min(1, 'El fichero necesita un nombre'),
+  mimeType: z.string().min(1).default('text/plain'),
+  /**
+   * Tamaño anunciado, para rechazar lo que no cabe **antes** de subir nada en
+   * vez de al llegar al último trozo.
+   */
+  sizeBytes: z.number().int().min(0).max(MAX_FILE_CONTENT_BYTES, 'El fichero es demasiado grande'),
+  /**
+   * `false` en binarios: se registra el fichero como referencia del profesor,
+   * sin trozos y sin contenido, y no forma parte del contexto.
+   */
+  hasContent: z.boolean(),
+});
+export type BeginActivityFileUploadRequest = z.infer<typeof BeginActivityFileUploadRequest>;
+
+/** Un trozo. El orden lo impone `index`, no el orden de llegada. */
+export const AppendActivityFileChunkRequest = z.object({
+  index: z.number().int().min(0),
+  content: z.string().max(UPLOAD_CHUNK_BYTES * 2, 'El trozo es demasiado grande'),
+});
+export type AppendActivityFileChunkRequest = z.infer<typeof AppendActivityFileChunkRequest>;
+
+/** Acuse de un trozo: cuánto lleva recibido el servidor. */
+export const AppendActivityFileChunkResponse = z.object({
+  receivedBytes: z.number().int().min(0),
+});
+export type AppendActivityFileChunkResponse = z.infer<typeof AppendActivityFileChunkResponse>;
+
+/** Contenido de un fichero de contexto, para verlo o editarlo sin descargarlo. */
+export const ActivityFileContentResponse = z.object({
+  file: ActivityFile,
+  content: z.string().nullable(),
+});
+export type ActivityFileContentResponse = z.infer<typeof ActivityFileContentResponse>;
 
 // ── Contextos de corrección ─────────────────────────────────────────────────
 
@@ -258,6 +364,15 @@ export const CreateUserRequest = z.object({
   name: z.string().min(1),
   password: z.string().min(8, 'Mínimo 8 caracteres'),
   role: UserRole,
+  /**
+   * Token de Moodle, opcional, en el momento del alta.
+   *
+   * Sin esto, un profesor recién creado entra en Vega y no puede hacer **nada**
+   * —sin token no ve ningún curso— hasta que alguien vuelva a su ficha. Como es
+   * el administrador quien lo emite en Moodle, dejarlo en el mismo formulario
+   * ahorra el viaje de vuelta.
+   */
+  moodleToken: z.string().min(1).nullable().optional(),
 });
 export type CreateUserRequest = z.infer<typeof CreateUserRequest>;
 
@@ -291,7 +406,6 @@ export const UpdateSettingsRequest = z.object({
   moodle: z
     .object({
       baseUrl: z.string().optional(),
-      token: z.string().nullable().optional(),
       connector: z.enum(['mock', 'filesystem', 'moodle3']).optional(),
     })
     .optional(),
@@ -313,6 +427,73 @@ export const UpdateSettingsRequest = z.object({
   branding: z.object({ name: z.string().min(1).optional() }).optional(),
 });
 export type UpdateSettingsRequest = z.infer<typeof UpdateSettingsRequest>;
+
+// ── Credencial de Moodle de cada usuario ────────────────────────────────────
+
+/**
+ * El token de Moodle es **de cada profesor, no de la instalación**.
+ *
+ * `core_enrol_get_users_courses` devuelve los cursos que ve *ese* token, así que
+ * la credencial decide qué cursos ofrece la aplicación. Un token compartido
+ * enseñaría a todo el claustro los cursos de todo el claustro. La URL y el
+ * conector sí son de instalación y los pone el administrador en Ajustes.
+ */
+export const UpdateMoodleTokenRequest = z.object({
+  /** `null` borra el token guardado. */
+  token: z.string().min(1, 'Pega el token que te da Moodle').nullable(),
+});
+export type UpdateMoodleTokenRequest = z.infer<typeof UpdateMoodleTokenRequest>;
+
+/**
+ * Una función del servicio web, comprobada por separado.
+ *
+ * Se prueban **una a una y no se para en la primera que falle**: Moodle no
+ * añade ninguna función al crear un servicio externo, hay que listarlas a mano,
+ * y lo normal es que falten varias. Parar en la primera obligaría a ir
+ * arreglando de una en una, con un viaje al panel de Moodle por cada una.
+ */
+export const MoodleCheck = z.object({
+  /** Nombre exacto de la función, para poder buscarlo en Moodle. */
+  name: z.string(),
+  /** Para qué la usa Vega, en cristiano. */
+  label: z.string(),
+  /**
+   * `skipped` no es `failed`: hay comprobaciones que dependen de otra —listar
+   * cursos necesita el id de usuario que devuelve `get_site_info`— y darlas por
+   * fallidas mandaría al profesor a habilitar funciones que quizá ya están.
+   */
+  status: z.enum(['ok', 'failed', 'skipped']),
+  /** Qué ha pasado: el error de Moodle, o qué se ha obtenido si fue bien. */
+  detail: z.string(),
+  /**
+   * `false` en las que todavía no usa ninguna pantalla —ingesta y publicación,
+   * que llegan en hitos posteriores—. Se comprueban igual, porque es mejor
+   * enterarse al configurar que la primera noche que corra el proceso.
+   */
+  required: z.boolean(),
+});
+export type MoodleCheck = z.infer<typeof MoodleCheck>;
+
+/**
+ * Resultado de probar la conexión con Moodle con el token del usuario.
+ *
+ * No es 200/500: un token inválido es una respuesta legítima de esta ruta, y el
+ * profesor necesita leer *por qué* falla. Por eso el fallo viaja en el cuerpo.
+ */
+export const MoodleConnectionResponse = z.object({
+  /** `true` sólo si pasan **todas** las funciones imprescindibles. */
+  ok: z.boolean(),
+  /** Qué ha fallado, en un lenguaje que lleve a la solución. */
+  message: z.string(),
+  /** Sólo si se pudo identificar: con qué Moodle y como quién. */
+  siteName: z.string().nullable(),
+  username: z.string().nullable(),
+  /** Cursos que ese token alcanza. Es la señal de que el token sirve de algo. */
+  courseCount: z.number().int().min(0).nullable(),
+  /** Una entrada por función probada, en el orden en que se necesitan. */
+  checks: z.array(MoodleCheck),
+});
+export type MoodleConnectionResponse = z.infer<typeof MoodleConnectionResponse>;
 
 // ── Panel ───────────────────────────────────────────────────────────────────
 
@@ -407,11 +588,20 @@ export const routes = {
 
   activities: '/api/activities',
   activity: (id: string) => `/api/activities/${id}`,
+  /** Cursos que ve el token del profesor. Primer paso del alta de actividades. */
+  discoverCourses: '/api/courses/discover',
   discoverActivities: '/api/activities/discover',
   importActivities: '/api/activities/import',
   activityFiles: (id: string) => `/api/activities/${id}/files`,
   activityFile: (activityId: string, fileId: string) =>
     `/api/activities/${activityId}/files/${fileId}`,
+  activityFileContent: (activityId: string, fileId: string) =>
+    `/api/activities/${activityId}/files/${fileId}/content`,
+  /** Subida troceada: reservar con `activityFiles`, mandar trozos, cerrar. */
+  activityFileChunk: (activityId: string, fileId: string) =>
+    `/api/activities/${activityId}/files/${fileId}/chunk`,
+  activityFileComplete: (activityId: string, fileId: string) =>
+    `/api/activities/${activityId}/files/${fileId}/complete`,
 
   contexts: '/api/contexts',
   context: (level: ContextLevel, key: string) => `/api/contexts/${level}/${key}`,
@@ -419,8 +609,21 @@ export const routes = {
 
   users: '/api/users',
   user: (id: string) => `/api/users/${id}`,
+  /**
+   * Token de Moodle de otro usuario, sólo administración.
+   *
+   * Existe porque en Moodle un administrador **sí** puede emitir tokens a
+   * nombre de otro, y esperar a que cada profesor navegue hasta sus claves de
+   * seguridad es la diferencia entre desplegar Vega en una tarde y no
+   * desplegarla. Se escribe, nunca se lee: tampoco un administrador ve el valor.
+   */
+  userMoodleToken: (id: string) => `/api/users/${id}/moodle-token`,
+  testUserMoodleConnection: (id: string) => `/api/users/${id}/moodle-token/test`,
 
   settings: '/api/settings',
+  /** Token de Moodle del usuario en sesión. Cualquier rol; sólo el suyo. */
+  myMoodleToken: '/api/auth/me/moodle-token',
+  testMyMoodleConnection: '/api/auth/me/moodle-token/test',
 
   overview: '/api/stats/overview',
   costBreakdown: '/api/stats/cost',

@@ -6,7 +6,8 @@
 #  que actualiza la CI en cada push a main. Ver deploy/README.md.
 #
 #  Diferencias deliberadas frente a prod:
-#    · puertos publicados 1808x (prod usa 1800x) → el proxy inverso distingue
+#    · puertos publicados 2070x (test 20703/20704, prod 20701/20702) → el proxy
+#      inverso distingue los dos entornos en la misma máquina
 #    · recursos recortados, logs en debug, NODE_ENV=test
 #    · restart: unless-stopped (en prod, always) → aquí sí queremos poder
 #      parar un contenedor y que se quede parado mientras se investiga algo
@@ -39,6 +40,7 @@ services:
     deploy:
       resources:
         limits:
+          # La base de test se borra a menudo y nunca crece.
           cpus: '0.50'
           memory: 512M
     logging:
@@ -64,6 +66,9 @@ services:
       # enum development|test|production y cualquier otro valor tumba el arranque.
       NODE_ENV: ${NODE_ENV:-test}
       LOG_LEVEL: ${LOG_LEVEL:-debug}
+      # Igual que en prod pero más ajustado: si algo se va de memoria, que se
+      # note aquí y no la primera noche en producción.
+      NODE_OPTIONS: ${NODE_OPTIONS:---max-old-space-size=512}
       API_HOST: 0.0.0.0
       API_PORT: '3000'
       JWT_SECRET: ${JWT_SECRET:?define JWT_SECRET en las variables del stack de Portainer}
@@ -85,10 +90,19 @@ services:
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SMTP_FROM: ${SMTP_FROM:-}
       BRAND_NAME: ${BRAND_NAME:-Vega (test)}
+      # Administrador inicial, sólo si la base está vacía. A diferencia de prod
+      # aquí no se exige contraseña: test es desechable y `admin` es el valor
+      # que se espera. Pero las variables tienen que estar cableadas igual, o
+      # lo que se ponga en stack.env se ignora en silencio y el día que alguien
+      # fije una contraseña de verdad seguirá entrando `admin`.
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-admin@vega.local}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-admin}
     ports:
-      # host:contenedor — 18001 para que el proxy inverso lo distinga del 18000
-      # de producción cuando ambos entornos comparten máquina.
-      - '${VEGA_API_PORT:-18001}:3000'
+      # host:contenedor — 20703 para que el proxy inverso lo distinga del 20701
+      # de producción cuando ambos entornos comparten máquina. Por debajo de
+      # 32768 a propósito: ahí empieza el rango efímero del kernel y un puerto
+      # de salida podría ocuparlo antes de que arranque el contenedor.
+      - '${VEGA_API_PORT:-20703}:3000'
     volumes:
       # Contextos markdown del profesor (versionados con git dentro del volumen)
       # y entregas del conector de sistema de ficheros.
@@ -104,8 +118,11 @@ services:
     deploy:
       resources:
         limits:
+          # Por encima del tope de heap (512M) para dejar sitio a lo que Node
+          # no cuenta como heap: buffers, el propio runtime y `pino-pretty` si
+          # alguien lo activa.
           cpus: '0.75'
-          memory: 640M
+          memory: 768M
     logging:
       driver: json-file
       options:
@@ -119,7 +136,7 @@ services:
     depends_on:
       - api
     ports:
-      - '${VEGA_WEB_PORT:-18081}:8080'
+      - '${VEGA_WEB_PORT:-20704}:8080'
     healthcheck:
       test: ['CMD', 'wget', '-q', '--spider', 'http://127.0.0.1:8080/health.txt']
       interval: 30s

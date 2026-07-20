@@ -105,3 +105,81 @@ export type FeedbackFile = z.infer<typeof FeedbackFile>;
  * necesita; el registro no interpreta nada para no acoplarse a ninguna.
  */
 export type LmsConnectorConfig = Readonly<Record<string, unknown>>;
+
+// ── Conexión y errores ──────────────────────────────────────────────────────
+
+/**
+ * Con quién y contra qué se ha conectado el conector. Lo devuelve
+ * `verifyConnection()` para que Ajustes pueda enseñarlo: un token válido pero
+ * del profesor equivocado no da ningún error, y leer aquí el sitio, el usuario
+ * y cuántos cursos ve es la única forma de detectarlo antes de dar de alta
+ * media programación en el curso que no era.
+ */
+export interface LmsConnectionInfo {
+  readonly siteName: string;
+  readonly username: string;
+  readonly courseCount: number;
+  /**
+   * Una entrada por operación comprobada. Probar sólo que la credencial vale
+   * deja pasar el caso más frecuente: un servicio web al que le faltan la mitad
+   * de las funciones. El profesor daría la configuración por buena y se
+   * estrellaría al importar, o —peor— la primera noche que corriera el proceso.
+   */
+  readonly checks: readonly LmsConnectionCheck[];
+}
+
+export interface LmsConnectionCheck {
+  /** Identificador técnico: el nombre de la función en el LMS. */
+  readonly name: string;
+  /** Para qué la usa Vega. */
+  readonly label: string;
+  /**
+   * `skipped` no es `failed`: listar cursos necesita el id de usuario que
+   * devuelve la identificación del token, y darlo por fallido mandaría a
+   * habilitar funciones que quizá ya están puestas.
+   */
+  readonly status: 'ok' | 'failed' | 'skipped';
+  readonly detail: string;
+  /** `false` si aún no la usa ninguna pantalla, pero hará falta más adelante. */
+  readonly required: boolean;
+}
+
+/**
+ * La credencial no sirve: token caducado, revocado o sin permisos para lo que
+ * se ha pedido. Reintentar no arregla nada, hay que pasar por Ajustes.
+ */
+export class LmsAuthError extends Error {
+  readonly code = 'LMS_AUTH';
+
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    // Sin esto el nombre se hereda de `Error` y en los logs sólo pone "Error".
+    this.name = 'LmsAuthError';
+  }
+}
+
+/**
+ * El LMS no responde, va lento o ha devuelto algo que no se entiende. La
+ * credencial puede ser perfectamente buena, así que lo correcto es reintentar
+ * sin cambiar nada.
+ */
+export class LmsUnavailableError extends Error {
+  readonly code = 'LMS_UNAVAILABLE';
+
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'LmsUnavailableError';
+  }
+}
+
+/**
+ * Se mira el `code` y no `instanceof`: entre dos copias del paquete (dos
+ * `node_modules`, un bundle duplicado) `instanceof` falla en silencio y la
+ * interfaz acabaría enseñando el error genérico justo cuando más importa
+ * distinguirlo.
+ */
+export function isLmsError(error: unknown): error is LmsAuthError | LmsUnavailableError {
+  if (!(error instanceof Error)) return false;
+  const code = (error as { code?: unknown }).code;
+  return code === 'LMS_AUTH' || code === 'LMS_UNAVAILABLE';
+}

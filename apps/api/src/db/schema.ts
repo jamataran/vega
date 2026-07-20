@@ -4,6 +4,7 @@ import {
   jsonb,
   numeric,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   uniqueIndex,
@@ -26,15 +27,53 @@ export const users = pgTable('users', {
   active: boolean('active').notNull().default(true),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   lastLoginAt: timestamp('last_login_at', { withTimezone: true }),
+  /**
+   * Token de Moodle de este usuario. Nunca sale por la API: sólo se informa de
+   * si está puesto. Es de cada uno porque decide qué cursos ve la aplicación.
+   */
+  moodleToken: text('moodle_token'),
+  moodleTokenUpdatedAt: timestamp('moodle_token_updated_at', { withTimezone: true }),
 });
+
+/** Curso de Moodle del que cuelgan las actividades. */
+export const courses = pgTable('courses', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  moodleCourseId: text('moodle_course_id').notNull().unique(),
+  name: text('name').notNull().default(''),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * Qué cursos alcanza cada profesor, según lo que devolvió su token la última
+ * vez que listó sus cursos. Es lo que decide qué ve dentro de Vega.
+ */
+export const courseTeachers = pgTable(
+  'course_teachers',
+  {
+    courseId: uuid('course_id')
+      .notNull()
+      .references(() => courses.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    seenAt: timestamp('seen_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [primaryKey({ columns: [table.courseId, table.userId] })],
+);
 
 export const activities = pgTable('activities', {
   id: uuid('id').primaryKey().defaultRandom(),
   slug: text('slug').notNull().unique(),
   name: text('name').notNull(),
   kind: text('kind').$type<'assignment' | 'forum'>().notNull(),
+  courseId: uuid('course_id').references(() => courses.id, { onDelete: 'set null' }),
+  /** Copia del nombre del curso. La fuente de verdad es `courses`. */
   courseName: text('course_name').notNull().default(''),
+  /** Con prefijo de tipo (`assign-42`, `forum-42`) y único desde la 0003. */
   moodleRef: text('moodle_ref'),
+  /** Quién la importó: su token es el que se usa para ingerir sus entregas. */
+  importedBy: uuid('imported_by').references(() => users.id, { onDelete: 'set null' }),
   enabled: boolean('enabled').notNull().default(true),
   graded: boolean('graded').notNull().default(true),
   /** `null` cuando la actividad no se puntúa. */
@@ -57,6 +96,14 @@ export const activityFiles = pgTable('activity_files', {
   mimeType: text('mime_type').notNull().default('application/octet-stream'),
   sizeBytes: integer('size_bytes').notNull().default(0),
   storagePath: text('storage_path'),
+  /**
+   * Contenido del fichero cuando es texto (`.tex`, `.md`). Es lo que viaja al
+   * modelo con el contexto; `null` en binarios, que se guardan sólo como
+   * referencia para el profesor.
+   */
+  content: text('content'),
+  /** `false` mientras llegan los trozos: ni se lista ni entra en el contexto. */
+  uploadComplete: boolean('upload_complete').notNull().default(true),
   uploadedAt: timestamp('uploaded_at', { withTimezone: true }).notNull().defaultNow(),
 });
 

@@ -2,6 +2,8 @@ import { asc, eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import {
   CreateUserRequest,
+  type MoodleConnectionResponse,
+  UpdateMoodleTokenRequest,
   UpdateUserRequest,
   type UserListResponse,
   type UserResponse,
@@ -12,7 +14,29 @@ import { currentUser } from '../auth/plugin.js';
 import { schema } from '../db/client.js';
 import { toUser } from '../db/mappers.js';
 import { badRequest, conflict, notFound, parseOrThrow } from '../http/errors.js';
+import { asHttpError, connectorForUser } from '../lms/factory.js';
 import type { AppContext } from '../context.js';
+
+/**
+ * Titular de la comprobación.
+ *
+ * Nombrar las funciones que fallan —y no un «no se ha podido conectar»— es lo
+ * que convierte el mensaje en algo accionable: son exactamente las que hay que
+ * añadir al servicio web en Moodle.
+ */
+function summarize(failed: readonly { name: string }[], courseCount: number): string {
+  if (failed.length === 1) {
+    return `Moodle rechaza «${failed[0]!.name}». Añádela al servicio web del token en Moodle.`;
+  }
+  if (failed.length > 1) {
+    return `Moodle rechaza estas funciones: ${failed
+      .map((check) => check.name)
+      .join(', ')}. Añádelas al servicio web del token en Moodle.`;
+  }
+  return courseCount === 0
+    ? 'La conexión funciona, pero este token no está matriculado en ningún curso.'
+    : 'Conexión correcta.';
+}
 
 export async function userRoutes(app: FastifyInstance, ctx: AppContext): Promise<void> {
   const { db } = ctx;
@@ -30,6 +54,7 @@ export async function userRoutes(app: FastifyInstance, ctx: AppContext): Promise
     const [existing] = await db.select().from(schema.users).where(eq(schema.users.email, email)).limit(1);
     if (existing) throw conflict('Ya existe un usuario con ese correo.');
 
+    const moodleToken = body.moodleToken?.trim() ?? null;
     const [row] = await db
       .insert(schema.users)
       .values({
@@ -37,6 +62,10 @@ export async function userRoutes(app: FastifyInstance, ctx: AppContext): Promise
         name: body.name,
         role: body.role,
         passwordHash: await hashPassword(body.password),
+        // Opcional: quien se cree sin token no podrá dar de alta actividades
+        // hasta que lo ponga él o se lo pongan desde su ficha.
+        moodleToken: moodleToken === '' ? null : moodleToken,
+        moodleTokenUpdatedAt: moodleToken ? new Date() : null,
       })
       .returning();
     if (!row) throw badRequest('No se ha podido crear el usuario.');
@@ -69,6 +98,80 @@ export async function userRoutes(app: FastifyInstance, ctx: AppContext): Promise
       const [row] = await db.update(schema.users).set(patch).where(eq(schema.users.id, targetId)).returning();
       if (!row) throw notFound('No existe ese usuario.');
       return { user: toUser(row) };
+    },
+  );
+
+  /**
+   * Token de Moodle de otro usuario.
+   *
+   * En Moodle un administrador puede emitir un token a nombre de cualquiera, y
+   * en la práctica es así como se despliega esto: pedirle a cada profesor que
+   * navegue hasta sus claves de seguridad es donde se atasca la instalación.
+   * Se **escribe y no se lee**: el valor no sale por ninguna ruta, tampoco para
+   * quien lo acaba de guardar.
+   */
+  app.put<{ Params: { id: string } }>(
+    routes.userMoodleToken(':id'),
+    { preHandler: adminOnly },
+    async (request): Promise<UserResponse> => {
+      const body = parseOrThrow(UpdateMoodleTokenRequest, request.body, 'El token de Moodle');
+
+      const [row] = await db
+        .update(schema.users)
+        .set({
+          moodleToken: body.token === null ? null : body.token.trim(),
+          moodleTokenUpdatedAt: body.token === null ? null : new Date(),
+        })
+        .where(eq(schema.users.id, request.params.id))
+        .returning();
+      if (!row) throw notFound('No existe ese usuario.');
+      return { user: toUser(row) };
+    },
+  );
+
+  /**
+   * Prueba el token de otro usuario contra Moodle.
+   *
+   * Un token mal pegado no da la cara hasta que su dueño intenta importar algo,
+   * y para entonces el administrador ya no está delante. Como en la ruta
+   * equivalente del propio usuario, el fallo viaja en el cuerpo con `ok: false`:
+   * es la respuesta de la comprobación, no un error de la petición.
+   */
+  app.post<{ Params: { id: string } }>(
+    routes.testUserMoodleConnection(':id'),
+    { preHandler: adminOnly },
+    async (request): Promise<MoodleConnectionResponse> => {
+      const [row] = await db
+        .select({ id: schema.users.id })
+        .from(schema.users)
+        .where(eq(schema.users.id, request.params.id))
+        .limit(1);
+      if (!row) throw notFound('No existe ese usuario.');
+
+      try {
+        const connector = await connectorForUser(ctx, row.id);
+        const info = await connector.verifyConnection();
+        const failed = info.checks.filter((check) => check.required && check.status === 'failed');
+        return {
+          ok: failed.length === 0,
+          checks: [...info.checks],
+          // El detalle de cada función va en `checks`; aquí sólo el titular, que
+          // es lo que se lee primero y lo que decide si hay que seguir mirando.
+          message: summarize(failed, info.courseCount),
+          siteName: info.siteName,
+          username: info.username,
+          courseCount: info.courseCount,
+        };
+      } catch (error) {
+        return {
+          ok: false,
+          message: asHttpError(error).message,
+          siteName: null,
+          username: null,
+          courseCount: null,
+          checks: [],
+        };
+      }
     },
   );
 }

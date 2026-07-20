@@ -4,7 +4,10 @@ import type { AppContext } from '../context.js';
 
 export async function healthRoutes(app: FastifyInstance, ctx: AppContext): Promise<void> {
   // Pública a propósito: la usa el proxy inverso y el HEALTHCHECK de Docker.
-  app.get(routes.health, async (_request, reply): Promise<HealthResponse> => {
+  // `logLevel: 'warn'` la calla: el proxy sondea cada pocos segundos y si no,
+  // en un día son decenas de miles de líneas idénticas empujando fuera del
+  // fichero rotado justo lo que se quería leer. Un fallo sí se registra.
+  app.get(routes.health, { logLevel: 'warn' }, async (_request, reply): Promise<HealthResponse> => {
     let database: 'up' | 'down' = 'up';
     try {
       await ctx.sql`SELECT 1`;

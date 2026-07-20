@@ -7,7 +7,7 @@
 #  Ver deploy/README.md.
 #
 #  Diferencias deliberadas frente a test:
-#    · puertos publicados 1800x (test usa 1808x)
+#    · puertos publicados 20701/20702 (test usa 20703/20704)
 #    · más CPU y memoria, logs en info, NODE_ENV=production
 #    · restart: always → tras reiniciar el host el stack vuelve solo, aunque
 #      alguien hubiera parado un contenedor a mano
@@ -43,10 +43,13 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '1.50'
-          memory: 2G
+          # Medido: 66 MiB en marcha con la base ocupando 9 MB. Con 1 o 2
+          # profesores esto no crece en años. 1 GB es holgura para el
+          # `shared_buffers` por defecto y para un VACUUM, no una previsión.
+          cpus: '1.00'
+          memory: 1G
         reservations:
-          memory: 512M
+          memory: 256M
     logging:
       driver: json-file
       options:
@@ -68,6 +71,11 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER:-vega}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-vega}
       NODE_ENV: ${NODE_ENV:-production}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Tope de heap por debajo del límite del contenedor, a propósito. Si Node
+      # se pasa, queremos un error de heap: se registra, muere la petición y el
+      # proceso sigue. Sin esto, quien mata es el kernel con SIGKILL: sin
+      # traza, con el contenedor reiniciado y el lote nocturno a medias.
+      NODE_OPTIONS: ${NODE_OPTIONS:---max-old-space-size=768}
       API_HOST: 0.0.0.0
       API_PORT: '3000'
       JWT_SECRET: ${JWT_SECRET:?define JWT_SECRET en las variables del stack de Portainer}
@@ -88,8 +96,14 @@ services:
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SMTP_FROM: ${SMTP_FROM:-}
       BRAND_NAME: ${BRAND_NAME:-Vega}
+      # Administrador inicial, sólo si la base está vacía. La contraseña es
+      # OBLIGATORIA aquí: un despliegue accesible desde fuera que arranque con
+      # `admin/admin` es una cuenta de administración regalada, y el descuido
+      # no se nota hasta que alguien entra. Mejor que el stack no levante.
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-admin@vega.local}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?define BOOTSTRAP_ADMIN_PASSWORD en las variables del stack de Portainer}
     ports:
-      - '${VEGA_API_PORT:-18000}:3000'
+      - '${VEGA_API_PORT:-20701}:3000'
     volumes:
       - vega-prod-contexts:/app/contexts
       - vega-prod-data:/app/data
@@ -104,10 +118,15 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '2.00'
-          memory: 2G
+          # El lote procesa las entregas EN SERIE (`for … of` con await en
+          # routes/batch.ts), así que el pico no es 25 entregas sino una: la
+          # más gorda, con sus páginas en base64 camino del modelo. Con una
+          # base de Node de ~120 MB, 1 GB deja margen de sobra y además acota
+          # el daño de una fuga.
+          cpus: '1.50'
+          memory: 1G
         reservations:
-          memory: 512M
+          memory: 384M
     logging:
       driver: json-file
       options:
@@ -121,7 +140,7 @@ services:
     depends_on:
       - api
     ports:
-      - '${VEGA_WEB_PORT:-18080}:8080'
+      - '${VEGA_WEB_PORT:-20702}:8080'
     healthcheck:
       test: ['CMD', 'wget', '-q', '--spider', 'http://127.0.0.1:8080/health.txt']
       interval: 30s
@@ -132,8 +151,9 @@ services:
     deploy:
       resources:
         limits:
+          # nginx sirviendo ficheros estáticos. No hay nada que pueda crecer.
           cpus: '0.50'
-          memory: 256M
+          memory: 128M
     logging:
       driver: json-file
       options:

@@ -12,12 +12,15 @@ import {
   AI_LATEX,
   AI_SUMMARY,
   CORRECTION_ITEMS,
+  COURSE_MOODLE_IDS,
   FORUM_POSTS,
+  SEED_ENUNCIADO_TEMA04,
+  SEED_MATERIAL_FORO,
   STUDENTS,
   SUBMISSION_PLAN,
   TRANSCRIPTION_FLAGS,
   TRANSCRIPTION_PAGES,
-} from './seed-data.js';
+} from './demo-data.js';
 
 /**
  * Siembra la base de datos con un escenario de trabajo completo.
@@ -99,13 +102,23 @@ se corrige el texto que el alumno ha escrito.
 
 async function main(): Promise<void> {
   const config = loadConfig();
+
+  // Esto vacía la base entera. Es útil delante de una pantalla que estás
+  // diseñando y catastrófico contra datos reales, así que en producción no se
+  // ejecuta: ni por descuido, ni «sólo esta vez».
+  if (config.NODE_ENV === 'production') {
+    console.error(
+      '✖ `db:demo` borra todos los datos y no se ejecuta con NODE_ENV=production.',
+    );
+    process.exit(1);
+  }
   const { sql, db } = createDb(config.DATABASE_URL, { max: 1 });
 
   try {
     console.log('→ limpiando datos anteriores…');
     // CASCADE se encarga de correcciones, apartados, transcripciones y ficheros.
     await sql`
-      TRUNCATE submissions, activities, activity_files, grading_contexts,
+      TRUNCATE submissions, activities, activity_files, courses, grading_contexts,
                batch_runs, app_settings, users
       RESTART IDENTITY CASCADE
     `;
@@ -113,14 +126,45 @@ async function main(): Promise<void> {
     // ── Usuarios ──────────────────────────────────────────────────────────
     console.log('→ creando usuarios…');
     const passwordHash = await hashPassword(DEMO_PASSWORD);
+    // Si hay un token de Moodle en el entorno, se lo damos a los dos usuarios
+    // de ejemplo. Es puro arranque en frío para desarrollo: sin esto, probar
+    // contra un Moodle real obliga a pegar el token a mano tras cada `db:seed`.
+    const moodleToken = config.MOODLE_TOKEN ?? null;
     const [admin, teacher] = await db
       .insert(schema.users)
       .values([
-        { email: 'admin@vega.test', name: 'Administración', role: 'admin', passwordHash },
-        { email: 'profe@vega.test', name: 'Marta Ruiz', role: 'teacher', passwordHash },
+        {
+          email: 'admin@vega.test',
+          name: 'Administración',
+          role: 'admin' as const,
+          passwordHash,
+          moodleToken,
+          moodleTokenUpdatedAt: moodleToken === null ? null : new Date(),
+        },
+        {
+          email: 'profe@vega.test',
+          name: 'Marta Ruiz',
+          role: 'teacher' as const,
+          passwordHash,
+          moodleToken,
+          moodleTokenUpdatedAt: moodleToken === null ? null : new Date(),
+        },
       ])
       .returning();
     if (!admin || !teacher) throw new Error('No se han podido crear los usuarios de ejemplo.');
+
+    // ── Cursos ────────────────────────────────────────────────────────────
+    console.log('→ creando cursos…');
+    const courseRows = await db
+      .insert(schema.courses)
+      .values(
+        Object.entries(COURSE_MOODLE_IDS).map(([name, moodleCourseId]) => ({
+          moodleCourseId,
+          name,
+        })),
+      )
+      .returning();
+    const courseByName = new Map(courseRows.map((row) => [row.name, row]));
 
     // ── Actividades ───────────────────────────────────────────────────────
     console.log('→ creando actividades…');
@@ -131,8 +175,12 @@ async function main(): Promise<void> {
           slug: activity.slug,
           name: activity.name,
           kind: activity.kind,
+          courseId: courseByName.get(activity.courseName)?.id ?? null,
           courseName: activity.courseName,
           moodleRef: activity.moodleRef,
+          // Las sembradas las "importó" la profesora: es su token el que
+          // usaría el lote para bajar sus entregas.
+          importedBy: teacher.id,
           enabled: activity.enabled,
           graded: activity.graded,
           // `null` en las no puntuables: lo exige el CHECK y lo pide el dominio.
@@ -146,31 +194,58 @@ async function main(): Promise<void> {
     const activityBySlug = new Map(activityRows.map((row) => [row.slug, row]));
 
     // ── Ficheros de contexto ──────────────────────────────────────────────
-    // MOCK: sólo metadatos, el almacenamiento real está pendiente.
+    // LaTeX y no PDF: es el caso real del producto. El `.tex` ya es texto, entra
+    // literal en el prompt y se cachea; un PDF habría que transcribirlo en cada
+    // corrección. Sembramos también un binario para que se vea qué pasa con lo
+    // que Vega **no** puede leer.
     console.log('→ registrando ficheros de contexto…');
     const tema04 = activityBySlug.get('tema04');
-    const problema12 = activityBySlug.get('problema12');
-    if (tema04 && problema12) {
-      await db.insert(schema.activityFiles).values([
-        {
-          activityId: tema04.id,
-          filename: 'enunciado-tema04.pdf',
-          mimeType: 'application/pdf',
-          sizeBytes: 184_320,
-        },
-        {
-          activityId: tema04.id,
-          filename: 'criterios-departamento.pdf',
-          mimeType: 'application/pdf',
-          sizeBytes: 96_112,
-        },
-        {
-          activityId: problema12.id,
-          filename: 'solucion-referencia-problema12.pdf',
-          mimeType: 'application/pdf',
-          sizeBytes: 142_890,
-        },
-      ]);
+    const foroDudas = activityBySlug.get('foro-dudas-analisis');
+    const withContent = (
+      activityId: string,
+      filename: string,
+      mimeType: string,
+      content: string,
+    ) => ({
+      activityId,
+      filename,
+      mimeType,
+      content,
+      sizeBytes: Buffer.byteLength(content, 'utf8'),
+    });
+
+    if (tema04) {
+      await db
+        .insert(schema.activityFiles)
+        .values([
+          withContent(
+            tema04.id,
+            'enunciado-tema04.tex',
+            'application/x-tex',
+            SEED_ENUNCIADO_TEMA04,
+          ),
+          {
+            activityId: tema04.id,
+            filename: 'criterios-departamento.pdf',
+            mimeType: 'application/pdf',
+            sizeBytes: 96_112,
+            // Binario: se guarda como referencia del profesor, pero su
+            // contenido no llega al modelo y la ficha lo dice.
+            content: null,
+          },
+        ]);
+    }
+    if (foroDudas) {
+      await db
+        .insert(schema.activityFiles)
+        .values([
+          withContent(
+            foroDudas.id,
+            'material-analisis.tex',
+            'application/x-tex',
+            SEED_MATERIAL_FORO,
+          ),
+        ]);
     }
 
     // ── Contextos de corrección ───────────────────────────────────────────
@@ -218,7 +293,16 @@ async function main(): Promise<void> {
       { key: 'schedule.enabled', value: 'false', updatedBy: admin.id },
       { key: 'schedule.everyMinutes', value: '60', updatedBy: admin.id },
       { key: 'branding.name', value: 'Vega', updatedBy: admin.id },
-      { key: 'moodle.baseUrl', value: 'https://campus.academiahipatia.test', updatedBy: admin.id },
+      // Si el entorno apunta a un Moodle de verdad, sembramos ese y su conector:
+      // así `pnpm db:seed` deja la instalación lista para probar contra él sin
+      // pasar por Ajustes. Sin entorno, queda el Moodle ficticio y el conector
+      // simulado, que es lo que hace falta para una demo.
+      {
+        key: 'moodle.baseUrl',
+        value: config.MOODLE_BASE_URL ?? 'https://campus.academiahipatia.test',
+        updatedBy: admin.id,
+      },
+      { key: 'moodle.connector', value: config.LMS_CONNECTOR, updatedBy: admin.id },
     ]);
 
     // ── Entregas ──────────────────────────────────────────────────────────

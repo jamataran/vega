@@ -19,6 +19,21 @@ export interface ResolveContextInput {
   readonly activity?: string | null;
   /** Ficheros que acompañan al contexto de la actividad. Puede llegar vacío. */
   readonly files?: readonly ActivityFile[];
+  /**
+   * Solución de referencia del profesor, o material asociado si la actividad no
+   * se puntúa. Va **al final y en su propia sección**: es lo más concreto y lo
+   * que más cambia entre actividades, así que ponerlo antes acortaría el
+   * prefijo cacheable sin ganar nada.
+   */
+  readonly referenceSolution?: string | null;
+  /** Si la actividad se puntúa, para rotular la sección anterior como toca. */
+  readonly graded?: boolean;
+  /**
+   * Contenido de los ficheros de texto adjuntos (`.tex`, `.md`): el enunciado,
+   * el material sobre el que preguntan los alumnos. Se envían enteros porque
+   * son la referencia contra la que Vega juzga lo que escribe el alumno.
+   */
+  readonly fileContents?: readonly { readonly filename: string; readonly content: string }[];
 }
 
 /** Separador entre niveles: dos saltos para que el Markdown respire. */
@@ -46,6 +61,22 @@ export function resolveContext(input: ResolveContextInput): ResolvedContextRespo
   if (global !== '') parts.push(section('global', global));
   if (activityKind !== '') parts.push(section('activity_kind', activityKind));
   if (activity !== '') parts.push(section('activity', activity));
+
+  // En una actividad no puntuable no hay solución que contrastar: lo que el
+  // profesor sube es el material sobre el que preguntan los alumnos. Es el
+  // mismo campo con dos usos, y llamarlo por su nombre evita que el modelo lo
+  // trate como plantilla de respuesta correcta en un foro de dudas.
+  const reference = clean(input.referenceSolution);
+  if (reference !== '') {
+    const title = input.graded === false ? 'Material asociado' : 'Solución de referencia';
+    parts.push(`## ${title}${SEPARATOR}${reference}`);
+  }
+
+  for (const file of input.fileContents ?? []) {
+    const body = clean(file.content);
+    if (body === '') continue;
+    parts.push(`## Material adjunto · ${file.filename}${SEPARATOR}${body}`);
+  }
 
   return {
     global,

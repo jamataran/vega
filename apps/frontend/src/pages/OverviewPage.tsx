@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { SUBMISSION_STATUS_LABEL, SubmissionStatus } from '@vega/shared';
 import { api } from '@/lib/api';
+import { useAuth } from '@/lib/auth';
 import { queryKeys } from '@/lib/queryKeys';
 import {
   formatDateTime,
@@ -17,6 +18,9 @@ import { Figure } from '@/components/common/Figure';
 import { CostBreakdown } from '@/components/overview/CostBreakdown';
 
 export function OverviewPage() {
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'admin';
+
   const query = useQuery({
     queryKey: queryKeys.overview,
     queryFn: ({ signal }) => api.overview(signal),
@@ -113,6 +117,13 @@ export function OverviewPage() {
           </dl>
         </Section>
 
+        {/*
+          El último proceso es una ejecución del sistema entera y sus cifras son
+          las de todo el claustro, así que el API sólo lo devuelve a
+          administración. Para el resto la sección no se pinta: enseñarla vacía
+          diría «no se ha ejecutado nada», que es falso.
+        */}
+        {isAdmin ? (
         <Section title="Último proceso">
           {data.lastBatchRun ? (
             <div className="flex flex-col gap-4">
@@ -165,6 +176,7 @@ export function OverviewPage() {
             </p>
           )}
         </Section>
+        ) : null}
       </div>
     </div>
   );

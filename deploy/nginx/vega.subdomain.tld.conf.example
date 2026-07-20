@@ -1,0 +1,132 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  Vega · proxy inverso nginx — EJEMPLO
+#
+#  Copia a /etc/nginx/sites-available/vega.subdomain.tld, ajusta el dominio y
+#  las rutas de los certificados, y enlaza en sites-enabled.
+#
+#  Reparto de responsabilidades: aquí se termina TLS y se decide el enrutado;
+#  el nginx de dentro del contenedor web (apps/frontend/nginx.conf) sólo sirve
+#  estáticos y ya trae sus cabeceras de seguridad y su política de caché. No
+#  las repitas aquí: en nginx un `add_header` en el bloque hijo anula TODOS los
+#  heredados, así que duplicar de más es la forma habitual de perder las que ya
+#  funcionaban.
+#
+#  Puertos publicados por los stacks de Portainer (deploy/*/docker-compose.yml):
+#
+#    entorno   servicio   host    contenedor
+#    ───────   ────────   ─────   ──────────
+#    prod      api        20701   3000
+#    prod      web        20702   8080
+#    test      api        20703   3000
+#    test      web        20704   8080
+#
+#  Este fichero cubre PRODUCCIÓN. Para test, duplica el bloque cambiando el
+#  server_name a test.vega.subdomain.tld y los puertos a 20703 / 20704.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Redirección a HTTPS ──────────────────────────────────────────────────────
+# El reto ACME se sirve en claro; todo lo demás sube a TLS. Sin el `location`
+# de .well-known, la renovación del certificado falla en cuanto el 301 se
+# aplique a todo.
+server {
+    listen 80;
+    listen [::]:80;
+    server_name vega.subdomain.tld;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name vega.subdomain.tld;
+
+    # ── TLS ──────────────────────────────────────────────────────────────────
+    ssl_certificate     /etc/letsencrypt/live/vega.subdomain.tld/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/vega.subdomain.tld/privkey.pem;
+
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache   shared:SSL:10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+
+    # HSTS se pone AQUÍ y no en el contenedor: sólo este nivel sabe que el
+    # dominio se sirve por HTTPS. Empieza con un max-age corto y súbelo cuando
+    # confirmes que todo el dominio va por TLS — revertir HSTS es lento porque
+    # el navegador recuerda la cabecera aunque la quites.
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+
+    server_tokens off;
+
+    # Los escaneos de entregas se suben por aquí. El API tiene su propio límite;
+    # este es el del proxy, y si es menor gana el proxy y el usuario recibe un
+    # 413 sin explicación.
+    client_max_body_size 50m;
+
+    # ── Logs ─────────────────────────────────────────────────────────────────
+    access_log /var/log/nginx/vega.access.log;
+    error_log  /var/log/nginx/vega.error.log warn;
+
+    # ── API ──────────────────────────────────────────────────────────────────
+    # Va ANTES que `location /` porque nginx resuelve los prefijos por
+    # especificidad, no por orden — pero mantenerlo arriba evita sorpresas al
+    # leer el fichero.
+    #
+    # El prefijo /api NO se recorta: proxy_pass sin barra final conserva la ruta
+    # completa, que es lo que el API espera (sus rutas ya viven bajo /api).
+    # Añadir la barra final lo rompería con 404s difíciles de diagnosticar.
+    location /api/ {
+        proxy_pass http://127.0.0.1:20701;
+
+        proxy_http_version 1.1;
+
+        # Sin estas cuatro, Fastify genera URLs absolutas en http:// y el rate
+        # limiting cuenta todas las peticiones como si vinieran del proxy.
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Una corrección con IA puede tardar más de un minuto. El valor por
+        # defecto de nginx son 60 s: con él, la petición muere con 504 mientras
+        # el API sigue trabajando y gastando tokens.
+        proxy_connect_timeout 10s;
+        proxy_send_timeout    120s;
+        proxy_read_timeout    120s;
+
+        # El streaming de respuestas de la IA no debe quedarse en el buffer del
+        # proxy: sin esto, el usuario ve la respuesta de golpe al final.
+        proxy_buffering off;
+    }
+
+    # ── Sonda de salud ───────────────────────────────────────────────────────
+    # Verifica la base de datos, así que sirve como health check real del stack.
+    location = /api/health {
+        proxy_pass http://127.0.0.1:20701;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        access_log off;
+    }
+
+    # ── PWA ──────────────────────────────────────────────────────────────────
+    # Todo lo demás al contenedor web, que ya resuelve el fallback del router,
+    # la caché de los assets con hash y el no-cache del service worker.
+    location / {
+        proxy_pass http://127.0.0.1:20702;
+
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}

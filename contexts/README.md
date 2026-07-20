@@ -1,7 +1,7 @@
 # Contextos de corrección
 
 Aquí vive lo que la IA lee antes de corregir. Son ficheros Markdown, versionados con git, y son
-**el juego por defecto que carga la aplicación**: `pnpm db:seed` los vuelca en la tabla
+**el juego por defecto que carga la aplicación**: `pnpm db:demo` los vuelca en la tabla
 `grading_contexts`.
 
 No son documentación. Son instrucciones ejecutables: lo que se escribe aquí determina las notas de
@@ -36,7 +36,7 @@ Los `ActivityKind` son exactamente dos, `assignment` y `forum`, así que el nive
 tener más de dos ficheros. Cualquier otro nombre en `activity-kinds/` no lo lee nadie.
 
 > **Estado real de esta carpeta.** Falta `activity-kinds/forum.md`: mientras no exista, la siembra
-> usa un texto de reserva escrito en `apps/api/src/db/seed.ts`. Y `activity-kinds/assignment-tema.md`
+> usa un texto de reserva escrito en `apps/api/src/db/demo.ts`. Y `activity-kinds/assignment-tema.md`
 > es un resto del enum viejo (`simulacro_tema`) que ya no corresponde a ningún `ActivityKind` y que
 > no se carga nunca. Tampoco hay fichero de nivel `activity` para las actividades de foro del juego
 > de datos (`foro-didactica`, `foro-dudas-analisis`).
@@ -67,11 +67,27 @@ El resultado se puede ver tal cual, sin gastar tokens, en `GET /api/contexts/res
 (`ResolvedContextResponse`), que devuelve los tres niveles por separado y el `merged` final. Si una
 corrección sale rara, **el primer sitio donde mirar es ahí**.
 
-> **Ojo con `referenceSolution`.** El campo existe en la actividad y se edita desde la aplicación,
-> pero hoy **no llega al modelo**: el lote no se lo pasa al motor y `GradeInput` no lo contempla. Si
-> quieres que la solución de referencia pese en la corrección, escríbela dentro del fichero de nivel
-> `activity`. Lo mismo con los ficheros adjuntos (`activity_files`): aparecen en el contexto
-> resuelto que ve el profesor, pero el lote no los envía.
+Además de los tres niveles, `resolveContext()` añade al final dos cosas que **no** son Markdown de
+esta carpeta:
+
+- **La solución de referencia de la actividad**, en su propia sección. Se titula **«Solución de
+  referencia»** si la actividad se puntúa y **«Material asociado»** si no: en un foro de dudas ese
+  campo no es la respuesta correcta a nada, sino el material del que preguntan los alumnos, y
+  llamarlo «solución» invita al modelo a tratarlo como plantilla de respuesta.
+- **El contenido de los ficheros de contexto de texto**, una sección «Material adjunto · *nombre*»
+  por fichero. Sólo `.tex`, `.md`, `.markdown` y `.txt`: un `.tex` ya es texto, entra literal en el
+  prompt y se cachea con el resto. De un PDF o una imagen **no se guarda el contenido**, y la
+  aplicación lo dice en vez de fingir que llegan.
+
+Van al final, y no es capricho: son lo más concreto y lo que más cambia entre actividades, así que
+ponerlos antes acortaría el prefijo cacheable sin ganar nada.
+
+> **Ojo: el lote todavía no envía nada de eso.** `resolveContext()` sabe montarlo y
+> `GET /api/contexts/resolved/{activityId}` lo enseña, pero `apps/api/src/routes/batch.ts` construye
+> el contexto que manda al motor con **sólo los tres niveles de Markdown**. Hoy, si quieres que la
+> solución de referencia o el material adjunto pesen en la corrección, **escríbelos dentro del
+> fichero de nivel `activity`**. Es una carencia declarada, no una decisión: hasta que se cierre, la
+> pantalla de contexto efectivo enseña más de lo que el modelo lee.
 
 Ver [ADR 0003](../docs/decisiones/0003-contexto-tres-niveles.md).
 
@@ -80,7 +96,7 @@ Ver [ADR 0003](../docs/decisiones/0003-contexto-tres-niveles.md).
 Los contextos existen en dos sitios: estos ficheros y la tabla `grading_contexts`. La regla
 provisional es **el fichero siembra, la base de datos manda**:
 
-1. `pnpm db:seed` lee estos ficheros y crea las filas. Es un script de desarrollo: vacía las tablas
+1. `pnpm db:demo` lee estos ficheros y crea las filas. Es un script de desarrollo: vacía las tablas
    antes de escribir.
 2. En ejecución, la aplicación lee **siempre** la fila (`readContextLevel()` consulta
    `grading_contexts` y nada más). El fichero se ignora.

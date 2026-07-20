@@ -2,12 +2,18 @@ import { useId, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Plus } from 'lucide-react';
 import { CreateUserRequest, USER_ROLE_LABEL, UserRole } from '@vega/shared';
-import type { CreateUserRequest as CreateUserBody, UpdateUserRequest, User } from '@vega/shared';
+import type {
+  CreateUserRequest as CreateUserBody,
+  MoodleConnectionResponse,
+  UpdateUserRequest,
+  User,
+} from '@vega/shared';
 import { api } from '@/lib/api';
 import { queryKeys } from '@/lib/queryKeys';
 import { notify } from '@/lib/notify';
 import { BRAND_NAME } from '@/lib/brand';
 import { formatDateTime } from '@/lib/format';
+import { cn } from '@/lib/cn';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -33,6 +39,9 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
 import { EmptyState, ErrorState, PageHeader } from '@/components/common/Feedback';
 import { Field } from '@/components/common/Field';
+import { MoodleConnectionResult } from '@/components/settings/MoodleConnectionResult';
+import { KEEP, SecretField, secretPatch } from '@/components/settings/SecretField';
+import type { SecretState } from '@/components/settings/SecretField';
 
 export function UsersPage() {
   const queryClient = useQueryClient();
@@ -215,10 +224,19 @@ function CreateUserSheet({
   const [name, setName] = useState('');
   const [password, setPassword] = useState('');
   const [role, setRole] = useState<UserRole>('teacher');
+  const [moodleToken, setMoodleToken] = useState('');
   const [errors, setErrors] = useState<Record<string, string>>({});
 
   const submit = () => {
-    const parsed = CreateUserRequest.safeParse({ email, name, password, role });
+    const parsed = CreateUserRequest.safeParse({
+      email,
+      name,
+      password,
+      role,
+      // Vacío es «sin token», no cadena vacía: el contrato lo exige no vacío
+      // cuando viene, para que no se guarde un token en blanco por descuido.
+      moodleToken: moodleToken.trim() === '' ? null : moodleToken.trim(),
+    });
     if (!parsed.success) {
       const fields = parsed.error.flatten().fieldErrors;
       setErrors({
@@ -275,6 +293,26 @@ function CreateUserSheet({
             )}
           </Field>
           <RoleField value={role} onChange={setRole} />
+
+          {/*
+            Aquí es un campo normal y no un `SecretField`: en un usuario que aún
+            no existe no hay nada que conservar ni que sustituir, así que las tres
+            opciones de aquel componente sobrarían.
+          */}
+          <Field
+            label="Token de Moodle"
+            hint="Opcional. Sin él, esta persona no verá ningún curso hasta que lo añada. Lo emites en Moodle a su nombre, en Administración del sitio → Servidor → Servicios web → Administrar credenciales."
+          >
+            {(field) => (
+              <Input
+                {...field}
+                type="password"
+                autoComplete="off"
+                value={moodleToken}
+                onChange={(event) => setMoodleToken(event.target.value)}
+              />
+            )}
+          </Field>
         </SheetBody>
 
         <SheetFooter>
@@ -287,6 +325,80 @@ function CreateUserSheet({
         </SheetFooter>
       </SheetContent>
     </Sheet>
+  );
+}
+
+/**
+ * Token de Moodle de otra persona.
+ *
+ * En Moodle, un administrador puede emitir un token a nombre de cualquiera, y
+ * es así como esto se despliega de verdad: esperar a que cada profesor
+ * encuentre sus claves de seguridad en Moodle es donde se atasca la
+ * instalación. El valor **no se lee nunca**, tampoco aquí: sólo se sustituye,
+ * se borra o se prueba.
+ *
+ * Va aparte del resto del formulario porque no es un campo más: se guarda por
+ * su cuenta y con su propia confirmación.
+ */
+function UserMoodleToken({ user }: { user: User }) {
+  const queryClient = useQueryClient();
+  const [token, setToken] = useState<SecretState>(KEEP);
+  const [result, setResult] = useState<MoodleConnectionResponse | null>(null);
+
+  const save = useMutation({
+    mutationFn: () => {
+      const patch = secretPatch(token);
+      if (patch === undefined) throw new Error('No hay ningún cambio que guardar.');
+      return api.updateUserMoodleToken(user.id, { token: patch });
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.users });
+      setToken(KEEP);
+      setResult(null);
+      notify.success('Token guardado');
+    },
+    onError: (error) => notify.error('No se ha podido guardar el token', error),
+  });
+
+  const test = useMutation({
+    mutationFn: () => api.testUserMoodleConnection(user.id),
+    onSuccess: setResult,
+    onError: (error) => notify.error('No se ha podido probar la conexión', error),
+  });
+
+  const pending = secretPatch(token) !== undefined;
+
+  return (
+    <div className="flex flex-col gap-3 rounded-md border border-border p-3">
+      <SecretField
+        label="Token de Moodle"
+        configured={user.moodleTokenConfigured}
+        state={token}
+        onChange={setToken}
+        hint="Genéralo en Moodle desde Administración del sitio → Servidor → Servicios web → Administrar credenciales, a nombre de esta persona."
+      />
+
+      <p className="text-ui text-muted-foreground">
+        Decide qué cursos ve. Sin token, esta persona no puede dar de alta actividades.
+      </p>
+
+      {result ? <MoodleConnectionResult result={result} /> : null}
+
+      <div className="flex flex-wrap gap-2">
+        <Button size="sm" disabled={!pending} loading={save.isPending} onClick={() => save.mutate()}>
+          Guardar token
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={!user.moodleTokenConfigured || pending}
+          loading={test.isPending}
+          onClick={() => test.mutate()}
+        >
+          Probar conexión
+        </Button>
+      </div>
+    </div>
   );
 }
 
@@ -346,6 +458,8 @@ function EditUserSheet({
               />
             )}
           </Field>
+
+          {user ? <UserMoodleToken user={user} /> : null}
         </SheetBody>
 
         <SheetFooter>

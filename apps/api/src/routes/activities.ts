@@ -1,22 +1,37 @@
-import { asc, eq, inArray } from 'drizzle-orm';
+import { and, asc, eq, inArray, lt } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
-import { z } from 'zod';
 import {
   type Activity,
+  type ActivityFileContentResponse,
   type ActivityFileListResponse,
   type ActivityFileResponse,
   type ActivityListResponse,
   type ActivityResponse,
+  AppendActivityFileChunkRequest,
+  type AppendActivityFileChunkResponse,
+  BeginActivityFileUploadRequest,
+  DiscoverActivitiesQuery,
   type DiscoverActivitiesResponse,
-  type DiscoveredActivity,
+  type DeleteActivityResponse,
+  type DiscoverCoursesResponse,
   ImportActivitiesRequest,
   type ImportActivitiesResponse,
+  MAX_FILE_CONTENT_BYTES,
   UpdateActivityRequest,
+  isTextFile,
   routes,
 } from '@vega/shared';
+import { currentUser } from '../auth/plugin.js';
+import {
+  activityScope,
+  assertActivityAccess,
+  recordCourseAccess,
+} from '../auth/scope.js';
 import { schema } from '../db/client.js';
 import { toActivity, toActivityFile } from '../db/mappers.js';
-import { notFound, parseOrThrow, unprocessable } from '../http/errors.js';
+import { conflict, notFound, parseOrThrow, unprocessable } from '../http/errors.js';
+import { connectorForUser, withLms } from '../lms/factory.js';
+import type { TokenPayload } from '../auth/plugin.js';
 import type { AppContext } from '../context.js';
 
 /**
@@ -37,19 +52,37 @@ export async function loadActivity(ctx: AppContext, id: string): Promise<Activit
     .limit(1);
   if (!row) return undefined;
 
+  // Una subida a medias no es un fichero todavía: no se enseña ni se envía.
   const files = await ctx.db
     .select()
     .from(schema.activityFiles)
-    .where(eq(schema.activityFiles.activityId, id))
+    .where(
+      and(
+        eq(schema.activityFiles.activityId, id),
+        eq(schema.activityFiles.uploadComplete, true),
+      ),
+    )
     .orderBy(asc(schema.activityFiles.uploadedAt));
 
   return toActivity(row, files);
 }
 
-/** Igual que `loadActivity` pero lanzando 404, que es lo que quieren las rutas. */
-export async function requireActivity(ctx: AppContext, id: string): Promise<Activity> {
+/**
+ * Igual que `loadActivity` pero lanzando 404, y comprobando el permiso.
+ *
+ * El usuario es obligatorio a propósito: con un parámetro opcional, olvidarlo
+ * en una ruta nueva no daría ni un error de tipos y abriría un agujero
+ * silencioso por el que un profesor vería el trabajo de otro. Si alguna vez
+ * hace falta cargar sin comprobar nada, está `loadActivity`.
+ */
+export async function requireActivity(
+  ctx: AppContext,
+  id: string,
+  user: TokenPayload,
+): Promise<Activity> {
   const activity = await loadActivity(ctx, id);
   if (!activity) throw notFound('No existe esa actividad.');
+  await assertActivityAccess(ctx, user, id);
   return activity;
 }
 
@@ -64,7 +97,12 @@ async function filesByActivity(
   const rows = await ctx.db
     .select()
     .from(schema.activityFiles)
-    .where(inArray(schema.activityFiles.activityId, activityIds))
+    .where(
+      and(
+        inArray(schema.activityFiles.activityId, activityIds),
+        eq(schema.activityFiles.uploadComplete, true),
+      ),
+    )
     .orderBy(asc(schema.activityFiles.uploadedAt));
 
   for (const row of rows) {
@@ -75,71 +113,19 @@ async function filesByActivity(
   return grouped;
 }
 
-// ── Descubrimiento en Moodle ────────────────────────────────────────────────
+/**
+ * Cuándo se da por muerta una subida sin cerrar. Generoso: una conexión mala
+ * puede tardar, y borrar la subida de alguien que sigue en ello es peor que
+ * dejar una fila huérfana un rato de más.
+ */
+const STALE_UPLOAD_MS = 60 * 60 * 1000;
 
 /**
- * Catálogo de actividades "que hay en Moodle".
+ * `slug` estable a partir de la referencia de Moodle.
  *
- * MOCK — pendiente del conector. Esto debería salir de `listActivities()` de
- * `@vega/connector-lms`, que se está añadiendo en paralelo y todavía no existe
- * (el paquete ni siquiera carga: importa `TaskType`, que ya no está en
- * `@vega/shared`). En cuanto exista, sustituir esta constante por la llamada al
- * conector y borrar el resto de este bloque; la forma del `DiscoveredActivity`
- * ya es la definitiva, así que el cambio queda confinado aquí.
+ * Es la `key` del contexto de nivel `activity` y el nombre del fichero en
+ * `contexts/activities/`, así que una vez creado no cambia nunca (HU-04, RN-1).
  */
-const MOODLE_CATALOGUE: readonly Omit<DiscoveredActivity, 'alreadyImported'>[] = [
-  {
-    moodleRef: 'assign-tema04',
-    name: 'Tema 04 · Derivadas y aplicaciones',
-    kind: 'assignment',
-    courseName: 'Academia Hipatia · Secundaria Matemáticas · Grupo de mañana',
-    pendingCount: 6,
-  },
-  {
-    moodleRef: 'assign-problema12',
-    name: 'Problema 12 · Integrales definidas y áreas',
-    kind: 'assignment',
-    courseName: 'Academia Hipatia · Secundaria Matemáticas · Grupo de mañana',
-    pendingCount: 4,
-  },
-  {
-    moodleRef: 'assign-tema07',
-    name: 'Tema 07 · Límites y continuidad',
-    kind: 'assignment',
-    courseName: 'Academia Hipatia · Secundaria Matemáticas · Grupo de tarde',
-    pendingCount: 5,
-  },
-  {
-    moodleRef: 'forum-didactica',
-    name: 'Foro · Didáctica: ¿límite antes que derivada?',
-    kind: 'forum',
-    courseName: 'Academia Hipatia · Secundaria Matemáticas · Grupo de mañana',
-    pendingCount: 3,
-  },
-  {
-    moodleRef: 'forum-dudas-analisis',
-    name: 'Foro · Dudas de análisis entre compañeros',
-    kind: 'forum',
-    courseName: 'Academia Hipatia · Secundaria Matemáticas · Grupo de tarde',
-    pendingCount: 4,
-  },
-  {
-    moodleRef: 'assign-simulacro-global',
-    name: 'Simulacro global · Convocatoria de junio',
-    kind: 'assignment',
-    courseName: 'Academia Hipatia · Secundaria Matemáticas · Grupo de tarde',
-    pendingCount: 0,
-  },
-  {
-    moodleRef: 'forum-presentacion',
-    name: 'Foro · Presentación del curso',
-    kind: 'forum',
-    courseName: 'Academia Hipatia · Secundaria Matemáticas · Grupo de mañana',
-    pendingCount: 0,
-  },
-];
-
-/** `slug` estable a partir de la referencia de Moodle. */
 function slugFromMoodleRef(moodleRef: string): string {
   const cleaned = moodleRef
     .toLowerCase()
@@ -149,22 +135,40 @@ function slugFromMoodleRef(moodleRef: string): string {
   return cleaned === '' ? `actividad-${Date.now()}` : cleaned;
 }
 
-// ── Subida de ficheros de contexto ──────────────────────────────────────────
-
 /**
- * MOCK — el almacenamiento real está pendiente.
+ * Da de alta el curso si aún no existe y devuelve su fila.
  *
- * No montamos ni disco ni S3: sólo registramos los metadatos en
- * `activity_files` y al descargar servimos un contenido de marcador. Por eso el
- * alta acepta JSON con los metadatos y no `multipart/form-data`; cuando haya
- * almacenamiento de verdad, esta ruta pasará a recibir el fichero y a rellenar
- * `storage_path`, que ya existe en el esquema y hoy se queda a `null`.
+ * El nombre **sí** se refresca al re-sincronizar, al revés que el de la
+ * actividad: el nombre de una actividad puede haberlo ajustado el profesor en
+ * Vega y no queremos pisárselo (RN-4), pero el del curso nadie lo edita aquí,
+ * así que lo que diga Moodle es lo bueno.
  */
-const UploadActivityFileRequest = z.object({
-  filename: z.string().min(1, 'El fichero necesita un nombre'),
-  mimeType: z.string().min(1).default('application/octet-stream'),
-  sizeBytes: z.number().int().min(0).default(0),
-});
+async function upsertCourse(
+  ctx: AppContext,
+  moodleCourseId: string,
+  name: string,
+): Promise<typeof schema.courses.$inferSelect> {
+  const [row] = await ctx.db
+    .insert(schema.courses)
+    .values({ moodleCourseId, name })
+    .onConflictDoUpdate({
+      target: schema.courses.moodleCourseId,
+      set: { name, updatedAt: new Date() },
+    })
+    .returning();
+
+  if (row) return row;
+
+  // `onConflictDoUpdate` siempre devuelve fila; esto sólo cubre el caso
+  // imposible para que el tipo no arrastre un `undefined` por toda la ruta.
+  const [existing] = await ctx.db
+    .select()
+    .from(schema.courses)
+    .where(eq(schema.courses.moodleCourseId, moodleCourseId))
+    .limit(1);
+  if (!existing) throw notFound('No se ha podido registrar el curso.');
+  return existing;
+}
 
 // ── Rutas ───────────────────────────────────────────────────────────────────
 
@@ -175,13 +179,47 @@ export async function activityRoutes(app: FastifyInstance, ctx: AppContext): Pro
   app.get(
     routes.activities,
     { preHandler: app.authenticate },
-    async (): Promise<ActivityListResponse> => {
-      const rows = await db.select().from(schema.activities).orderBy(asc(schema.activities.slug));
+    async (request): Promise<ActivityListResponse> => {
+      const session = currentUser(request);
+      // Un profesor sólo ve lo de sus cursos; la administración, todo.
+      const rows = await db
+        .select()
+        .from(schema.activities)
+        .where(activityScope(session))
+        .orderBy(asc(schema.activities.slug));
       const files = await filesByActivity(
         ctx,
         rows.map((row) => row.id),
       );
       return { items: rows.map((row) => toActivity(row, files.get(row.id) ?? [])) };
+    },
+  );
+
+  // ── Cursos del profesor ───────────────────────────────────────────────────
+  // Primer paso del alta: el catálogo entero de un Moodle de departamento no
+  // cabe en una pantalla, así que se elige curso y luego se ven sus actividades.
+  app.get(
+    routes.discoverCourses,
+    { preHandler: app.authenticate },
+    async (request): Promise<DiscoverCoursesResponse> => {
+      const session = currentUser(request);
+      const connector = await connectorForUser(ctx, session.sub);
+      const found = await withLms(() => connector.listCourses());
+
+      // Listar cursos es el único momento en que Moodle nos dice la verdad
+      // sobre a qué alcanza este profesor, así que es donde se registra. Sin
+      // esto, un compañero que importara antes que él le dejaría fuera de su
+      // propia asignatura.
+      const rows = await Promise.all(
+        found.map((course) => upsertCourse(ctx, course.moodleCourseId, course.name)),
+      );
+      await recordCourseAccess(
+        ctx,
+        session.sub,
+        rows.map((row) => row.id),
+      );
+
+      return { items: found };
     },
   );
 
@@ -191,7 +229,15 @@ export async function activityRoutes(app: FastifyInstance, ctx: AppContext): Pro
   app.get(
     routes.discoverActivities,
     { preHandler: app.authenticate },
-    async (): Promise<DiscoverActivitiesResponse> => {
+    async (request): Promise<DiscoverActivitiesResponse> => {
+      const session = currentUser(request);
+      const query = parseOrThrow(DiscoverActivitiesQuery, request.query, 'El curso');
+
+      const connector = await connectorForUser(ctx, session.sub);
+      const found = await withLms(() => connector.listActivities(query.moodleCourseId));
+
+      // `alreadyImported` lo decide Vega, no el conector: el conector no sabe
+      // qué hay dado de alta y lo devuelve siempre a `false`.
       const existing = await db
         .select({ moodleRef: schema.activities.moodleRef })
         .from(schema.activities);
@@ -200,7 +246,7 @@ export async function activityRoutes(app: FastifyInstance, ctx: AppContext): Pro
       );
 
       return {
-        items: MOODLE_CATALOGUE.map((entry) => ({
+        items: found.map((entry) => ({
           ...entry,
           alreadyImported: imported.has(entry.moodleRef),
         })),
@@ -213,18 +259,28 @@ export async function activityRoutes(app: FastifyInstance, ctx: AppContext): Pro
     routes.importActivities,
     { preHandler: app.authenticate },
     async (request): Promise<ImportActivitiesResponse> => {
+      const session = currentUser(request);
       const body = parseOrThrow(ImportActivitiesRequest, request.body, 'La selección');
       const wanted = [...new Set(body.moodleRefs)];
 
-      const unknown = wanted.filter(
-        (ref) => !MOODLE_CATALOGUE.some((entry) => entry.moodleRef === ref),
-      );
+      // Volvemos a preguntar a Moodle en vez de fiarnos de lo que el cliente
+      // tenía en pantalla: entre listar y confirmar, una actividad puede
+      // haberse borrado, y crearla en Vega dejaría una actividad que no ingiere
+      // nada y falla cada noche sin explicar por qué.
+      const connector = await connectorForUser(ctx, session.sub);
+      const available = await withLms(() => connector.listActivities(body.moodleCourseId));
+      const byMoodleRef = new Map(available.map((entry) => [entry.moodleRef, entry]));
+
+      const unknown = wanted.filter((ref) => !byMoodleRef.has(ref));
       if (unknown.length > 0) {
         throw unprocessable(
           `Estas actividades ya no están en Moodle: ${unknown.join(', ')}.`,
           Object.fromEntries(unknown.map((ref) => [ref, 'No existe en Moodle'])),
         );
       }
+
+      const courseName = available[0]?.courseName ?? '';
+      const course = await upsertCourse(ctx, body.moodleCourseId, courseName);
 
       // Idempotente: reimportar una que ya está dada de alta la devuelve tal
       // cual, sin duplicarla ni pisar lo que el profesor haya configurado.
@@ -234,9 +290,10 @@ export async function activityRoutes(app: FastifyInstance, ctx: AppContext): Pro
         .where(inArray(schema.activities.moodleRef, wanted));
       const byRef = new Map(already.map((row) => [row.moodleRef, row]));
 
-      const toCreate = MOODLE_CATALOGUE.filter(
-        (entry) => wanted.includes(entry.moodleRef) && !byRef.has(entry.moodleRef),
-      );
+      const toCreate = wanted
+        .filter((ref) => !byRef.has(ref))
+        .map((ref) => byMoodleRef.get(ref))
+        .filter((entry): entry is NonNullable<typeof entry> => entry !== undefined);
 
       if (toCreate.length > 0) {
         const inserted = await db
@@ -246,8 +303,11 @@ export async function activityRoutes(app: FastifyInstance, ctx: AppContext): Pro
               slug: slugFromMoodleRef(entry.moodleRef),
               name: entry.name,
               kind: entry.kind,
-              courseName: entry.courseName,
+              courseId: course.id,
+              courseName: course.name,
               moodleRef: entry.moodleRef,
+              // Su token es el que se usará para ingerir las entregas.
+              importedBy: session.sub,
               enabled: true,
               // Un foro no se puntúa por defecto; una entrega sí. El profesor
               // lo cambia luego desde la ficha de la actividad.
@@ -258,11 +318,22 @@ export async function activityRoutes(app: FastifyInstance, ctx: AppContext): Pro
               autonomy: 'review_all' as const,
             })),
           )
-          // Carrera entre dos importaciones simultáneas: el índice único de
-          // `slug` decide y la segunda no rompe.
-          .onConflictDoNothing({ target: schema.activities.slug })
+          // Carrera entre dos importaciones simultáneas: los índices únicos de
+          // `slug` y `moodle_ref` deciden y la segunda no rompe.
+          .onConflictDoNothing()
           .returning();
         for (const row of inserted) byRef.set(row.moodleRef, row);
+
+        // Lo que el `ON CONFLICT` haya saltado por la carrera lo releemos, para
+        // que la respuesta incluya siempre todo lo pedido (RN-3).
+        const missing = wanted.filter((ref) => !byRef.has(ref));
+        if (missing.length > 0) {
+          const raced = await db
+            .select()
+            .from(schema.activities)
+            .where(inArray(schema.activities.moodleRef, missing));
+          for (const row of raced) byRef.set(row.moodleRef, row);
+        }
       }
 
       const rows = wanted
@@ -282,7 +353,7 @@ export async function activityRoutes(app: FastifyInstance, ctx: AppContext): Pro
     routes.activity(':id'),
     { preHandler: app.authenticate },
     async (request): Promise<ActivityResponse> => {
-      return { activity: await requireActivity(ctx, request.params.id) };
+      return { activity: await requireActivity(ctx, request.params.id, currentUser(request)) };
     },
   );
 
@@ -341,7 +412,62 @@ export async function activityRoutes(app: FastifyInstance, ctx: AppContext): Pro
           .where(eq(schema.activities.id, request.params.id));
       }
 
-      return { activity: await requireActivity(ctx, request.params.id) };
+      return { activity: await requireActivity(ctx, request.params.id, currentUser(request)) };
+    },
+  );
+
+  /**
+   * Da de baja una actividad **de Vega**.
+   *
+   * LÍNEA ROJA: esto **no toca el LMS**. No se construye conector, no se llama a
+   * ninguna operación remota y no hay forma de que esta ruta borre nada en
+   * Moodle. La actividad sigue allí, y una nota ya publicada sigue publicada:
+   * borrar aquí no la retira ni avisa a nadie. Si algún día hiciera falta
+   * retractar una publicación, será otra operación con otro nombre.
+   *
+   * Lo que sí destruye, en cascada, es todo lo que Vega guardaba de ella:
+   * entregas, transcripciones y correcciones, incluidas las que el profesorado
+   * validó. No hay papelera. Por eso la respuesta dice cuánto se llevó por
+   * delante y la pantalla lo avisa antes, con esos mismos números.
+   */
+  app.delete<{ Params: { id: string } }>(
+    routes.activity(':id'),
+    { preHandler: app.authenticate },
+    async (request): Promise<DeleteActivityResponse> => {
+      const activity = await requireActivity(ctx, request.params.id, currentUser(request));
+
+      // Se cuenta antes de borrar: después ya no hay a quién preguntar.
+      const [counts] = await ctx.sql<
+        { submissions: number; corrections: number; published: number }[]
+      >`
+        SELECT
+          COUNT(*)::int                                       AS submissions,
+          COUNT(c.id)::int                                    AS corrections,
+          -- Por el estado de la entrega, que es la misma definición que usa la
+          -- cola: si las dos pantallas contaran distinto, el aviso previo y el
+          -- resultado no cuadrarían.
+          COUNT(*) FILTER (WHERE s.status = 'published')::int  AS published
+        FROM submissions s
+        LEFT JOIN corrections c ON c.submission_id = s.id
+        WHERE s.activity_id = ${activity.id}
+      `;
+
+      // `ON DELETE CASCADE` se lleva entregas, transcripciones, correcciones,
+      // apartados y ficheros de contexto. El contexto de nivel `activity` NO se
+      // borra: no tiene clave ajena a propósito, cuesta una tarde escribirlo y
+      // reimportar la misma actividad lo recupera tal cual.
+      await db.delete(schema.activities).where(eq(schema.activities.id, activity.id));
+
+      request.log.warn(
+        { activityId: activity.id, slug: activity.slug, ...counts },
+        'Actividad borrada de Vega (no del LMS)',
+      );
+
+      return {
+        submissions: counts?.submissions ?? 0,
+        corrections: counts?.corrections ?? 0,
+        published: counts?.published ?? 0,
+      };
     },
   );
 
@@ -351,11 +477,16 @@ export async function activityRoutes(app: FastifyInstance, ctx: AppContext): Pro
     routes.activityFiles(':id'),
     { preHandler: app.authenticate },
     async (request): Promise<ActivityFileListResponse> => {
-      await requireActivity(ctx, request.params.id);
+      await requireActivity(ctx, request.params.id, currentUser(request));
       const rows = await db
         .select()
         .from(schema.activityFiles)
-        .where(eq(schema.activityFiles.activityId, request.params.id))
+        .where(
+          and(
+            eq(schema.activityFiles.activityId, request.params.id),
+            eq(schema.activityFiles.uploadComplete, true),
+          ),
+        )
         .orderBy(asc(schema.activityFiles.uploadedAt));
       return { items: rows.map(toActivityFile) };
     },
@@ -365,8 +496,26 @@ export async function activityRoutes(app: FastifyInstance, ctx: AppContext): Pro
     routes.activityFiles(':id'),
     { preHandler: app.authenticate },
     async (request, reply): Promise<ActivityFileResponse> => {
-      await requireActivity(ctx, request.params.id);
-      const body = parseOrThrow(UploadActivityFileRequest, request.body, 'El fichero');
+      await requireActivity(ctx, request.params.id, currentUser(request));
+      const body = parseOrThrow(BeginActivityFileUploadRequest, request.body, 'El fichero');
+
+      // Sólo guardamos el contenido de lo que sabemos leer. Un binario se
+      // adjunta como referencia para el profesor, pero decir que "va al modelo"
+      // sería mentira: la UI se apoya en `hasContent` para no prometerlo.
+      const withContent = body.hasContent && isTextFile(body.filename);
+
+      // Una subida que se cortó a medias deja una fila incompleta que nadie va
+      // a terminar. Se barren aquí, que es cuando sabemos que hay alguien
+      // trabajando en esta actividad, en vez de montar una tarea periódica.
+      await db
+        .delete(schema.activityFiles)
+        .where(
+          and(
+            eq(schema.activityFiles.activityId, request.params.id),
+            eq(schema.activityFiles.uploadComplete, false),
+            lt(schema.activityFiles.uploadedAt, new Date(Date.now() - STALE_UPLOAD_MS)),
+          ),
+        );
 
       const [row] = await db
         .insert(schema.activityFiles)
@@ -374,8 +523,14 @@ export async function activityRoutes(app: FastifyInstance, ctx: AppContext): Pro
           activityId: request.params.id,
           filename: body.filename,
           mimeType: body.mimeType,
-          sizeBytes: body.sizeBytes,
-          // MOCK: sin almacenamiento real todavía, no hay ruta que guardar.
+          // Arranca a cero: el tamaño real lo mide el servidor conforme llegan
+          // los trozos, no se acepta el que anuncie el cliente.
+          sizeBytes: 0,
+          content: withContent ? '' : null,
+          // Un binario no tiene trozos que esperar: nace cerrado.
+          uploadComplete: !withContent,
+          // El almacenamiento de binarios sigue pendiente; los de texto no lo
+          // necesitan, viven en la columna `content`.
           storagePath: null,
         })
         .returning();
@@ -386,13 +541,60 @@ export async function activityRoutes(app: FastifyInstance, ctx: AppContext): Pro
     },
   );
 
-  // Descarga. MOCK: servimos un marcador con los metadatos reales en vez del
-  // contenido, que nunca se llegó a almacenar.
-  app.get<{ Params: { id: string; fileId: string } }>(
-    routes.activityFile(':id', ':fileId'),
+  /**
+   * Un trozo de la subida.
+   *
+   * Se concatena en la propia fila en vez de acumularse en memoria del proceso:
+   * el API puede tener más de una réplica y el planificador ya asume que puede
+   * haberlas, así que guardar el estado en el proceso haría que una subida
+   * fallara según a qué réplica cayera cada trozo.
+   */
+  app.put<{ Params: { id: string; fileId: string } }>(
+    routes.activityFileChunk(':id', ':fileId'),
     { preHandler: app.authenticate },
-    async (request, reply) => {
-      const activity = await requireActivity(ctx, request.params.id);
+    async (request): Promise<AppendActivityFileChunkResponse> => {
+      const activity = await requireActivity(ctx, request.params.id, currentUser(request));
+      const body = parseOrThrow(AppendActivityFileChunkRequest, request.body, 'El trozo');
+
+      const [row] = await db
+        .select()
+        .from(schema.activityFiles)
+        .where(eq(schema.activityFiles.id, request.params.fileId))
+        .limit(1);
+      if (!row || row.activityId !== activity.id) {
+        throw notFound('No existe ese fichero en la actividad.');
+      }
+      if (row.uploadComplete) {
+        throw conflict('Esa subida ya está cerrada.');
+      }
+
+      const current = row.content ?? '';
+      const next = current + body.content;
+      const size = Buffer.byteLength(next, 'utf8');
+      if (size > MAX_FILE_CONTENT_BYTES) {
+        // Se borra en vez de dejarla a medias: nadie va a reanudar una subida
+        // que no cabe, y la fila muerta sólo confundiría.
+        await db.delete(schema.activityFiles).where(eq(schema.activityFiles.id, row.id));
+        throw unprocessable('El fichero es demasiado grande.', {
+          content: `El máximo son ${Math.floor(MAX_FILE_CONTENT_BYTES / (1024 * 1024))} MB.`,
+        });
+      }
+
+      await db
+        .update(schema.activityFiles)
+        .set({ content: next, sizeBytes: size })
+        .where(eq(schema.activityFiles.id, row.id));
+
+      return { receivedBytes: size };
+    },
+  );
+
+  /** Cierra la subida. Hasta aquí el fichero no se lista ni entra en el contexto. */
+  app.post<{ Params: { id: string; fileId: string } }>(
+    routes.activityFileComplete(':id', ':fileId'),
+    { preHandler: app.authenticate },
+    async (request): Promise<ActivityFileResponse> => {
+      const activity = await requireActivity(ctx, request.params.id, currentUser(request));
       const [row] = await db
         .select()
         .from(schema.activityFiles)
@@ -402,25 +604,79 @@ export async function activityRoutes(app: FastifyInstance, ctx: AppContext): Pro
         throw notFound('No existe ese fichero en la actividad.');
       }
 
-      const body = [
-        `Fichero de contexto de Vega (marcador)`,
-        ``,
-        `Actividad : ${activity.name}`,
-        `Curso     : ${activity.courseName}`,
-        `Fichero   : ${row.filename}`,
-        `Tipo      : ${row.mimeType}`,
-        `Tamaño    : ${row.sizeBytes} bytes`,
-        `Subido    : ${row.uploadedAt.toISOString()}`,
-        ``,
-        `El almacenamiento real de ficheros está pendiente: Vega guarda hoy sólo`,
-        `los metadatos en la tabla activity_files. Este texto es lo que se sirve`,
-        `mientras tanto.`,
-        ``,
-      ].join('\n');
+      if ((row.content ?? '').trim() === '') {
+        await db.delete(schema.activityFiles).where(eq(schema.activityFiles.id, row.id));
+        throw unprocessable('El fichero está vacío.', {
+          content: 'No se ha recibido contenido.',
+        });
+      }
+
+      const [updated] = await db
+        .update(schema.activityFiles)
+        .set({ uploadComplete: true })
+        .where(eq(schema.activityFiles.id, row.id))
+        .returning();
+      if (!updated) throw unprocessable('No se ha podido cerrar la subida.');
+
+      return { file: toActivityFile(updated) };
+    },
+  );
+
+  /** Contenido en crudo, para verlo o editarlo sin descargarlo. */
+  app.get<{ Params: { id: string; fileId: string } }>(
+    routes.activityFileContent(':id', ':fileId'),
+    { preHandler: app.authenticate },
+    async (request): Promise<ActivityFileContentResponse> => {
+      const activity = await requireActivity(ctx, request.params.id, currentUser(request));
+      const [row] = await db
+        .select()
+        .from(schema.activityFiles)
+        .where(eq(schema.activityFiles.id, request.params.fileId))
+        .limit(1);
+      if (!row || row.activityId !== activity.id) {
+        throw notFound('No existe ese fichero en la actividad.');
+      }
+      return { file: toActivityFile(row), content: row.content };
+    },
+  );
+
+  app.get<{ Params: { id: string; fileId: string } }>(
+    routes.activityFile(':id', ':fileId'),
+    { preHandler: app.authenticate },
+    async (request, reply) => {
+      const activity = await requireActivity(ctx, request.params.id, currentUser(request));
+      const [row] = await db
+        .select()
+        .from(schema.activityFiles)
+        .where(eq(schema.activityFiles.id, request.params.fileId))
+        .limit(1);
+      if (!row || row.activityId !== activity.id) {
+        throw notFound('No existe ese fichero en la actividad.');
+      }
+
+      // Un fichero de texto se devuelve tal cual se subió. Uno binario nunca se
+      // llegó a almacenar, y en vez de fingir una descarga lo decimos.
+      const body =
+        row.content ??
+        [
+          `Vega no guardó el contenido de este fichero.`,
+          ``,
+          `Actividad : ${activity.name}`,
+          `Curso     : ${activity.courseName}`,
+          `Fichero   : ${row.filename}`,
+          `Tipo      : ${row.mimeType}`,
+          `Subido    : ${row.uploadedAt.toISOString()}`,
+          ``,
+          `Sólo se almacena el contenido de los ficheros de texto (.tex, .md,`,
+          `.txt), que son los que viajan al modelo con el contexto de la`,
+          `actividad. Vuelve a subirlo en uno de esos formatos si quieres que`,
+          `Vega lo tenga en cuenta al corregir.`,
+          ``,
+        ].join('\n');
 
       void reply
         .header('Content-Type', 'text/plain; charset=utf-8')
-        .header('Content-Disposition', `attachment; filename="${row.filename}.txt"`);
+        .header('Content-Disposition', `attachment; filename="${row.filename}"`);
       return body;
     },
   );
@@ -429,7 +685,7 @@ export async function activityRoutes(app: FastifyInstance, ctx: AppContext): Pro
     routes.activityFile(':id', ':fileId'),
     { preHandler: app.authenticate },
     async (request, reply) => {
-      const activity = await requireActivity(ctx, request.params.id);
+      const activity = await requireActivity(ctx, request.params.id, currentUser(request));
       const [row] = await db
         .select()
         .from(schema.activityFiles)

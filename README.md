@@ -148,10 +148,24 @@ docs/            design docs, user stories, decision records
 git clone https://github.com/<your-user>/vega && cd vega
 cp .env.example .env            # at minimum, ANTHROPIC_API_KEY
 pnpm install
-pnpm setup                      # starts postgres, applies migrations, seeds demo data
+pnpm setup                      # starts postgres, applies migrations
 pnpm dev                        # api :3000 · frontend :5174
-pnpm create-admin               # create the first admin user
 ```
+
+The API creates an initial admin on first boot **only when the database has no users at all** —
+`admin@vega.local` / `admin` unless you override `BOOTSTRAP_ADMIN_EMAIL` and
+`BOOTSTRAP_ADMIN_PASSWORD`. Change that password immediately; it is printed as a warning on every
+boot until you do. Everyone else is created from the Users screen.
+
+**A fresh install starts empty**: no courses, no activities, no submissions. Nothing is ever seeded
+automatically beyond the grading contexts from `contexts/`, which are configuration rather than
+sample data. To get demo content while working on the UI without a Moodle in front of you:
+
+```bash
+pnpm db:demo                    # WIPES the database, then loads sample data
+```
+
+It refuses to run with `NODE_ENV=production`.
 
 Grade one submission from the CLI, no LMS involved:
 
@@ -190,6 +204,153 @@ services:
     environment:
       - BRAND_NAME=Example Academy
 ```
+
+## Connecting Vega to Moodle
+
+Vega talks to Moodle over its REST web services. None of that is on by default, and creating an
+external service adds **no functions to it** — you list them one by one. Missing that step is what
+produces the first error nearly everyone hits:
+
+```
+core_webservice_get_site_info (accessexception): Excepción al control de acceso
+```
+
+On a token Moodle otherwise accepts, `accessexception` almost always means *this function is not in
+the service*, not *this token is wrong*.
+
+> **Not yet verified against a real Moodle.** The `moodle3` connector is written from the Moodle 3.x
+> documentation and is being exercised against a live installation for the first time right now.
+> Function names, response shapes and the file download path may still be wrong. The default
+> connector in development remains the mock. Separately, `publishFeedbackFile` is unresolved: Moodle
+> 3 exposes no clean web service for the `assignfeedback_file` area, so the annotated PDF has no
+> route back into Moodle yet — `publishGrade` does carry the score and the feedback as HTML.
+
+Admin paths below use the English Moodle labels; a Spanish install reads *Administración del
+sitio → …*.
+
+### 1. Enable web services and REST
+
+1. *Site administration → Advanced features* → tick **Enable web services**.
+2. *Site administration → Server → Web services → Manage protocols* → enable **REST protocol**.
+
+Every call goes to one endpoint — `https://<your-moodle>/webservice/rest/server.php` — and is told
+apart by a `wsfunction` parameter. Moodle returns its errors with HTTP 200 and a JSON body, so
+`curl` against that URL shows you the real reason for a failure.
+
+### 2. Create an external service and add its functions
+
+*Site administration → Server → Web services → External services* → **Add**. Name it (`Vega`), tick
+**Enabled**, save, then follow the service's **Functions** link and add the ones below. Nothing is
+added for you.
+
+Only course and activity discovery is implemented today (M2). The ingest and publishing calls exist
+in the connector but no route or batch job reaches them yet, so the second table is what you will
+need later, not now.
+
+**Needed now — course and activity discovery**
+
+| Function | What Vega uses it for |
+|---|---|
+| `core_webservice_get_site_info` | Identifies the token's owner (`userid`, `username`, `sitename`). The `userid` is not decorative — the next call requires it and the token reveals it nowhere else. Cheapest possible liveness check for a credential |
+| `core_enrol_get_users_courses` | The courses the token's owner is enrolled in. **This is the course picker** |
+| `mod_assign_get_assignments` | The assignments of the selected course |
+| `mod_forum_get_forums_by_courses` | The forums of the selected course |
+
+**Needed later — submission ingest and grade publishing (M3+)**
+
+| Function | What Vega will use it for |
+|---|---|
+| `mod_assign_get_submissions` | Pull submitted attempts and the URLs of the attached files |
+| `mod_forum_get_forum_discussions_paginated` | Read forum discussions. The connector still refuses forum ingest outright |
+| `mod_assign_save_grade` | Write the score back, with the feedback as HTML in the comments editor |
+
+Downloading a submission is not a web service call: files come from `pluginfile.php` signed with the
+same token, so no extra function is involved. `core_course_get_contents` appears in the connector's
+function map but no code path calls it — don't bother adding it yet.
+
+### 3. Capabilities of the token's owner
+
+A Moodle token carries its owner's permissions, no more. The owner needs:
+
+- **`webservice/rest:use`** — required for any REST call at all. If a function is in the service and
+  the call still fails, this is the next thing to check. It is also worth confirming the user is an
+  authorised user of the service when you restricted it to a list.
+- **Read access to the courses in question.** In practice a teacher enrolled with an editing role
+  already has it; the functions above return only what that user could see in the web interface.
+
+Beyond `webservice/rest:use`, Vega asserts no capability of its own and there is nothing in the
+codebase that checks one, so treat the rest as *probable*, derived from what each function does
+rather than from anything we have verified: `moodle/course:view` matters for courses the user is not
+enrolled in, `mod/assign:view` for listing assignments, `mod/forum:viewdiscussion` for forums, and
+`mod/assign:grade` for publishing scores once M3 lands. An enrolled teacher normally has all of
+them.
+
+### 4. Issue the token — one per teacher
+
+*Site administration → Server → Web services → Manage tokens* → **Create token**, choosing the user
+and the service you just created.
+
+**In Vega the token belongs to each teacher, not to the installation.** This is forced by Moodle,
+not a preference: `core_enrol_get_users_courses` returns the courses of *the token's owner*, so a
+shared token would show every teacher the same person's courses — and hand out that person's Moodle
+permissions along with them. The URL and the connector, by contrast, are installation-wide and set
+once by an admin.
+
+Each teacher pastes their own token in *Settings → My Moodle connection*. Waiting for every teacher
+to navigate their own security keys is, in practice, the difference between deploying Vega in an
+afternoon and not deploying it, so an admin may also issue tokens on other users' behalf and paste
+them from the Users screen. Either way the value is write-only: no API response ever returns a
+token, not even to whoever just saved it. See
+[`docs/decisiones/0010-credencial-moodle-por-usuario.md`](docs/decisiones/0010-credencial-moodle-por-usuario.md)
+for the full reasoning and its costs — the token is stored unencrypted in Postgres, which is a known
+and unresolved limitation.
+
+### 5. Environment variables
+
+```bash
+LMS_CONNECTOR=moodle3                        # mock (default) · filesystem · moodle3
+MOODLE_BASE_URL=https://moodle.example.org   # site root, no /webservice/... suffix
+```
+
+Both are the *initial* values only: once an admin saves them in Settings they live in `app_settings`
+and that copy wins over the environment.
+
+`MOODLE_TOKEN` also exists but is **a development seed, nothing more**. `pnpm db:demo` assigns it to
+the two demo users so that testing against a real Moodle does not mean re-pasting a token after
+every reseed; no runtime path reads it. For local credentials use `.env.local` — it is gitignored
+and loaded after `.env`, so it overrides the shared file without editing it.
+
+### 6. When it fails
+
+| Moodle says | What it usually means |
+|---|---|
+| `accessexception` | The function named in the message is not in the external service, or the owner is not authorised for a restricted service. Add exactly the function Vega names |
+| `invalidtoken` | Token mistyped, truncated on paste, revoked, or issued for a different service. Reissue it |
+| `Invalid parameter value detected` | Moodle rejected an argument — most often a course id that is not numeric, or a response shape that differs on your Moodle version. Treat it as a connector bug and report it, not as something to fix in Moodle |
+| HTML instead of JSON | Web services off, REST protocol disabled, or `MOODLE_BASE_URL` pointing somewhere that is not the Moodle root. You are seeing the login page |
+| Valid token, zero courses | The owner is enrolled in no courses, or `core_enrol_get_users_courses` is missing from the service |
+
+**Test connection** in Settings — and, for an admin, on any user in the Users screen — probes **every
+function required for discovery, one by one, and does not stop at the first failure**. Moodle adds no
+functions when you create a service, so it is normal for several to be missing at once; stopping
+early would mean one trip to the Moodle panel per missing function. You get the full list back, each
+entry naming the exact function to add.
+
+Results come back as a normal `200` — a rejected token is the answer to the question, not a server
+error — with one of three states per function:
+
+| State | Meaning |
+|---|---|
+| ✓ | Moodle answered. The row shows what came back: site and user, course count, forums found |
+| ✗ | Moodle rejected it. The row carries the error text and the function name to add to the service |
+| – | Not checked, because it depends on one that failed. Only `core_enrol_get_users_courses` can land here: it needs the `userid` that `core_webservice_get_site_info` returns |
+
+A `–` is deliberately not a failure. Reporting it as one would send you off to enable a function that
+is probably already there. The two activity functions are probed regardless of whether the token
+could be identified, since they take a course list and need no `userid`.
+
+The ingest and publishing functions are **not** probed: nothing calls them yet, and they are listed
+above as needed later.
 
 ## Privacy
 

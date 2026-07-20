@@ -12,7 +12,16 @@ export const queryKeys = {
   activities: ['activities'] as const,
   activity: (id: string) => ['activities', 'detail', id] as const,
   activityFiles: (id: string) => ['activities', 'detail', id, 'files'] as const,
-  discoverActivities: ['activities', 'discover'] as const,
+  discoverCourses: ['courses', 'discover'] as const,
+  /**
+   * Una entrada por curso: el catálogo de uno no dice nada del de otro.
+   *
+   * Cuelga de `activities` a propósito. Al importar se invalida esa raíz, y así
+   * el catálogo se vuelve a pedir y las recién importadas aparecen marcadas
+   * como tales sin tener que acordarse de invalidarlo aparte.
+   */
+  discoverActivities: (moodleCourseId: string) =>
+    ['activities', 'discover', moodleCourseId] as const,
   contexts: ['contexts'] as const,
   resolvedContext: (activityId: string) => ['contexts', 'resolved', activityId] as const,
   users: ['users'] as const,

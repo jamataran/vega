@@ -1,14 +1,35 @@
 # Modelo de datos
 
-Derivado de `apps/api/migrations/0001_init.sql`, de `apps/api/migrations/0002_activities.sql` y de
-`packages/shared/src/domain.ts`. El SQL manda: si algo aquí no cuadra con las migraciones, el error
-está en este documento.
+Derivado de las migraciones de `apps/api/migrations/` —`0001_init.sql`, `0002_activities.sql` y
+`0003_courses.sql`— y de `packages/shared/src/domain.ts`. El SQL manda: si algo aquí no cuadra con
+las migraciones, el error está en este documento.
 
 `0002_activities.sql` cambió el eje del modelo. Los antiguos «buzones» son ahora **actividades de
 Moodle** de dos tipos —entrega (`assignment`) y foro (`forum`)—, la nota pasó a ser opcional y cada
 actividad lleva su grado de autonomía. `mailboxes` y `task_type` no existen: la migración renombra
 en lugar de recrear, de modo que el despliegue aplica el cambio sobre una base ya poblada sin pasos
 manuales.
+
+`0003_courses.sql` añadió tres cosas que H2 necesitaba y la 0002 no dejaba resueltas:
+
+1. **El curso deja de ser texto libre.** Tabla `courses`, con `activities.course_id` apuntando a
+   ella. Sobre una cadena que Moodle puede renombrar no se construye un selector: renombrar partía
+   el grupo en dos y dos cursos homónimos se mezclaban.
+2. **`moodle_ref` gana prefijo de tipo e índice único parcial.** Una tarea con id 5 y un foro con id
+   5 producían el mismo `moodle_ref` y el mismo `slug`, y la segunda importación se perdía en
+   silencio por el `ON CONFLICT DO NOTHING`. Era pérdida de datos, no una carencia.
+3. **El token de Moodle pasa a ser de cada usuario** (`users.moodle_token`), y
+   `app_settings.moodle.token` **se borra**. Ver
+   [ADR 0010](decisiones/0010-credencial-moodle-por-usuario.md).
+
+`0004_course_access.sql` añadió **quién ve qué**. Hasta entonces `GET /api/activities` devolvía
+todas las actividades a cualquier usuario autenticado y el `PATCH` dejaba a un profesor editar la de
+otro; con las actividades iban las entregas, que llevan trabajo de alumnos concretos. La tabla
+`course_teachers` vuelve a poner esa frontera dentro de Vega. El alcance es **por curso**, no por
+quién importó la actividad: en un curso co-impartido, atarlo a quien pulsó el botón dejaría al otro
+profesor sin ver media asignatura.
+
+Como la 0002, todo con `ALTER` e idempotente.
 
 Las migraciones se aplican al arrancar el contenedor del API y quedan registradas con su suma de
 comprobación en `_vega_migrations`, tabla de fontanería que no forma parte del dominio.
@@ -21,6 +42,10 @@ erDiagram
   users ||--o{ grading_contexts : "edita"
   users ||--o{ batch_runs : "lanza"
   users ||--o{ app_settings : "edita"
+  users ||--o{ activities : "importa"
+  users ||--o{ course_teachers : "alcanza"
+  courses ||--o{ course_teachers : "lo imparten"
+  courses ||--o{ activities : "agrupa"
   activities ||--o{ submissions : "agrupa"
   activities ||--o{ activity_files : "adjunta"
   submissions ||--o| transcriptions : "tiene (sólo assignment)"
@@ -34,17 +59,35 @@ erDiagram
     text password_hash
     text role "teacher | admin"
     boolean active "default true"
+    text moodle_token "nullable · EN CLARO · nunca sale por la API"
+    timestamptz moodle_token_updated_at "nullable"
     timestamptz created_at
     timestamptz last_login_at "nullable"
   }
 
+  courses {
+    uuid id PK
+    text moodle_course_id UK "id del curso en Moodle · legacy:<nombre> si es heredado"
+    text name "default cadena vacía · se refresca al re-sincronizar"
+    timestamptz created_at
+    timestamptz updated_at
+  }
+
+  course_teachers {
+    uuid course_id PK,FK "ON DELETE CASCADE"
+    uuid user_id PK,FK "ON DELETE CASCADE"
+    timestamptz seen_at "última vez que su token vio este curso · NO caduca el acceso"
+  }
+
   activities {
     uuid id PK
-    text slug UK "tema04, forum-dudas-analisis"
+    text slug UK "tema04, assign-42, forum-42"
     text name
     text kind "assignment | forum"
-    text course_name "texto libre · default cadena vacía"
-    text moodle_ref "nullable · id en Moodle"
+    uuid course_id FK "nullable · ON DELETE SET NULL"
+    text course_name "copia resuelta · default cadena vacía"
+    text moodle_ref "nullable · assign-42 | forum-42 · único si no es NULL"
+    uuid imported_by FK "nullable · con qué credencial se ingiere · ON DELETE SET NULL"
     boolean enabled "default true · si no, el lote la ignora"
     boolean graded "default true"
     numeric max_score "nullable · NULL si no se puntúa"
@@ -59,8 +102,10 @@ erDiagram
     uuid activity_id FK
     text filename
     text mime_type "default application/octet-stream"
-    integer size_bytes ">= 0"
-    text storage_path "nullable · hoy siempre NULL"
+    integer size_bytes ">= 0 · lo mide el servidor, no el cliente"
+    text storage_path "nullable · sigue siempre NULL: no hay almacén de binarios"
+    text content "nullable · el texto de .tex/.md/.markdown/.txt"
+    boolean upload_complete "default true · false mientras llegan los trozos"
     timestamptz uploaded_at
   }
 
@@ -151,13 +196,20 @@ erDiagram
   }
 
   app_settings {
-    text key PK "anthropic.gradingModel, schedule.everyMinutes…"
+    text key PK "anthropic.gradingModel, moodle.baseUrl, schedule.everyMinutes…"
     text value
     boolean is_secret "la API nunca devuelve el valor"
     timestamptz updated_at
     uuid updated_by FK "nullable"
   }
 ```
+
+> **`app_settings` es de la instalación; el token de Moodle no está aquí.** La clave `moodle.token`
+> existió y la migración `0003` la **borra**, en vez de migrarla a alguien: no hay forma de saber de
+> quién era y adjudicársela a un usuario al azar le daría los cursos de otro. Lo que queda en
+> `app_settings` es `moodle.baseUrl` y `moodle.connector`, que sí son de instalación. El token vive
+> en `users.moodle_token` porque `core_enrol_get_users_courses` devuelve los cursos del dueño del
+> token, y por tanto la credencial decide qué cursos ve cada profesor.
 
 `grading_contexts` aparece sin arista hacia `activities` porque la relación es lógica, no
 referencial:
@@ -177,6 +229,12 @@ referencial:
 | Una actividad puntuable **necesita** nota máxima | `CHECK activities_graded_needs_max_score` | No hay actividades a medio configurar. La API valida lo mismo antes, para devolver un 422 explicable en vez de un error de Postgres en crudo. |
 | La nota máxima, si existe, es positiva | `CHECK activities_max_score_check` | `max_score IS NULL OR max_score > 0`. En `corrections`, igual. |
 | Sólo dos tipos de actividad y tres autonomías | `CHECK activities_kind_check`, `activities_autonomy_check` | Añadir un tipo o un modo es una migración, no un despliegue. |
+| No se importa dos veces la misma actividad de Moodle | `UNIQUE INDEX activities_moodle_ref_key ... WHERE moodle_ref IS NOT NULL` | Índice **parcial** a propósito: dos actividades locales (`moodle_ref` a `NULL`) no colisionan entre sí. Con el prefijo de tipo, `assign-5` y `forum-5` son dos actividades distintas. |
+| Un curso de Moodle está una sola vez | `courses.moodle_course_id UNIQUE` | Es lo que permite refrescar el nombre al re-sincronizar en vez de crear un curso nuevo. Los cursos rescatados de antes de la 0003 llevan un id sintético `legacy:<nombre>`. |
+| Borrar un curso no borra sus actividades | `activities.course_id ... ON DELETE SET NULL` | La actividad se queda sin curso, con su `course_name` copiado. Nada borra cursos automáticamente. |
+| Borrar al profesor que importó no borra la actividad | `activities.imported_by ... ON DELETE SET NULL` | La actividad sobrevive a quien la importó, pero **su ingesta se queda sin credencial**. Es otra razón para desactivar usuarios en lugar de borrarlos. |
+| Un profesor sólo alcanza sus cursos | `course_teachers (course_id, user_id)` PK, más `activities.imported_by` como respaldo | Se aplica en `apps/api/src/auth/scope.ts`, en un solo sitio, para que ninguna ruta se olvide. Un `admin` no se filtra por nada. Pedir la actividad de otro devuelve **403, no 404**. |
+| Quitar a un profesor de un curso borra su acceso, no el curso | `course_teachers ... ON DELETE CASCADE` en las dos columnas | Y al revés: dar de baja al usuario le retira el acceso. **Nada limpia la tabla automáticamente**: el acceso se anota al listar cursos y no caduca, para que un Moodle caído o un token expirado no dejen a nadie sin poder validar lo que ya está en Vega. |
 | Una entrega tiene **como mucho una** transcripción | `transcriptions.submission_id UNIQUE` | Reprocesar sustituye, no acumula. No hay historial de transcripciones. |
 | Una entrega tiene **como mucho una** corrección | `corrections.submission_id UNIQUE` | Ídem: no hay historial de correcciones. El lote borra la anterior antes de insertar. |
 | No se importa dos veces la misma entrega | `UNIQUE (activity_id, student_ref, original_filename)` | La ingesta es idempotente **en actividades con fichero**. Ver el aviso de abajo. |
@@ -185,6 +243,7 @@ referencial:
 | Los puntos nunca son negativos | `CHECK (ai_points >= 0)`, `CHECK (teacher_points >= 0)` | No existe la penalización con puntos negativos a nivel de apartado. |
 | Las confianzas están en `[0, 1]` | `CHECK (confidence BETWEEN 0 AND 1)` | En transcripción, corrección y apartado. |
 | El coste se guarda en céntimos | `cost_cents numeric(10,4)` | Nada de flotantes para dinero. `UsageMetrics.costCents`. |
+| Una subida a medias no existe para nadie | `activity_files.upload_complete` | Todas las consultas de ficheros filtran por `upload_complete = true`, así que una subida cortada ni se lista ni entra en el contexto ni acaba en un prompt. Las huérfanas se barren tras una hora, al empezar otra subida en la misma actividad. **Salvo un hueco**: `GET /api/contexts/resolved/{id}` lee el `content` de todas las filas sin filtrar por esta columna. |
 
 > **La clave natural no protege los foros.** `original_filename` dejó de ser `NOT NULL` en la
 > migración `0002`, y en PostgreSQL dos `NULL` no colisionan en un índice único (`NULLS DISTINCT` es
@@ -209,6 +268,11 @@ referencial:
   fichero y un `forum` traiga texto es responsabilidad del conector y del lote, no del esquema.
 - **No hay transiciones de estado en la base de datos.** El `CHECK` de `submissions.status` sólo
   valida el conjunto de valores, no el orden. La máquina de estados se hace cumplir en `apps/api`.
+- **Nada impide un `activity_files.content` a `NULL` con `upload_complete = true`.** Es justo el
+  caso de un binario: nace cerrado y sin contenido, porque no hay trozos que esperar. Qué extensiones
+  guardan contenido lo decide `isTextFile()` en `@vega/shared` (`.tex`, `.md`, `.markdown`, `.txt`),
+  no el esquema. **Los binarios no se almacenan en ningún sitio**: `storage_path` sigue siendo
+  siempre `NULL`.
 
 ## Ciclo de vida de una entrega
 
@@ -295,9 +359,11 @@ El SQL usa `snake_case`; el contrato HTTP, `camelCase`. La capa de acceso a dato
 
 | Tabla | Tipo de `@vega/shared` | Observaciones |
 |---|---|---|
-| `users` | `User` | `password_hash` **nunca** sale por la API |
-| `activities` | `Activity` | `points_allocation` (jsonb) ↔ `PointsAllocation[]`; los ficheros adjuntos se cargan aparte y se sirven en `files` |
-| `activity_files` | `ActivityFile` | `storage_path` no se expone; en su lugar la API calcula `url` |
+| `users` | `User` | `password_hash` y `moodle_token` **nunca** salen por la API; el token se resume en el booleano `moodleTokenConfigured` |
+| `courses` | `Course` / `DiscoveredCourse` | `Course` es la fila guardada; `DiscoveredCourse` es lo que devuelve el LMS antes de guardarla, y añade `shortName`, que no se persiste |
+| `course_teachers` | — | **No tiene tipo en el contrato**: no se expone. Es la regla de alcance, y actúa filtrando lo que devuelven las demás rutas |
+| `activities` | `Activity` | `points_allocation` (jsonb) ↔ `PointsAllocation[]`; los ficheros adjuntos se cargan aparte y se sirven en `files`. `imported_by` **no se expone**: es fontanería de la ingesta, no información del profesor |
+| `activity_files` | `ActivityFile` | `storage_path` no se expone; en su lugar la API calcula `url`. `content` tampoco: se resume en `hasContent` (`content IS NOT NULL`) y se lee aparte con `GET .../content` |
 | `submissions` | `Submission` | 1:1 en columnas |
 | `transcriptions` | `Transcription` | `pages` y `flags` son jsonb ↔ `TranscriptionPage[]` / `TranscriptionFlag[]` |
 | `corrections` | `Correction` | Las cuatro columnas de consumo se agrupan en `usage: UsageMetrics`; los apartados llegan en `items` |

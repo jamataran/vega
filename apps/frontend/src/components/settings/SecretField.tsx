@@ -49,7 +49,10 @@ export function SecretField({
     return (
       <Field
         label={label}
-        hint={hint ?? 'Se guardará cifrada. No volverá a mostrarse.'}
+        // No decimos «se guardará cifrada» porque no es verdad: se guarda tal
+        // cual, marcada como secreta para que la API no la devuelva nunca.
+        // Prometer un cifrado que no existe es peor que no prometer nada.
+        hint={hint ?? 'No volverá a mostrarse una vez guardada.'}
         action={
           <Button variant="ghost" size="sm" onClick={() => onChange(KEEP)}>
             Cancelar

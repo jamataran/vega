@@ -4,6 +4,7 @@ import type {
   BatchRun,
   Correction,
   CorrectionItem,
+  Course,
   GradingContext,
   Submission,
   Transcription,
@@ -27,6 +28,17 @@ const num = (value: string | number): number => (typeof value === 'number' ? val
 const numOrNull = (value: string | number | null): number | null =>
   value === null ? null : num(value);
 const iso = (value: Date): string => value.toISOString();
+
+/**
+ * Igual, pero para valores que vienen de una consulta en crudo.
+ *
+ * Esas no pasan por el mapeo de tipos de Drizzle, así que una `timestamptz`
+ * puede llegar como `Date` o como cadena según el parseador que tenga puesto el
+ * driver. El tipo declarado dice `Date` y la cadena se cuela sin que el
+ * typecheck se entere: por eso esto existe, y por eso está en un solo sitio.
+ */
+export const toIso = (value: Date | string): string =>
+  value instanceof Date ? value.toISOString() : new Date(value).toISOString();
 const isoOrNull = (value: Date | null): string | null => (value ? value.toISOString() : null);
 
 export function toUser(row: Row<typeof schema.users>): User {
@@ -38,6 +50,17 @@ export function toUser(row: Row<typeof schema.users>): User {
     active: row.active,
     createdAt: iso(row.createdAt),
     lastLoginAt: isoOrNull(row.lastLoginAt),
+    // El token nunca sale; sólo si lo hay. Ver `users.moodle_token`.
+    moodleTokenConfigured: (row.moodleToken ?? '') !== '',
+  };
+}
+
+export function toCourse(row: Row<typeof schema.courses>): Course {
+  return {
+    id: row.id,
+    moodleCourseId: row.moodleCourseId,
+    name: row.name,
+    createdAt: iso(row.createdAt),
   };
 }
 
@@ -49,6 +72,8 @@ export function toActivityFile(row: Row<typeof schema.activityFiles>): ActivityF
     mimeType: row.mimeType,
     sizeBytes: row.sizeBytes,
     url: `/api/activities/${row.activityId}/files/${row.id}`,
+    hasContent: row.content !== null,
+    uploadComplete: row.uploadComplete,
     uploadedAt: iso(row.uploadedAt),
   };
 }
@@ -62,6 +87,7 @@ export function toActivity(
     slug: row.slug,
     name: row.name,
     kind: row.kind,
+    courseId: row.courseId,
     courseName: row.courseName,
     moodleRef: row.moodleRef,
     enabled: row.enabled,

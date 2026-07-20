@@ -27,8 +27,42 @@ export const User = z.object({
   active: z.boolean(),
   createdAt: IsoDate,
   lastLoginAt: IsoDate.nullable(),
+  /**
+   * Si este usuario tiene guardado su token de Moodle. El token en sí **nunca**
+   * sale por la API: cada profesor ve los cursos que ve su token, así que la
+   * credencial es suya y no de la instalación.
+   */
+  moodleTokenConfigured: z.boolean(),
 });
 export type User = z.infer<typeof User>;
+
+// ── Cursos ──────────────────────────────────────────────────────────────────
+
+/**
+ * Curso de Moodle del que cuelgan las actividades.
+ *
+ * Existe como entidad propia, y no como el texto libre que era `courseName`,
+ * porque el curso es el **primer paso** para dar de alta actividades: sin un
+ * identificador estable, renombrar un curso en Moodle partiría el grupo en dos
+ * y dos cursos homónimos se mezclarían.
+ */
+export const Course = z.object({
+  id: Id,
+  /** Identificador del curso en Moodle. Único dentro de la instalación. */
+  moodleCourseId: z.string().min(1),
+  name: z.string(),
+  createdAt: IsoDate,
+});
+export type Course = z.infer<typeof Course>;
+
+/** Un curso tal y como lo devuelve el LMS, antes de guardarlo. */
+export const DiscoveredCourse = z.object({
+  moodleCourseId: z.string().min(1),
+  name: z.string(),
+  /** Nombre corto del curso, cuando el LMS lo distingue del completo. */
+  shortName: z.string().default(''),
+});
+export type DiscoveredCourse = z.infer<typeof DiscoveredCourse>;
 
 // ── Actividades ─────────────────────────────────────────────────────────────
 
@@ -45,8 +79,14 @@ export const PointsAllocation = z.object({
 export type PointsAllocation = z.infer<typeof PointsAllocation>;
 
 /**
- * Fichero que el profesor adjunta al contexto de una actividad: enunciado,
- * solución de referencia escaneada, criterios del departamento…
+ * Fichero que el profesor adjunta al contexto de una actividad: el enunciado en
+ * LaTeX, el material sobre el que preguntan los alumnos, los criterios del
+ * departamento…
+ *
+ * Los ficheros **de texto** (`.tex`, `.md`, `.txt`) se guardan con su contenido
+ * y pasan a formar parte del contexto que se envía al modelo. El resto se
+ * guardan como referencia para el profesor y no llegan al modelo: distinguirlos
+ * es lo que evita ofrecer una subida que no sirve para nada.
  */
 export const ActivityFile = z.object({
   id: Id,
@@ -56,9 +96,28 @@ export const ActivityFile = z.object({
   sizeBytes: z.number().int().min(0),
   /** URL de descarga servida por el API. */
   url: z.string(),
+  /** `true` si el contenido está guardado y viaja al modelo con el contexto. */
+  hasContent: z.boolean(),
+  /** `false` mientras la subida troceada sigue en curso. */
+  uploadComplete: z.boolean(),
   uploadedAt: IsoDate,
 });
 export type ActivityFile = z.infer<typeof ActivityFile>;
+
+/**
+ * Extensiones cuyo contenido guardamos y enviamos al modelo.
+ *
+ * LaTeX antes que PDF a propósito: el `.tex` ya es texto, entra literal en el
+ * prompt, se cachea con el resto del contexto y no cuesta ni una llamada de
+ * visión. Un PDF exigiría transcribirlo en cada corrección.
+ */
+export const TEXT_FILE_EXTENSIONS = ['.tex', '.md', '.markdown', '.txt'] as const;
+
+/** Si el contenido de este fichero puede guardarse y enviarse al modelo. */
+export function isTextFile(filename: string): boolean {
+  const lower = filename.toLowerCase();
+  return TEXT_FILE_EXTENSIONS.some((extension) => lower.endsWith(extension));
+}
 
 /**
  * Una actividad de Moodle a la que Vega reacciona.
@@ -71,9 +130,19 @@ export const Activity = z.object({
   slug: z.string().min(1),
   name: z.string().min(1),
   kind: ActivityKind,
-  /** Curso de Moodle al que pertenece, para que el profesor la reconozca. */
+  /** Curso al que pertenece. `null` en actividades locales o anteriores a la 0003. */
+  courseId: Id.nullable(),
+  /**
+   * Nombre del curso, copiado del curso al que pertenece. Se sirve resuelto
+   * para que la lista pueda agrupar sin una segunda consulta.
+   */
   courseName: z.string(),
-  /** Identificador de la actividad en Moodle. `null` si es local. */
+  /**
+   * Identificador de la actividad en Moodle, **con prefijo de tipo**
+   * (`assign-42`, `forum-42`). El prefijo no es decorativo: los ids de
+   * `mod_assign` y `mod_forum` vienen de tablas distintas y sin él una tarea y
+   * un foro con el mismo número colisionan. `null` si la actividad es local.
+   */
   moodleRef: z.string().nullable(),
   /** Si está desactivada, Vega la ignora en los lotes. */
   enabled: z.boolean(),
@@ -281,9 +350,13 @@ export const AppSettings = z.object({
     /** Proveedor activo: `mock` no consume tokens. */
     provider: z.enum(['mock', 'anthropic']),
   }),
+  /**
+   * De la **instalación**, no del profesor: a qué Moodle apunta Vega y con qué
+   * conector habla. El token no está aquí — es de cada usuario
+   * (`User.moodleTokenConfigured`), porque decide qué cursos ve.
+   */
   moodle: z.object({
     baseUrl: z.string(),
-    tokenConfigured: z.boolean(),
     connector: z.enum(['mock', 'filesystem', 'moodle3']),
   }),
   smtp: z.object({

@@ -133,9 +133,10 @@ Y sí veo la sección de solución de referencia
 
 ```gherkin
 Dado que existe la actividad "foro-dudas" con graded false
-Cuando envío PATCH /api/activities/{id} con referenceSolution "La respuesta correcta es…"
+Cuando envío PATCH /api/activities/{id} con referenceSolution "El tema del que preguntan es…"
 Entonces recibo 200 y la Activity conserva graded false y maxScore null
-Y al responder una duda de ese foro, esa solución forma parte de lo que se envía al modelo
+Y GET /api/contexts/resolved/{id} lo incluye bajo el título "Material asociado",
+  no bajo "Solución de referencia"
 Y la respuesta publicada no lleva nota ni desglose por apartados
 ```
 
@@ -160,13 +161,27 @@ Y sus maxPoints no cambian
 Y las próximas entregas que se corrijan usarán los cinco apartados
 ```
 
-### Escenario 13: la solución y el reparto llegan al modelo
+### Escenario 13: la solución y los ficheros aparecen en el contexto efectivo
+
+```gherkin
+Dado que la actividad tiene referenceSolution y un fichero de contexto ".tex" subido entero
+Cuando consulto GET /api/contexts/resolved/{activityId}
+Entonces merged incluye los tres niveles de Markdown
+Y después una sección con la solución de referencia
+Y después una sección "Material adjunto · <nombre>" con el contenido del .tex
+Y un fichero binario adjunto NO aporta ninguna sección
+Y un fichero cuya subida no se ha cerrado tampoco aparece
+```
+
+### Escenario 13 bis: el reparto llega al modelo, la solución todavía no
 
 ```gherkin
 Dado que la actividad tiene referenceSolution y pointsAllocation definidos
-Cuando se corrige una entrega de esa actividad
-Entonces la solución de referencia y el reparto forman parte de lo que se envía al modelo
-Y GET /api/contexts/resolved/{activityId} permite comprobar el contexto antes de corregir
+Cuando se corrige una entrega de esa actividad en el lote
+Entonces el reparto de puntos sí llega al motor y manda sobre lo que devuelva la IA
+Pero la solución de referencia y el contenido de los ficheros NO se envían:
+  el lote monta el contexto con sólo los tres niveles de Markdown
+Y esto es una carencia declarada, no el comportamiento deseado (RN-8)
 ```
 
 ### Escenario 14: sin sesión
@@ -199,6 +214,13 @@ guardado cuando la actividad deja de puntuarse está en la pregunta abierta 1.
 puntuable es la guía de la respuesta correcta: orienta lo que Vega redacta, pero no reparte puntos
 ni produce nota.
 
+**RN-5 bis.** **El mismo campo se rotula distinto según `graded`.** En una actividad puntuable la
+sección se titula **«Solución de referencia»**; en una no puntuable, **«Material asociado»**. No es
+cosmética: en un foro de dudas lo que el profesor pega no es la respuesta correcta a una pregunta,
+sino el material del que preguntan los alumnos, y llamarlo «solución» invita al modelo a tratarlo
+como plantilla de respuesta. Lo aplica `resolveContext()` en `packages/core`, y la UI usa el mismo
+rótulo para que el profesor vea en pantalla lo que el modelo va a leer.
+
 **RN-6.** **La suma de `maxPoints` no se fuerza a coincidir con `maxScore`.** Es una decisión
 explícita del modelo de dominio: hay enunciados con apartados opcionales o con puntos de
 presentación fuera del reparto. La UI avisa de la discrepancia; el API no la rechaza.
@@ -208,8 +230,23 @@ guardan su propio `label`, `statement` y `maxPoints`, copiados en el momento de 
 afecta a las correcciones futuras.
 
 **RN-8.** El reparto de puntos y la solución de referencia **son entrada del sistema**, no
-documentación interna: viajan al modelo junto con los tres niveles de contexto
-(`contexts/README.md`).
+documentación interna: forman parte del contexto que se envía al modelo, junto con los tres niveles
+de Markdown (`contexts/README.md`). `resolveContext()` los monta en su propia sección, al final:
+son lo más concreto y lo que más cambia entre actividades, así que ponerlos antes acortaría el
+prefijo cacheable sin ganar nada.
+
+> **Ojo, y esto sigue roto.** `resolveContext()` sabe montar la sección y
+> `GET /api/contexts/resolved/{activityId}` la enseña, pero **el lote no se la pasa**:
+> `apps/api/src/routes/batch.ts` construye el `ResolveContextInput` con sólo los tres niveles de
+> Markdown. Hoy la solución de referencia y el contenido de los ficheros adjuntos se ven en la
+> pantalla de contexto efectivo y **no pesan en la corrección**. Hasta que el lote los pase, la
+> pantalla promete algo que no ocurre.
+
+**RN-8 bis.** **Los ficheros de contexto de texto sí guardan su contenido.** `.tex`, `.md`,
+`.markdown` y `.txt` (`isTextFile()`) se almacenan en `activity_files.content` y entran en el
+contexto resuelto en su propia sección, «Material adjunto · *nombre*». Un fichero **binario** se
+registra como referencia del profesor, sin contenido: `ActivityFile.hasContent` va a `false` y la UI
+lo dice, en vez de ofrecer una subida que no sirve para nada.
 
 **RN-9.** Una actividad puntuable **sin `pointsAllocation`** se corrige igual, pero la IA decide
 sola el desglose, y ese desglose será distinto entre entregas de la misma actividad. La UI lo
@@ -242,16 +279,23 @@ reparto, con el mismo `PATCH /api/activities/{id}` de HU-04.
 | La suma del reparto supera `maxScore` | Se guarda con aviso. Una entrega perfecta podría dar más nota que el máximo: se avisa también en la revisión |
 | Se envía `pointsAllocation` no vacío a una actividad con `graded = false` | Ver pregunta abierta 1: hoy el API lo acepta y lo guarda, y la pantalla envía `[]`. La regla que falta decidir es si se rechaza con 422 o se conserva latente |
 | Se reordenan los apartados sin cambiar los `label` | Las correcciones futuras salen en el orden nuevo. Las hechas conservan su `position` |
-| Solución de referencia en un formato distinto (PDF escaneado, foto de la pizarra) | El campo es texto. Se puede subir como fichero de contexto (`activity_files`, HU-06), pero hoy ese contenido no llega al modelo. Ver pregunta abierta 2 |
-| Actividad no puntuable con solución de referencia y sin contexto propio | Válido y útil: es el caso normal de un foro de dudas bien preparado |
+| Solución de referencia escrita en LaTeX en un fichero aparte | Se sube como fichero de contexto: un `.tex` guarda su contenido y entra en el contexto resuelto. Ver pregunta abierta 2 |
+| Solución de referencia en un formato distinto (PDF escaneado, foto de la pizarra) | **No se almacena su contenido.** El fichero se registra como referencia del profesor, con `hasContent: false`, y la UI advierte de que no llega al modelo. Hay que transcribirla o pegarla como texto. Ver pregunta abierta 2 |
+| Un fichero de texto muy grande | Tope de 4 MiB por fichero (`MAX_FILE_CONTENT_BYTES`). Al superarlo la subida se borra y se devuelve 422: nadie va a reanudar una subida que no cabe |
+| La subida se corta a medias | La fila queda con `upload_complete = false`: **no se lista ni entra en el contexto**, y se barre a la hora. Una subida cortada no acaba nunca en un prompt |
+| Actividad no puntuable con solución de referencia y sin contexto propio | Válido y útil: es el caso normal de un foro de dudas bien preparado. La sección se titula «Material asociado» (RN-5 bis) |
 
 ## Fuera de alcance
 
 - **Configurar `graded`, `maxScore`, `enabled` y `autonomy`.** Es HU-04, aunque se guarden con el
   mismo `PATCH`.
-- **Adjuntar la solución como fichero y que el modelo la lea.** `referenceSolution` es texto. La
-  subida de ficheros de contexto existe (`activity_files`) pero su contenido no se almacena ni se
-  envía al modelo. Ver pregunta abierta 2 y HU-06.
+- **Adjuntar la solución como fichero binario y que el modelo la lea.** Un `.tex`, `.md` o
+  `.txt` sí guarda su contenido y entra en el contexto resuelto; un PDF, una imagen o un `.docx` se
+  registran como referencia y no llegan al modelo. **No hay OCR de ficheros de contexto**: el motor
+  de HU-10 transcribe entregas de alumnos, no material del profesor. Ver pregunta abierta 2 y HU-06.
+- **Que el lote pase la solución de referencia y los ficheros al modelo.** El contexto resuelto los
+  incluye y la pantalla los enseña, pero `batch.ts` todavía no se los pasa al motor (RN-8). Es una
+  carencia declarada, no una decisión.
 - **Editor visual de fórmulas.** El profesor escribe LaTeX si su materia lo pide. Se le da vista
   previa, no un editor WYSIWYG.
 - **Rúbrica estructurada dentro de un apartado.** RN-11: eso vive en Markdown, en
@@ -280,7 +324,16 @@ Es el mismo endpoint de HU-04.
 
 **Esquema** (`0002_activities.sql` sobre `0001_init.sql`): `activities.reference_solution text`,
 `activities.points_allocation jsonb NOT NULL DEFAULT '[]'`. La columna `activities.grading_notes`
-**ya no existe** (RN-12).
+**ya no existe** (RN-12). Desde `0003_courses.sql`: `activity_files.content text` guarda el texto de
+los ficheros legibles y `activity_files.upload_complete boolean NOT NULL DEFAULT true` marca las
+subidas cerradas.
+
+**Contexto resuelto** (`packages/core/src/context/resolve.ts`): `resolveContext()` recibe
+`referenceSolution`, `graded` y `fileContents`, y añade después de los tres niveles una sección
+«Solución de referencia» o «Material asociado» según `graded` (RN-5 bis), más una sección «Material
+adjunto · *nombre*» por cada fichero de texto. Lo llama `GET /api/contexts/resolved/{activityId}`
+—que es lo que el profesor ve— y lo llama `gradeSubmission()` —que es lo que el modelo lee—, pero el
+lote sólo le pasa los tres niveles: ver el aviso de RN-8.
 
 **Relación con la corrección**: `CorrectionItem` copia `label`, `statement` y `maxPoints` del
 reparto en el momento de corregir. Esa copia es lo que hace que RN-7 se cumpla sin esfuerzo.
@@ -317,15 +370,26 @@ visible sin fabricarlo.
    sin decidirlo, dos clientes distintos dejan la misma actividad en estados distintos.
    **`[bloqueante]`: es una invariante del dominio a medio escribir.**
 
-2. **¿Puede la solución de referencia entrar como fichero?** Muchos profesores la tienen escaneada
-   o en PDF, no escrita. `activity_files` ya existe y la pantalla ya deja subir ficheros, pero el
-   almacenamiento es un marcador: no se guarda el contenido ni llega al modelo. Opciones: (a) sólo
-   texto, y que el profesor transcriba —es trabajo real, una tarde por actividad—; (b) subir el
-   fichero y **transcribirlo con el mismo motor de OCR** que las entregas (HU-10), guardando el
-   resultado en `referenceSolution`; (c) almacenar el fichero y enviarlo como imagen al modelo en
-   cada corrección, lo que exige almacenamiento real y encarece cada llamada. Consecuencia: (b)
-   reutiliza HU-10 y no cambia el contrato; (c) sí lo cambia. **`[bloqueante]`: hoy la UI ofrece
-   subir ficheros que no sirven para nada.**
+2. ~~**¿Puede la solución de referencia entrar como fichero?**~~ **Resuelta: sólo texto, sin OCR.**
+   Es la opción (a) con una vuelta de tuerca: no se pide al profesor que transcriba a mano en el
+   formulario, sino que **suba el fichero si ya es texto**. `.tex`, `.md`, `.markdown` y `.txt`
+   guardan su contenido en `activity_files.content` y entran en el contexto resuelto; el LaTeX de un
+   enunciado ya es texto, entra literal en el prompt, se cachea con el resto del contexto y no cuesta
+   ni una llamada de visión.
+
+   Se descartó (b) —transcribir con el motor de OCR de HU-10— porque ese motor está afinado para
+   manuscrito de alumno y no para material tipografiado, y porque una transcripción errónea del
+   enunciado envenena todas las correcciones de la actividad sin que nadie lo note. Y (c) —enviar el
+   fichero como imagen en cada corrección— porque exige almacenamiento real de binarios y encarece
+   cada llamada de forma permanente.
+
+   **Consecuencia asumida, y visible en la UI**: un PDF escaneado o una foto de la pizarra **se
+   pueden adjuntar pero no llegan al modelo**. `ActivityFile.hasContent` lo expresa en el contrato y
+   la pantalla lo dice; ya no se ofrece una subida que no sirve para nada, pero el profesor con la
+   solución en papel sigue teniendo que escribirla.
+
+   Queda un cabo suelto que no es de esta pregunta: el lote todavía no pasa el contenido de los
+   ficheros al motor (RN-8).
 
 3. **¿Debe avisarse cuando la suma del reparto no cuadra, o bloquearse?** RN-6 dice avisar. Pero una
    actividad mal configurada produce notas mal escaladas para todos sus alumnos, y el aviso se

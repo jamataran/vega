@@ -26,9 +26,17 @@ veinte entregas en test creyendo estar en producción pierde el trabajo; uno que
 producción creyendo estar en test publica notas reales. La pantalla de estado es barata y evita las
 dos cosas.
 
-Es también donde vive lo poco que hay de «ajustes»: cuenta, marca y salir. Casi toda la
-configuración de Vega es por variables de entorno, y eso es una decisión, no una carencia — pero
-significa que esta pantalla es sobre todo de **lectura**.
+Es también donde vive lo que hay de «ajustes», y desde H2 hay bastante más que antes: la
+configuración de instalación (proveedor de IA, Moodle, SMTP, planificación, marca), que edita el
+administrador en `app_settings`, y **la conexión con Moodle de cada usuario**, que edita cada uno
+para sí. Esto último cambió el reparto de la pantalla: **`/ajustes` ya no es sólo de
+administración**. Un profesor entra, ve su tarjeta «Mi conexión con Moodle» y el estado del sistema,
+y no ve las secciones de instalación.
+
+> **Esta HU está enmendada por H2.** RN-2 («no hay endpoint de ajustes») y RN-7 («las credenciales
+> son variables de entorno y no se editan desde aquí») describían el sistema anterior. Se han
+> reescrito abajo; los escenarios de esta HU siguen siendo los del bloque de estado y cuenta, y no
+> cubren todavía las secciones de configuración.
 
 ## Criterios de aceptación
 
@@ -103,10 +111,15 @@ Y al aceptarla, Vega queda como icono en la pantalla de inicio
 
 ## Reglas de negocio
 
-**RN-1.** La pantalla es accesible para cualquier usuario autenticado, con rol `teacher` o `admin`.
+**RN-1.** La pantalla es accesible para cualquier usuario autenticado, con rol `teacher` o `admin`,
+y **enseña cosas distintas según el rol**. Un `teacher` ve su conexión con Moodle y el estado del
+sistema. Un `admin` ve además las secciones de instalación. No hay pantalla de ajustes exclusiva de
+administración: hay secciones que sí lo son.
 
-**RN-2.** Los datos de cuenta salen de `GET /api/auth/me`; los de sistema, de `GET /api/health`.
-No hay endpoint de ajustes: **no existe en el contrato**.
+**RN-2.** Los datos de cuenta salen de `GET /api/auth/me`; los de sistema, de `GET /api/health`; la
+configuración de instalación, de `GET /api/settings`, que es **sólo de administrador** y devuelve
+403 a un `teacher`. El cliente ni siquiera la pide si el usuario no es `admin`: pintar un error en
+una pantalla que para él funciona sería confundirlo.
 
 **RN-3.** Cuando `aiProvider` o `lmsConnector` valen `mock`, la UI muestra un aviso **persistente y
 visible desde cualquier pantalla**, no sólo en ajustes. El profesor tiene que poder saberlo
@@ -121,9 +134,39 @@ sigue siendo válido hasta caducar (HU-01, fuera de alcance).
 **RN-6.** La marca (`BRAND_NAME` y el logo montado como volumen) es configuración de despliegue, no
 de aplicación: no se edita desde la UI.
 
-**RN-7.** La configuración operativa —hora del lote, umbrales de confianza, modelo, credenciales—
-**es por variable de entorno y no se edita desde aquí**. La pantalla puede mostrar valores no
-sensibles en lectura; nunca secretos.
+**RN-7.** ~~La configuración operativa es por variable de entorno y no se edita desde aquí.~~
+**Enmendada en H2.** La configuración operativa —proveedor y modelos de IA, URL y conector de
+Moodle, SMTP, planificación, nombre de marca— **se edita desde esta pantalla** y vive en
+`app_settings`, que **manda sobre el fichero de entorno**. El `.env` pasa a ser el valor de partida
+de una instalación nueva. Lo que sigue siendo sólo de entorno: `DATABASE_URL`, `JWT_SECRET`,
+`JWT_EXPIRES_IN`, `WEB_ORIGIN`, `API_PORT`/`API_HOST` y `LMS_FILESYSTEM_ROOT`.
+
+**RN-7 bis.** **Los secretos se escriben, nunca se leen.** La clave de Anthropic y la contraseña de
+SMTP salen por la API como un booleano `…Configured`; enviar `null` los borra y omitirlos los deja
+como están. Ningún secreto se devuelve, ni siquiera enmascarado.
+
+**RN-8.** **El token de Moodle es de cada usuario, no de la instalación.** Vive en
+`users.moodle_token` y cada uno edita el suyo con `PUT /api/auth/me/moodle-token`. El motivo es de
+Moodle, no de Vega —`core_enrol_get_users_courses` devuelve los cursos del dueño del token—, así que
+la credencial decide qué cursos ofrece la aplicación. La URL y el conector sí son de instalación.
+Ver [ADR 0010](../decisiones/0010-credencial-moodle-por-usuario.md).
+
+**RN-8 bis.** **Un administrador puede además poner y probar el token de otro usuario**, con
+`PUT /api/users/{id}/moodle-token` y `POST /api/users/{id}/moodle-token/test` (HU-02). Existe porque
+en Moodle un administrador sí puede emitir tokens a nombre de terceros, y esperar a que cada profesor
+navegue hasta sus claves de seguridad es donde se atasca una instalación. **El valor sigue sin
+leerse nunca**, tampoco para quien acaba de guardarlo.
+
+**RN-9.** **Probar la conexión responde 200 con `ok: false`** cuando el token no vale, no un código
+de error. `POST /api/auth/me/moodle-token/test` devuelve `MoodleConnectionResponse` con el sitio, el
+usuario y cuántos cursos alcanza el token: un token válido pero del profesor equivocado no da
+ningún error, y leer con quién se ha conectado es la única forma de detectarlo. Un fallo es una
+respuesta legítima de esta ruta, y el profesor necesita leer *por qué* en el mismo sitio donde
+acaba de pegar el token.
+
+**RN-10.** **El token se guarda en claro en la base de datos.** No sale nunca por la API, pero no
+hay cifrado en reposo: quien pueda leer Postgres tiene los tokens de todo el claustro. Es una
+limitación conocida y declarada, no un descuido. Ver ADR 0010.
 
 ## Casos límite
 
@@ -134,14 +177,26 @@ sensibles en lectura; nunca secretos.
 | `uptimeSeconds` muy bajo tras abrir la pantalla | Indica que el contenedor acaba de reiniciarse. Se muestra el dato tal cual, sin interpretarlo |
 | El navegador no soporta instalación de PWA | No se muestra la opción de instalar. Nada más cambia |
 | Cerrar sesión con ediciones sin guardar en otra pantalla | Se pide confirmación explícita advirtiendo de la pérdida |
-| Un `teacher` abre ajustes | Ve lo mismo que un `admin` salvo los enlaces a gestión de usuarios y a lanzar el lote |
+| Un `teacher` abre ajustes | Ve su tarjeta «Mi conexión con Moodle» y el estado del sistema. No ve las secciones de instalación, y el cliente no llega a pedir `GET /api/settings` |
+| Un `admin` abre ajustes | Ve primero su propia conexión con Moodle y después las secciones de instalación: un administrador también da de alta actividades y también necesita su token |
+| El conector configurado es `mock` o `filesystem` | La tarjeta de conexión no exige token: esos conectores no usan credenciales de nadie |
+| El profesor pega un token válido pero de otra persona | La prueba de conexión responde `ok: true` y muestra el sitio, el usuario y el número de cursos. Es lo único que permite detectarlo antes de importar actividades del curso que no era |
+| El token es válido pero el servicio no tiene habilitada `core_enrol_get_users_courses` | `ok: true` con `courseCount: 0`, y el mensaje menciona esa función por su nombre. No se puede distinguir de «no tiene cursos» |
 
 ## Fuera de alcance
 
-- **Editar la configuración del sistema desde la UI.** Hora del lote, modelo, umbrales de confianza
-  y credenciales son variables de entorno (RN-7). Ver preguntas abiertas.
+- ~~**Editar la configuración del sistema desde la UI.**~~ **Ya no lo está**: `GET`/`PATCH
+  /api/settings` existen y la pantalla los usa (RN-7). Lo que sigue fuera es el **umbral de
+  confianza** (0,75, constante en `batch.ts` y en un comentario de `domain.ts`) y el **destinatario
+  del resumen nocturno**. Ver pregunta abierta 1.
+- ~~**Editar credenciales desde la UI.**~~ **Ya no lo está**: la clave de Anthropic, la contraseña de
+  SMTP y el token de Moodle de cada usuario se escriben desde aquí (RN-7 bis, RN-8).
 - **Mostrar secretos.** Ni la clave de Anthropic, ni el token de Moodle, ni `JWT_SECRET`, ni
-  siquiera enmascarados.
+  siquiera enmascarados. Se escriben, no se leen.
+- **Cifrar los tokens de Moodle en reposo.** Reconocido como limitación (RN-10); exige clave de
+  despliegue, rotación y migración de lo ya guardado.
+- **Gestionar el token de otro usuario desde esta pantalla.** Se hace desde la de usuarios (HU-02),
+  y sólo un administrador (RN-8 bis).
 - **Gestión de usuarios.** Es HU-02.
 - **Preferencias de usuario** (tema claro/oscuro, idioma, densidad). No hay columna donde
   guardarlas.
@@ -150,22 +205,31 @@ sensibles en lectura; nunca secretos.
 
 ## Notas de implementación
 
-**Contrato**: `MeResponse` (`{ user }`) y `HealthResponse` (`status`, `version`, `database`,
-`aiProvider`, `lmsConnector`, `uptimeSeconds`).
+**Contrato**: `MeResponse` (`{ user }`), `HealthResponse` (`status`, `version`, `database`,
+`aiProvider`, `lmsConnector`, `uptimeSeconds`), `SettingsResponse` / `UpdateSettingsRequest`
+(`AppSettings`: `anthropic`, `moodle`, `smtp`, `schedule`, `branding`),
+`UpdateMoodleTokenRequest` y `MoodleConnectionResponse`.
 
-**Endpoints** (`routes`): `me` → `GET /api/auth/me`; `health` → `GET /api/health` (público, también
-sonda del proxy inverso).
+**Endpoints** (`routes`):
+
+| Clave | Método y ruta | Permiso |
+|---|---|---|
+| `health` | `GET /api/health` | Público, también sonda del proxy inverso |
+| `me` | `GET /api/auth/me` | Autenticado |
+| `settings` | `GET` / `PATCH /api/settings` | **Administrador** |
+| `myMoodleToken` | `PUT /api/auth/me/moodle-token` | Autenticado, sólo el suyo |
+| `testMyMoodleConnection` | `POST /api/auth/me/moodle-token/test` | Autenticado, sólo el suyo |
 
 **Etiquetas**: `USER_ROLE_LABEL` de `@vega/shared` para el rol. No se escriben otra vez en el front.
 
-> **Hueco del contrato**: no existe ninguna ruta de ajustes de aplicación. Todo lo configurable vive
-> en `.env.example`: `AI_PROVIDER`, `AI_MODEL_TRANSCRIPTION`, `AI_MODEL_GRADING`, `LMS_CONNECTOR`,
-> `JWT_EXPIRES_IN`, `BRAND_NAME`, SMTP. Si se decide hacer algo editable, hay que ampliar el
-> contrato y probablemente añadir una tabla de configuración.
+**Precedencia de configuración**: `app_settings` primero, `.env` como respaldo. `lmsSettings()` en
+`apps/api/src/lms/factory.ts` es el ejemplo: lee la fila y, si está vacía, cae en
+`config.LMS_CONNECTOR` / `config.MOODLE_BASE_URL`.
 
-**UI**: última pestaña de la navegación inferior. El aviso de modo simulado (RN-3) es un elemento
-global de la cabecera, no de esta pantalla: se pinta a partir del `GET /api/health` que la
-aplicación hace al arrancar.
+**UI**: `apps/frontend/src/pages/SettingsPage.tsx`, última pestaña de la navegación inferior. Con
+rol `teacher` devuelve una pantalla corta —`MoodleConnectionCard` + `SystemStatus`— y ni siquiera
+lanza la consulta de ajustes. El aviso de modo simulado (RN-3) es un elemento global de la cabecera,
+no de esta pantalla: se pinta a partir del `GET /api/health` que la aplicación hace al arrancar.
 
 **Mock**: completa en la entrega mockeada. `GET /api/health` es real desde el primer día — es la
 sonda del proxy inverso y la fuente del aviso de modo simulado, que es precisamente lo que hace
@@ -173,12 +237,12 @@ falta durante una demo.
 
 ## Preguntas abiertas
 
-1. **¿Qué configuración debería ser editable desde la UI?** Candidatas concretas: la **hora del
-   lote nocturno** (hoy variable de entorno; cambiarla exige tocar Portainer y reiniciar), el
-   **umbral de confianza** que la UI resalta (hoy 0,75, fijado en un comentario de `domain.ts`) y
-   el **destinatario del resumen nocturno**. Hacerlas editables exige tabla de configuración,
-   endpoints nuevos y decidir quién puede tocarlas. ¿Merece la pena para tres valores?
-   **`[bloqueante]` si la respuesta es sí: cambia el contrato.**
+1. **¿Qué configuración debería ser editable desde la UI?** **Resuelta a medias.** La tabla
+   `app_settings` y `GET`/`PATCH /api/settings` existen, y con ellas la periodicidad del lote
+   (`schedule.everyMinutes`), los modelos, el proveedor, SMTP, la marca y la conexión con Moodle.
+   Siguen sin ser editables el **umbral de confianza** (0,75, constante `AUTONOMY_CONFIDENCE_THRESHOLD`
+   en `batch.ts` y comentario en `domain.ts`) y el **destinatario del resumen nocturno**. Para esos
+   dos la pregunta sigue en pie, pero ya no cuesta una tabla ni un endpoint: cuesta dos claves.
 
 2. **¿Puede un usuario cambiar su propia contraseña?** Hoy no: sólo un administrador puede, vía
    HU-02. Para un profesor al que el administrador le dio una contraseña por WhatsApp, eso es un

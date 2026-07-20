@@ -57,8 +57,21 @@ const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(function Button(
       aria-busy={loading || undefined}
       {...props}
     >
-      {loading && !asChild ? <Loader2 className="animate-spin" aria-hidden="true" /> : null}
-      {children}
+      {/*
+        Con `asChild` se entrega **un único hijo y sin envolverlo**: el `Slot` de
+        Radix hace `React.Children.only` y un `null` suelto del indicador de
+        carga ya cuenta como segundo hijo. Devolver aquí un fragmento tampoco
+        vale —seguiría siendo un envoltorio que `Slot` no sabe fusionar—, así
+        que la bifurcación es la propia expresión.
+      */}
+      {asChild ? (
+        children
+      ) : (
+        <>
+          {loading ? <Loader2 className="animate-spin" aria-hidden="true" /> : null}
+          {children}
+        </>
+      )}
     </Comp>
   );
 });

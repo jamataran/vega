@@ -15,6 +15,7 @@ import { statsRoutes } from './routes/stats.js';
 import { submissionRoutes } from './routes/submissions.js';
 import { userRoutes } from './routes/users.js';
 import type { AppContext } from './context.js';
+import { loggerOptions } from './logging.js';
 import type { Config } from './config.js';
 
 export interface BuiltServer {
@@ -27,12 +28,17 @@ export async function buildServer(config: Config): Promise<BuiltServer> {
   const ctx: AppContext = { db, sql, config, startedAt: Date.now() };
 
   const app = Fastify({
-    logger:
-      config.NODE_ENV === 'development'
-        ? { level: 'info', transport: undefined }
-        : { level: 'info' },
+    logger: loggerOptions(config),
     // El proxy inverso es quien termina TLS; necesitamos la IP real en los logs.
     trustProxy: true,
+    /**
+     * Explícito y no el defecto de Fastify (1 MiB), para que el tope sea una
+     * decisión y no un accidente. Los ficheros de contexto suben troceados en
+     * trozos de `UPLOAD_CHUNK_BYTES`, así que ninguna petición legítima se
+     * acerca a esto; el margen cubre el JSON que envuelve al trozo y el escapado
+     * de las contrabarras, que en LaTeX son muchas y se duplican.
+     */
+    bodyLimit: 2 * 1024 * 1024,
   });
 
   registerErrorHandler(app);

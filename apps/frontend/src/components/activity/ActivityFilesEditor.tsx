@@ -1,12 +1,15 @@
 import { useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Download, Paperclip, Trash2 } from 'lucide-react';
+import { MAX_FILE_CONTENT_BYTES, UPLOAD_CHUNK_BYTES, isTextFile } from '@vega/shared';
 import type { ActivityFile } from '@vega/shared';
 import { api } from '@/lib/api';
 import { queryKeys } from '@/lib/queryKeys';
 import { notify } from '@/lib/notify';
 import { formatDateTime } from '@/lib/format';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Progress } from '@/components/ui/progress';
 
 /** Tamaños en la unidad que se entiende de un vistazo. */
 function formatBytes(bytes: number): string {
@@ -15,10 +18,44 @@ function formatBytes(bytes: number): string {
   return `${Math.round((bytes / (1024 * 1024)) * 10) / 10} MB`;
 }
 
+const encoder = new TextEncoder();
+
 /**
- * Ficheros de contexto de la actividad: enunciado, solución escaneada,
- * criterios del departamento. Acompañan al contexto Markdown en lo que recibe
- * la IA.
+ * Trozo que empieza en `from` y no pasa de `maxBytes` **en UTF-8**.
+ *
+ * Cortar por número de caracteres no vale: en un `.tex` con acentos y símbolos
+ * matemáticos un carácter puede ocupar hasta cuatro bytes, y el trozo se saldría
+ * del límite del proxy justo en los ficheros que más falta hacen. Se avanza a
+ * tientas y se retrocede hasta caber, respetando los pares subrogados para no
+ * partir un carácter por la mitad.
+ */
+function sliceByBytes(text: string, from: number, maxBytes: number): string {
+  let end = Math.min(text.length, from + maxBytes);
+  // No partir un par subrogado (emoji, símbolos fuera del plano básico).
+  if (end < text.length && isLowSurrogate(text.charCodeAt(end))) end -= 1;
+
+  while (end > from + 1 && encoder.encode(text.slice(from, end)).length > maxBytes) {
+    // Sobra: recortamos proporcionalmente en vez de carácter a carácter, que
+    // sobre un fichero grande serían miles de vueltas.
+    const excess = encoder.encode(text.slice(from, end)).length - maxBytes;
+    end -= Math.max(1, Math.ceil(excess / 4));
+    if (end < text.length && isLowSurrogate(text.charCodeAt(end))) end -= 1;
+  }
+  return text.slice(from, Math.max(end, from + 1));
+}
+
+function isLowSurrogate(code: number): boolean {
+  return code >= 0xdc00 && code <= 0xdfff;
+}
+
+/**
+ * Ficheros de contexto de la actividad: el enunciado en LaTeX, el material
+ * sobre el que preguntan los alumnos, los criterios del departamento.
+ *
+ * Sólo los de texto (`.tex`, `.md`, `.txt`) llegan al modelo: se leen aquí y su
+ * contenido viaja con el contexto. Un binario se guarda como referencia del
+ * profesor y **se dice** que no se usa al corregir, en vez de dejar creer que
+ * sí. Es la diferencia entre adjuntar y que sirva de algo.
  */
 export function ActivityFilesEditor({
   activityId,
@@ -30,6 +67,11 @@ export function ActivityFilesEditor({
   const queryClient = useQueryClient();
   const inputRef = useRef<HTMLInputElement>(null);
   const [pendingId, setPendingId] = useState<string | null>(null);
+  const [progress, setProgress] = useState<{
+    filename: string;
+    sent: number;
+    total: number;
+  } | null>(null);
 
   const refresh = () => {
     void queryClient.invalidateQueries({ queryKey: queryKeys.activity(activityId) });
@@ -37,17 +79,52 @@ export function ActivityFilesEditor({
   };
 
   const add = useMutation({
-    mutationFn: (file: File) =>
-      api.addActivityFile(activityId, {
+    mutationFn: async (file: File) => {
+      if (file.size > MAX_FILE_CONTENT_BYTES) {
+        throw new Error(
+          `El fichero ocupa ${formatBytes(file.size)} y el máximo son ${formatBytes(MAX_FILE_CONTENT_BYTES)}.`,
+        );
+      }
+
+      const isText = isTextFile(file.name);
+      const { file: created } = await api.beginActivityFileUpload(activityId, {
         filename: file.name,
-        mimeType: file.type === '' ? 'application/octet-stream' : file.type,
+        mimeType: file.type === '' ? 'text/plain' : file.type,
         sizeBytes: file.size,
-      }),
-    onSuccess: (response) => {
+        hasContent: isText,
+      });
+
+      // Un binario no tiene contenido que mandar: nace ya cerrado.
+      if (!isText) return created;
+
+      // Troceado porque el proxy de delante y el `bodyLimit` de Fastify acotan
+      // el cuerpo de cada petición. Se trocea sobre el texto ya decodificado, y
+      // se mide en bytes UTF-8: un `.tex` con acentos y símbolos matemáticos
+      // ocupa más de un byte por carácter y trocear por longitud se pasaría.
+      const text = await file.text();
+      let index = 0;
+      let cursor = 0;
+      while (cursor < text.length) {
+        const chunk = sliceByBytes(text, cursor, UPLOAD_CHUNK_BYTES);
+        await api.appendActivityFileChunk(activityId, created.id, { index, content: chunk });
+        cursor += chunk.length;
+        index += 1;
+        setProgress({ filename: file.name, sent: cursor, total: text.length });
+      }
+
+      return (await api.completeActivityFileUpload(activityId, created.id)).file;
+    },
+    onSuccess: (file) => {
       refresh();
-      notify.success('Fichero añadido', response.file.filename);
+      notify.success(
+        'Fichero añadido',
+        file.hasContent
+          ? `${file.filename} · se enviará al modelo con el contexto`
+          : `${file.filename} · queda como referencia, pero no llega al modelo`,
+      );
     },
     onError: (error) => notify.error('No se ha podido añadir el fichero', error),
+    onSettled: () => setProgress(null),
   });
 
   const remove = useMutation({
@@ -71,7 +148,9 @@ export function ActivityFilesEditor({
     <div className="flex flex-col gap-3">
       {files.length === 0 ? (
         <p className="rounded-md border border-dashed border-border px-3 py-4 text-center text-ui text-muted-foreground">
-          Sin ficheros adjuntos.
+          Sin ficheros adjuntos. Sube el enunciado o el material en{' '}
+          <code className="font-mono">.tex</code> o <code className="font-mono">.md</code> para que
+          Vega lo tenga delante al corregir.
         </p>
       ) : (
         <ul className="flex flex-col gap-1.5">
@@ -89,6 +168,9 @@ export function ActivityFilesEditor({
                   {formatDateTime(file.uploadedAt)}
                 </p>
               </div>
+              <Badge variant={file.hasContent ? 'success' : 'quiet'} className="shrink-0">
+                {file.hasContent ? 'Se usa al corregir' : 'Sólo referencia'}
+              </Badge>
               <Button
                 variant="ghost"
                 size="icon"
@@ -111,11 +193,26 @@ export function ActivityFilesEditor({
         </ul>
       )}
 
+      {progress ? (
+        <div aria-live="polite">
+          <p className="mb-1.5 text-ui text-muted-foreground">
+            Subiendo {progress.filename} —{' '}
+            {Math.round((progress.sent / Math.max(progress.total, 1)) * 100)} %
+          </p>
+          <Progress value={(progress.sent / Math.max(progress.total, 1)) * 100} />
+        </div>
+      ) : null}
+
       <div>
         <input
           ref={inputRef}
           type="file"
           className="sr-only"
+          // Sin restringir a texto: un PDF o un escaneo se puede adjuntar como
+          // referencia del profesor, y el propio componente ya distingue lo que
+          // llega al modelo de lo que no. Filtrarlos aquí prometía menos de lo
+          // que la pantalla hace.
+          accept=".tex,.md,.markdown,.txt,.pdf,image/*,application/x-tex,text/markdown,text/plain,application/pdf"
           aria-label="Elegir fichero para adjuntar"
           onChange={(event) => {
             const file = event.target.files?.[0];

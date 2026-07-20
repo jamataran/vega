@@ -1,9 +1,11 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import type { UseQueryResult } from '@tanstack/react-query';
 import { RefreshCw } from 'lucide-react';
-import type { AppSettings, UpdateSettingsRequest } from '@vega/shared';
+import type { AppSettings, HealthResponse, UpdateSettingsRequest } from '@vega/shared';
 import { api } from '@/lib/api';
+import { useAuth } from '@/lib/auth';
 import { queryKeys } from '@/lib/queryKeys';
 import { notify } from '@/lib/notify';
 import { formatDateTime, formatUptime } from '@/lib/format';
@@ -23,6 +25,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
 import { ErrorState, PageHeader, Section } from '@/components/common/Feedback';
 import { Field } from '@/components/common/Field';
+import { MoodleConnectionCard } from '@/components/settings/MoodleConnectionCard';
 import { KEEP, SecretField, secretPatch } from '@/components/settings/SecretField';
 import type { SecretState } from '@/components/settings/SecretField';
 
@@ -50,7 +53,6 @@ interface FormState {
 
   moodleBaseUrl: string;
   moodleConnector: Connector;
-  moodleToken: SecretState;
 
   smtpHost: string;
   smtpPort: string;
@@ -72,7 +74,6 @@ function fromSettings(settings: AppSettings): FormState {
 
     moodleBaseUrl: settings.moodle.baseUrl,
     moodleConnector: settings.moodle.connector,
-    moodleToken: KEEP,
 
     smtpHost: settings.smtp.host,
     smtpPort: String(settings.smtp.port),
@@ -100,14 +101,90 @@ function Row({ label, value }: { label: string; value: ReactNode }) {
   );
 }
 
+/**
+ * Estado del despliegue. Lo ven todos los roles: saber si se está en el entorno
+ * simulado o en producción importa antes de validar una nota, no sólo a quien
+ * administra.
+ */
+function SystemStatus({
+  healthQuery,
+}: {
+  healthQuery: UseQueryResult<HealthResponse>;
+}) {
+  const health = healthQuery.data;
+  return (
+    <Section
+      title="Estado del sistema"
+      actions={
+        <Button
+          size="sm"
+          onClick={() => void healthQuery.refetch()}
+          loading={healthQuery.isFetching}
+        >
+          <RefreshCw aria-hidden="true" />
+          Comprobar
+        </Button>
+      }
+    >
+      {healthQuery.isError ? (
+        <ErrorState
+          title="El API no responde"
+          error={healthQuery.error}
+          onRetry={() => void healthQuery.refetch()}
+        />
+      ) : !health ? (
+        <Skeleton className="h-40 w-full rounded-md" />
+      ) : (
+        <>
+          <Badge variant={health.status === 'ok' ? 'success' : 'warning'}>
+            {health.status === 'ok' ? 'Todo correcto' : 'Degradado'}
+          </Badge>
+          <dl className="mt-3 divide-y divide-border">
+            <Row
+              label="Base de datos"
+              value={
+                <span
+                  className={cn(
+                    health.database === 'up' ? 'text-success-ink' : 'text-destructive-ink',
+                  )}
+                >
+                  {health.database === 'up' ? 'Conectada' : 'Caída'}
+                </span>
+              }
+            />
+            <Row
+              label="Proveedor de IA"
+              value={<span className="font-mono text-ui">{health.aiProvider}</span>}
+            />
+            <Row
+              label="Conector LMS"
+              value={<span className="font-mono text-ui">{health.lmsConnector}</span>}
+            />
+            <Row
+              label="Versión"
+              value={<span className="font-mono text-ui">{health.version}</span>}
+            />
+            <Row label="En marcha desde hace" value={formatUptime(health.uptimeSeconds)} />
+          </dl>
+        </>
+      )}
+    </Section>
+  );
+}
+
 export function SettingsPage() {
   const queryClient = useQueryClient();
   const scheduleId = useId();
   const [saving, setSaving] = useState<SectionId | null>(null);
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'admin';
 
+  // `GET /api/settings` es sólo de administración: pedirlo como profesor
+  // devolvería 403 y pintaría un error en una pantalla que para él funciona.
   const settingsQuery = useQuery({
     queryKey: queryKeys.settings,
     queryFn: ({ signal }) => api.settings(signal),
+    enabled: isAdmin,
   });
 
   const healthQuery = useQuery({
@@ -133,9 +210,7 @@ export function SettingsPage() {
       queryClient.setQueryData(queryKeys.settings, response);
       // Los secretos vuelven a su estado neutro: ya no hay nada sin aplicar.
       setForm((current) =>
-        current
-          ? { ...current, apiKey: KEEP, moodleToken: KEEP, smtpPassword: KEEP }
-          : current,
+        current ? { ...current, apiKey: KEEP, smtpPassword: KEEP } : current,
       );
       void queryClient.invalidateQueries({ queryKey: queryKeys.health });
       notify.success('Ajustes guardados');
@@ -143,6 +218,22 @@ export function SettingsPage() {
     onError: (error) => notify.error('No se han podido guardar los ajustes', error),
     onSettled: () => setSaving(null),
   });
+
+  // Un profesor no administra nada, pero sí tiene que poder pegar su token de
+  // Moodle y ver en qué entorno está. Es su pantalla, más corta.
+  if (!isAdmin) {
+    return (
+      <div className="pb-4">
+        <PageHeader eyebrow="Tu cuenta" title="Ajustes">
+          Tu conexión con Moodle y el estado de la instalación.
+        </PageHeader>
+        <div className="flex flex-col gap-3">
+          <MoodleConnectionCard configured={user?.moodleTokenConfigured ?? false} />
+          <SystemStatus healthQuery={healthQuery} />
+        </div>
+      </div>
+    );
+  }
 
   if (settingsQuery.isError) {
     return (
@@ -189,6 +280,10 @@ export function SettingsPage() {
       </PageHeader>
 
       <div className="flex flex-col gap-3">
+        {/* Primero lo suyo, aunque administre: un admin también da de alta
+            actividades y también necesita su propio token. */}
+        <MoodleConnectionCard configured={user?.moodleTokenConfigured ?? false} />
+
         {/* ── Anthropic ─────────────────────────────────────────────────── */}
         <Section
           title="Anthropic"
@@ -332,13 +427,10 @@ export function SettingsPage() {
               )}
             </Field>
 
-            <SecretField
-              label="Token de Moodle"
-              configured={settings.moodle.tokenConfigured}
-              state={form.moodleToken}
-              onChange={(next) => update('moodleToken', next)}
-              hint="El token del servicio web con permiso sobre las actividades."
-            />
+            <p className="text-ui text-muted-foreground">
+              El token no se configura aquí: es personal de cada profesor y decide qué cursos ve.
+              Cada uno pone el suyo en «Mi conexión con Moodle».
+            </p>
 
             <div className="flex justify-end">
               <Button
@@ -350,7 +442,6 @@ export function SettingsPage() {
                     moodle: {
                       baseUrl: form.moodleBaseUrl,
                       connector: form.moodleConnector,
-                      token: secretPatch(form.moodleToken),
                     },
                   })
                 }
@@ -528,63 +619,7 @@ export function SettingsPage() {
           </div>
         </Section>
 
-        {/* ── Estado ────────────────────────────────────────────────────── */}
-        <Section
-          title="Estado del sistema"
-          actions={
-            <Button
-              size="sm"
-              onClick={() => void healthQuery.refetch()}
-              loading={healthQuery.isFetching}
-            >
-              <RefreshCw aria-hidden="true" />
-              Comprobar
-            </Button>
-          }
-        >
-          {healthQuery.isError ? (
-            <ErrorState
-              title="El API no responde"
-              error={healthQuery.error}
-              onRetry={() => void healthQuery.refetch()}
-            />
-          ) : !health ? (
-            <Skeleton className="h-40 w-full rounded-md" />
-          ) : (
-            <>
-              <Badge variant={health.status === 'ok' ? 'success' : 'warning'}>
-                {health.status === 'ok' ? 'Todo correcto' : 'Degradado'}
-              </Badge>
-              <dl className="mt-3 divide-y divide-border">
-                <Row
-                  label="Base de datos"
-                  value={
-                    <span
-                      className={cn(
-                        health.database === 'up' ? 'text-success-ink' : 'text-destructive-ink',
-                      )}
-                    >
-                      {health.database === 'up' ? 'Conectada' : 'Caída'}
-                    </span>
-                  }
-                />
-                <Row
-                  label="Proveedor de IA"
-                  value={<span className="font-mono text-ui">{health.aiProvider}</span>}
-                />
-                <Row
-                  label="Conector LMS"
-                  value={<span className="font-mono text-ui">{health.lmsConnector}</span>}
-                />
-                <Row
-                  label="Versión"
-                  value={<span className="font-mono text-ui">{health.version}</span>}
-                />
-                <Row label="En marcha desde hace" value={formatUptime(health.uptimeSeconds)} />
-              </dl>
-            </>
-          )}
-        </Section>
+        <SystemStatus healthQuery={healthQuery} />
       </div>
     </div>
   );

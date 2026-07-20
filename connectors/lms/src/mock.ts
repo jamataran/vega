@@ -1,10 +1,11 @@
-import type { DiscoveredActivity } from '@vega/shared';
+import type { DiscoveredActivity, DiscoveredCourse } from '@vega/shared';
 import { hasStudentFile } from '@vega/shared';
 import type { LmsConnector, LmsConnectorFactory } from './connector.js';
 import type {
   ActivityRef,
   DownloadedFile,
   FeedbackFile,
+  LmsConnectionInfo,
   LmsConnectorConfig,
   RemoteGrade,
   RemoteSubmission,
@@ -29,6 +30,21 @@ const COURSE_AFTERNOON = 'Academia Hipatia · Secundaria Matemáticas · Grupo d
 const COURSE_PREP = 'Academia Hipatia · Preparación de oposiciones';
 
 /**
+ * Ids de curso fijos, en el rango en el que Moodle los reparte de verdad. Que
+ * no cambien entre arranques es lo que permite guardar el curso elegido en la
+ * URL o en la base de datos de desarrollo sin que apunte a otro sitio mañana.
+ */
+const COURSE_ID_MORNING = '101';
+const COURSE_ID_AFTERNOON = '102';
+const COURSE_ID_PREP = '103';
+
+const COURSES: readonly DiscoveredCourse[] = [
+  { moodleCourseId: COURSE_ID_MORNING, name: COURSE_MORNING, shortName: 'MAT-2-MAÑANA' },
+  { moodleCourseId: COURSE_ID_AFTERNOON, name: COURSE_AFTERNOON, shortName: 'MAT-2-TARDE' },
+  { moodleCourseId: COURSE_ID_PREP, name: COURSE_PREP, shortName: 'OPO-SEC-MAT' },
+];
+
+/**
  * Catálogo de actividades "que hay en Moodle". Dos entregas y un foro por la
  * mañana, una entrega y un foro por la tarde, y un simulacro de oposiciones:
  * suficiente para que la pantalla de alta de actividades tenga con qué
@@ -39,6 +55,7 @@ const CATALOGUE: readonly Omit<DiscoveredActivity, 'alreadyImported'>[] = [
     moodleRef: 'assign-tema04',
     name: 'Tema 04 · Derivadas y aplicaciones',
     kind: 'assignment',
+    moodleCourseId: COURSE_ID_MORNING,
     courseName: COURSE_MORNING,
     pendingCount: 6,
   },
@@ -46,6 +63,7 @@ const CATALOGUE: readonly Omit<DiscoveredActivity, 'alreadyImported'>[] = [
     moodleRef: 'assign-problema12',
     name: 'Problema 12 · Integrales definidas y áreas',
     kind: 'assignment',
+    moodleCourseId: COURSE_ID_MORNING,
     courseName: COURSE_MORNING,
     pendingCount: 4,
   },
@@ -53,6 +71,7 @@ const CATALOGUE: readonly Omit<DiscoveredActivity, 'alreadyImported'>[] = [
     moodleRef: 'forum-didactica',
     name: 'Foro · Didáctica: ¿límite antes que derivada?',
     kind: 'forum',
+    moodleCourseId: COURSE_ID_MORNING,
     courseName: COURSE_MORNING,
     pendingCount: 3,
   },
@@ -60,6 +79,7 @@ const CATALOGUE: readonly Omit<DiscoveredActivity, 'alreadyImported'>[] = [
     moodleRef: 'assign-tema07',
     name: 'Tema 07 · Límites y continuidad',
     kind: 'assignment',
+    moodleCourseId: COURSE_ID_AFTERNOON,
     courseName: COURSE_AFTERNOON,
     pendingCount: 5,
   },
@@ -67,6 +87,7 @@ const CATALOGUE: readonly Omit<DiscoveredActivity, 'alreadyImported'>[] = [
     moodleRef: 'forum-dudas-analisis',
     name: 'Foro · Dudas de análisis entre compañeros',
     kind: 'forum',
+    moodleCourseId: COURSE_ID_AFTERNOON,
     courseName: COURSE_AFTERNOON,
     pendingCount: 4,
   },
@@ -74,6 +95,7 @@ const CATALOGUE: readonly Omit<DiscoveredActivity, 'alreadyImported'>[] = [
     moodleRef: 'assign-simulacro-global',
     name: 'Simulacro global · Convocatoria de junio',
     kind: 'assignment',
+    moodleCourseId: COURSE_ID_PREP,
     courseName: COURSE_PREP,
     pendingCount: 8,
   },
@@ -81,6 +103,7 @@ const CATALOGUE: readonly Omit<DiscoveredActivity, 'alreadyImported'>[] = [
     moodleRef: 'forum-evaluacion',
     name: 'Foro · El error como recurso de evaluación',
     kind: 'forum',
+    moodleCourseId: COURSE_ID_PREP,
     courseName: COURSE_PREP,
     pendingCount: 2,
   },
@@ -148,14 +171,41 @@ export class MockLmsConnector implements LmsConnector {
     return this.#files;
   }
 
+  listCourses(): Promise<DiscoveredCourse[]> {
+    return Promise.resolve(COURSES.map((course) => ({ ...course })));
+  }
+
+  /** Nunca falla: el mock existe justo para trabajar sin credenciales. */
+  verifyConnection(): Promise<LmsConnectionInfo> {
+    return Promise.resolve({
+      siteName: 'Moodle simulado',
+      username: 'profesora.simulada',
+      courseCount: COURSES.length,
+      // Se devuelve el mismo parte que el conector real para que la pantalla de
+      // Ajustes se pueda diseñar y revisar sin un Moodle delante.
+      checks: [
+        { name: 'mock.site', label: 'Identificar el token', status: 'ok' as const,
+          detail: 'Moodle simulado · conectado como profesora.simulada', required: true },
+        { name: 'mock.courses', label: 'Listar tus cursos', status: 'ok' as const,
+          detail: `${COURSES.length} cursos`, required: true },
+        { name: 'mock.assignments', label: 'Leer las entregas del curso', status: 'ok' as const,
+          detail: 'Catálogo simulado', required: true },
+        { name: 'mock.forums', label: 'Leer los foros del curso', status: 'ok' as const,
+          detail: 'Catálogo simulado', required: true },
+      ],
+    });
+  }
+
   /**
    * El conector no sabe qué actividades tiene Vega dadas de alta, así que
    * devuelve `alreadyImported: false` y deja que lo resuelva quien sí lo sabe.
    */
-  listActivities(): Promise<DiscoveredActivity[]> {
-    return Promise.resolve(
-      CATALOGUE.map((activity) => ({ ...activity, alreadyImported: false })),
-    );
+  listActivities(moodleCourseId?: string): Promise<DiscoveredActivity[]> {
+    const selected =
+      moodleCourseId === undefined
+        ? CATALOGUE
+        : CATALOGUE.filter((activity) => activity.moodleCourseId === moodleCourseId);
+    return Promise.resolve(selected.map((activity) => ({ ...activity, alreadyImported: false })));
   }
 
   listSubmissions(activityRef: ActivityRef): Promise<RemoteSubmission[]> {

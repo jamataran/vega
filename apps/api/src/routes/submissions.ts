@@ -15,10 +15,12 @@ import {
 } from '@vega/shared';
 import { currentUser } from '../auth/plugin.js';
 import { schema } from '../db/client.js';
-import { toCorrection, toSubmission, toTranscription } from '../db/mappers.js';
+import { toCorrection, toIso, toSubmission, toTranscription } from '../db/mappers.js';
 import { buildFeedbackPdf, feedbackFilename } from '../feedback/pdf.js';
 import { badRequest, conflict, notFound, parseOrThrow, unprocessable } from '../http/errors.js';
 import { requireActivity } from './activities.js';
+import { visibleActivityIds } from '../auth/scope.js';
+import type { TokenPayload } from '../auth/plugin.js';
 import type { AppContext } from '../context.js';
 
 /** URLs de las páginas escaneadas. Con el conector mock son SVG generados al vuelo. */
@@ -28,15 +30,6 @@ function scanUrls(submissionId: string, pageCount: number): string[] {
 
 /** Por debajo de este umbral, la UI señala la corrección como poco fiable. */
 const LOW_CONFIDENCE = 0.75;
-
-/**
- * Las consultas en crudo no pasan por el mapeo de tipos de Drizzle, así que una
- * `timestamptz` puede llegar como `Date` o como cadena según el parseador que
- * tenga puesto el driver. Normalizamos aquí en vez de confiar en una de las dos.
- */
-function toIso(value: Date | string): string {
-  return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
-}
 
 interface QueueRow {
   id: string;
@@ -74,6 +67,11 @@ export async function submissionRoutes(app: FastifyInstance, ctx: AppContext): P
       const query = parseOrThrow(QueueQuery, request.query, 'Los filtros de la cola');
       const offset = (query.page - 1) * query.pageSize;
 
+      // Un profesor sólo ve las entregas de sus cursos. No es sólo un permiso:
+      // son trabajos de alumnos concretos y enseñárselos a otro docente es un
+      // asunto de protección de datos.
+      const visible = await visibleActivityIds(ctx, currentUser(request));
+
       // Lista blanca: el orden viene de la query, así que nunca se interpola texto libre.
       const orderColumn = {
         submittedAt: sql`s.submitted_at`,
@@ -108,6 +106,7 @@ export async function submissionRoutes(app: FastifyInstance, ctx: AppContext): P
           WHERE ci.correction_id = c.id
         ) agg ON true
         WHERE TRUE
+          ${visible === null ? sql`` : sql`AND s.activity_id = ANY(${visible}::uuid[])`}
           ${query.status ? sql`AND s.status = ${query.status}` : sql``}
           ${query.activityId ? sql`AND s.activity_id = ${query.activityId}` : sql``}
           ${query.kind ? sql`AND a.kind = ${query.kind}` : sql``}
@@ -173,10 +172,18 @@ export async function submissionRoutes(app: FastifyInstance, ctx: AppContext): P
   );
 
   // ── Recuento por estado, para las pestañas ────────────────────────────────
-  app.get(routes.queueCounts, { preHandler: app.authenticate }, async (): Promise<QueueCounts> => {
-    const rows = await sql<{ status: SubmissionStatus; count: string }[]>`
-      SELECT status, COUNT(*) AS count FROM submissions GROUP BY status
-    `;
+  app.get(
+    routes.queueCounts,
+    { preHandler: app.authenticate },
+    async (request): Promise<QueueCounts> => {
+      const visible = await visibleActivityIds(ctx, currentUser(request));
+      const rows = await sql<{ status: SubmissionStatus; count: string }[]>`
+        SELECT status, COUNT(*) AS count
+        FROM submissions
+        WHERE TRUE
+          ${visible === null ? sql`` : sql`AND activity_id = ANY(${visible}::uuid[])`}
+        GROUP BY status
+      `;
     // Devolvemos siempre todas las claves para que el front no tenga que
     // distinguir entre "cero" y "no vino".
     const counts = {
@@ -189,16 +196,17 @@ export async function submissionRoutes(app: FastifyInstance, ctx: AppContext): P
       published: 0,
       error: 0,
     } satisfies QueueCounts;
-    for (const row of rows) counts[row.status] = Number(row.count);
-    return counts;
-  });
+      for (const row of rows) counts[row.status] = Number(row.count);
+      return counts;
+    },
+  );
 
   // ── Detalle ───────────────────────────────────────────────────────────────
   app.get<{ Params: { id: string } }>(
     routes.submission(':id'),
     { preHandler: app.authenticate },
     async (request): Promise<SubmissionDetail> => {
-      return loadDetail(ctx, request.params.id);
+      return loadDetail(ctx, request.params.id, currentUser(request));
     },
   );
 
@@ -207,7 +215,7 @@ export async function submissionRoutes(app: FastifyInstance, ctx: AppContext): P
     routes.feedbackFile(':id'),
     { preHandler: app.authenticate },
     async (request, reply) => {
-      const detail = await loadDetail(ctx, request.params.id);
+      const detail = await loadDetail(ctx, request.params.id, currentUser(request));
       if (!detail.correction) {
         throw conflict('Esta entrega todavía no tiene corrección que descargar.');
       }
@@ -239,7 +247,7 @@ export async function submissionRoutes(app: FastifyInstance, ctx: AppContext): P
     async (request): Promise<CorrectionResponse> => {
       const body = parseOrThrow(SaveCorrectionRequest, request.body, 'La corrección');
       await applyTeacherEdits(ctx, request.params.id, body);
-      return loadCorrectionResponse(ctx, request.params.id);
+      return loadCorrectionResponse(ctx, request.params.id, currentUser(request));
     },
   );
 
@@ -274,7 +282,7 @@ export async function submissionRoutes(app: FastifyInstance, ctx: AppContext): P
         .set({ status: 'validated', updatedAt: now })
         .where(eq(schema.submissions.id, submissionId));
 
-      return loadCorrectionResponse(ctx, submissionId);
+      return loadCorrectionResponse(ctx, submissionId, currentUser(request));
     },
   );
 
@@ -311,7 +319,7 @@ export async function submissionRoutes(app: FastifyInstance, ctx: AppContext): P
         .set({ status: 'published', updatedAt: now })
         .where(eq(schema.submissions.id, submissionId));
 
-      return loadCorrectionResponse(ctx, submissionId);
+      return loadCorrectionResponse(ctx, submissionId, currentUser(request));
     },
   );
 
@@ -344,7 +352,11 @@ export async function submissionRoutes(app: FastifyInstance, ctx: AppContext): P
 
 // ── Ayudantes ───────────────────────────────────────────────────────────────
 
-async function loadDetail(ctx: AppContext, submissionId: string): Promise<SubmissionDetail> {
+async function loadDetail(
+  ctx: AppContext,
+  submissionId: string,
+  user: TokenPayload,
+): Promise<SubmissionDetail> {
   const { db } = ctx;
 
   const [submission] = await db
@@ -354,7 +366,7 @@ async function loadDetail(ctx: AppContext, submissionId: string): Promise<Submis
     .limit(1);
   if (!submission) throw notFound('No existe esa entrega.');
 
-  const activity = await requireActivity(ctx, submission.activityId);
+  const activity = await requireActivity(ctx, submission.activityId, user);
 
   const [transcription] = await db
     .select()
@@ -389,8 +401,9 @@ async function loadDetail(ctx: AppContext, submissionId: string): Promise<Submis
 async function loadCorrectionResponse(
   ctx: AppContext,
   submissionId: string,
+  user: TokenPayload,
 ): Promise<CorrectionResponse> {
-  const detail = await loadDetail(ctx, submissionId);
+  const detail = await loadDetail(ctx, submissionId, user);
   if (!detail.correction) throw notFound('Esta entrega todavía no tiene corrección.');
   return { correction: detail.correction, submission: detail.submission };
 }

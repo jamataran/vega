@@ -17,10 +17,10 @@
     "db:up": "docker compose up -d postgres",
     "db:down": "docker compose down",
     "db:migrate": "pnpm --filter @vega/api migrate",
-    "db:seed": "pnpm --filter @vega/api seed",
+    "db:demo": "pnpm --filter @vega/api demo",
     "db:reset": "pnpm --filter @vega/api reset",
     "create-admin": "pnpm --filter @vega/api create-admin",
-    "setup": "pnpm install && pnpm db:up && pnpm db:migrate && pnpm db:seed"
+    "setup": "pnpm install && pnpm db:up && pnpm db:migrate"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
