@@ -89,6 +89,13 @@ services:
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SMTP_FROM: ${SMTP_FROM:-}
       BRAND_NAME: ${BRAND_NAME:-Vega (test)}
+      # Administrador inicial, sólo si la base está vacía. A diferencia de prod
+      # aquí no se exige contraseña: test es desechable y `admin` es el valor
+      # que se espera. Pero las variables tienen que estar cableadas igual, o
+      # lo que se ponga en stack.env se ignora en silencio y el día que alguien
+      # fije una contraseña de verdad seguirá entrando `admin`.
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-admin@vega.local}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-admin}
     ports:
       # host:contenedor — 18001 para que el proxy inverso lo distinga del 18000
       # de producción cuando ambos entornos comparten máquina.
