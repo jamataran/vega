@@ -5,8 +5,8 @@ Portainer y por su propio fichero compose de este repositorio:
 
 | Entorno | Compose | Variables | Stack Portainer | Puertos publicados |
 |---|---|---|---|---|
-| Test | `deploy/test/docker-compose.yml` | `deploy/test/stack.env` | `vega-test` | web `18081`, api `18001` |
-| Producción | `deploy/prod/docker-compose.yml` | `deploy/prod/stack.env` | `vega-prod` | web `18080`, api `18000` |
+| Test | `deploy/test/docker-compose.yml` | `deploy/test/stack.env` | `vega-test` | web `20704`, api `20703` |
+| Producción | `deploy/prod/docker-compose.yml` | `deploy/prod/stack.env` | `vega-prod` | web `20702`, api `20701` |
 
 La regla que ordena todo lo demás: **el tag desplegado está escrito en git**. Nunca se
 despliega un `:latest` opaco. `deploy/<entorno>/stack.env` contiene un `VEGA_IMAGE_TAG`
@@ -206,39 +206,25 @@ la PWA (esquema, dominio, sin barra final) o CORS rechazará las llamadas.
 
 ### nginx
 
-```nginx
-server {
-    listen 443 ssl http2;
-    server_name vega.ejemplo.es;
+Fichero completo y comentado en **`deploy/nginx/vega.subdomain.tld.conf.example`**: redirección
+a HTTPS conservando el reto ACME, TLS, HSTS, `/api/` al 20701 y el resto al 20702.
 
-    # ... certificados ...
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-
-    location /api/ {
-        proxy_pass         http://127.0.0.1:18000;
-        proxy_http_version 1.1;
-        proxy_set_header   Host              $host;
-        proxy_set_header   X-Real-IP         $remote_addr;
-        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
-        proxy_set_header   X-Forwarded-Proto $scheme;
-
-        # Subida de escaneos y respuestas de la IA: márgenes generosos.
-        client_max_body_size 50m;
-        proxy_read_timeout   120s;
-    }
-
-    location / {
-        proxy_pass         http://127.0.0.1:18080;
-        proxy_http_version 1.1;
-        proxy_set_header   Host              $host;
-        proxy_set_header   X-Real-IP         $remote_addr;
-        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
-        proxy_set_header   X-Forwarded-Proto $scheme;
-    }
-}
+```bash
+cp deploy/nginx/vega.subdomain.tld.conf.example /etc/nginx/sites-available/vega.subdomain.tld
+# ajusta server_name y las rutas de los certificados
+ln -s /etc/nginx/sites-available/vega.subdomain.tld /etc/nginx/sites-enabled/
+nginx -t && systemctl reload nginx
 ```
 
-El entorno de test es el mismo bloque con `test.vega.ejemplo.es` y los puertos `18001` / `18081`.
+Dos detalles que cuestan una tarde si se pasan por alto:
+
+- **`proxy_pass` sin barra final** (`http://127.0.0.1:20701`, no `.../`). Con barra, nginx
+  recorta el prefijo y el API responde 404 a todo, porque sus rutas ya viven bajo `/api`.
+- **`proxy_read_timeout 120s`.** El defecto de nginx son 60 s: con él una corrección larga
+  muere con 504 mientras el API sigue gastando tokens.
+
+El entorno de test es el mismo fichero con `test.vega.subdomain.tld` y los puertos `20703` /
+`20704`.
 
 ### Plesk
 
@@ -314,8 +300,8 @@ Los mismos nombres en los dos entornos, con valores **distintos**:
 | `NODE_ENV` | `test` | `production` |
 | `LOG_LEVEL` | `debug` | `info` |
 | `NODE_OPTIONS` | `--max-old-space-size=512` | `--max-old-space-size=768` |
-| `VEGA_API_PORT` | `18001` | `18000` |
-| `VEGA_WEB_PORT` | `18081` | `18080` |
+| `VEGA_API_PORT` | `20703` | `20701` |
+| `VEGA_WEB_PORT` | `20704` | `20702` |
 | `AI_PROVIDER` | `mock` | `anthropic` |
 | `ANTHROPIC_API_KEY` | vacío | `sk-ant-…` |
 | `AI_MODEL_TRANSCRIPTION` | `claude-opus-4-8` | `claude-opus-4-8` |

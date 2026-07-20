@@ -6,7 +6,8 @@
 #  que actualiza la CI en cada push a main. Ver deploy/README.md.
 #
 #  Diferencias deliberadas frente a prod:
-#    · puertos publicados 1808x (prod usa 1800x) → el proxy inverso distingue
+#    · puertos publicados 2070x (test 20703/20704, prod 20701/20702) → el proxy
+#      inverso distingue los dos entornos en la misma máquina
 #    · recursos recortados, logs en debug, NODE_ENV=test
 #    · restart: unless-stopped (en prod, always) → aquí sí queremos poder
 #      parar un contenedor y que se quede parado mientras se investiga algo
@@ -97,9 +98,11 @@ services:
       BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-admin@vega.local}
       BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-admin}
     ports:
-      # host:contenedor — 18001 para que el proxy inverso lo distinga del 18000
-      # de producción cuando ambos entornos comparten máquina.
-      - '${VEGA_API_PORT:-18001}:3000'
+      # host:contenedor — 20703 para que el proxy inverso lo distinga del 20701
+      # de producción cuando ambos entornos comparten máquina. Por debajo de
+      # 32768 a propósito: ahí empieza el rango efímero del kernel y un puerto
+      # de salida podría ocuparlo antes de que arranque el contenedor.
+      - '${VEGA_API_PORT:-20703}:3000'
     volumes:
       # Contextos markdown del profesor (versionados con git dentro del volumen)
       # y entregas del conector de sistema de ficheros.
@@ -133,7 +136,7 @@ services:
     depends_on:
       - api
     ports:
-      - '${VEGA_WEB_PORT:-18081}:8080'
+      - '${VEGA_WEB_PORT:-20704}:8080'
     healthcheck:
       test: ['CMD', 'wget', '-q', '--spider', 'http://127.0.0.1:8080/health.txt']
       interval: 30s

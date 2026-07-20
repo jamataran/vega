@@ -7,7 +7,7 @@
 #  Ver deploy/README.md.
 #
 #  Diferencias deliberadas frente a test:
-#    · puertos publicados 1800x (test usa 1808x)
+#    · puertos publicados 20701/20702 (test usa 20703/20704)
 #    · más CPU y memoria, logs en info, NODE_ENV=production
 #    · restart: always → tras reiniciar el host el stack vuelve solo, aunque
 #      alguien hubiera parado un contenedor a mano
@@ -103,7 +103,7 @@ services:
       BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-admin@vega.local}
       BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?define BOOTSTRAP_ADMIN_PASSWORD en las variables del stack de Portainer}
     ports:
-      - '${VEGA_API_PORT:-18000}:3000'
+      - '${VEGA_API_PORT:-20701}:3000'
     volumes:
       - vega-prod-contexts:/app/contexts
       - vega-prod-data:/app/data
@@ -140,7 +140,7 @@ services:
     depends_on:
       - api
     ports:
-      - '${VEGA_WEB_PORT:-18080}:8080'
+      - '${VEGA_WEB_PORT:-20702}:8080'
     healthcheck:
       test: ['CMD', 'wget', '-q', '--spider', 'http://127.0.0.1:8080/health.txt']
       interval: 30s
