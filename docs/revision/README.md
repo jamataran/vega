@@ -4,7 +4,8 @@ Un hito se da por cerrado cuando alguien lo comprueba **ejecutándolo**, no cuan
 que sí. Lo de esta carpeta son esas comprobaciones: qué se ejecutó, qué salió, qué estaba mal en la
 documentación y qué queda abierto antes de empezar lo siguiente.
 
-Se diferencian de [`analisis/`](../analisis/) en la dirección: allí se diseña lo que todavía no
+Se diferencian de los documentos de diseño ([`motor-ia.md`](../motor-ia.md),
+[`diseno-motor-ia.md`](../diseno-motor-ia.md)) en la dirección: allí se diseña lo que todavía no
 existe; aquí se audita lo que ya está.
 
 | Documento | Cuándo | Qué revisa |
