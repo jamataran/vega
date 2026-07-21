@@ -303,6 +303,13 @@ export const Correction = z.object({
   publishedAt: IsoDate.nullable(),
   /** `true` si se publicó sin pasar por el profesor (modo autónomo). */
   publishedAutomatically: z.boolean(),
+  /**
+   * Qué no salió del todo bien al publicar, en español y para el profesor.
+   * Publicar son dos operaciones —nota y fichero de feedback— y hay conectores
+   * que no admiten la segunda: eso no es un fallo, pero hay que decirlo en vez
+   * de dejar creer que el alumno ha recibido el PDF.
+   */
+  publishNotice: z.string().nullable(),
 });
 export type Correction = z.infer<typeof Correction>;
 
@@ -392,6 +399,13 @@ export const BatchRun = z.object({
   submissionsFailed: z.number().int().min(0),
   /** Cuántas se publicaron solas por estar en modo autónomo. */
   submissionsAutoPublished: z.number().int().min(0),
+  /**
+   * Entregas nuevas traídas del LMS en este lote. Distingue «no había nada que
+   * corregir» de «no ha entrado nada», que sin este contador son el mismo cero.
+   */
+  submissionsIngested: z.number().int().min(0),
+  /** Actividades cuya ingesta falló entera: LMS caído, token o configuración. */
+  activitiesFailed: z.number().int().min(0),
   usage: UsageMetrics,
 });
 export type BatchRun = z.infer<typeof BatchRun>;

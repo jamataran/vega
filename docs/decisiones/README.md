@@ -25,3 +25,5 @@ tomó, **la decisión** y **las consecuencias** — incluidas las malas.
 | [0008](0008-separar-puntos-ia-y-profesor.md) | Separar `aiPoints` de `teacherPoints` | Aceptado |
 | [0009](0009-interfaz-lms-siete-operaciones.md) | La interfaz `LmsConnector` crece a siete operaciones | Aceptado |
 | [0010](0010-credencial-moodle-por-usuario.md) | La credencial de Moodle es de cada profesor | Aceptado |
+| [0011](0011-cuatro-operaciones-y-verificacion-mecanica.md) | `AiProvider` crece a cuatro operaciones; la verificación mecánica no es una de ellas | Aceptado |
+| [0012](0012-ingesta-almacen-y-publicacion-en-dos-fases.md) | Ingesta idempotente por `remoteId`, almacén en ficheros y publicación en dos fases | Aceptado |

@@ -182,6 +182,7 @@ export function toCorrection(
     validatedAt: isoOrNull(row.validatedAt),
     publishedAt: isoOrNull(row.publishedAt),
     publishedAutomatically: row.publishedAutomatically,
+    publishNotice: row.publishNotice,
   };
 }
 
@@ -206,6 +207,8 @@ export function toBatchRun(row: Row<typeof schema.batchRuns>): BatchRun {
     submissionsProcessed: row.submissionsProcessed,
     submissionsFailed: row.submissionsFailed,
     submissionsAutoPublished: row.submissionsAutoPublished,
+    submissionsIngested: row.submissionsIngested,
+    activitiesFailed: row.activitiesFailed,
     usage: toUsage(row),
   };
 }

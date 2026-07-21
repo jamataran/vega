@@ -4,6 +4,7 @@ import type { BatchRun } from '@vega/shared';
 import { api } from '@/lib/api';
 import { queryKeys } from '@/lib/queryKeys';
 import { notify } from '@/lib/notify';
+import { useAuth } from '@/lib/auth';
 import { formatDateTime, formatEurosFromCents, formatInteger, formatRelativeTime } from '@/lib/format';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -80,7 +81,8 @@ function RunCard({ run }: { run: BatchRun }) {
           </span>
         </div>
 
-        <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4">
+        <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-5">
+          <Figure label="Ingeridas" value={formatInteger(run.submissionsIngested)} />
           <Figure label="Procesadas" value={formatInteger(run.submissionsProcessed)} />
           <Figure
             label="Autopublicadas"
@@ -90,6 +92,14 @@ function RunCard({ run }: { run: BatchRun }) {
           <Figure label="Fallidas" value={formatInteger(run.submissionsFailed)} />
           <Figure label="Coste" value={formatEurosFromCents(run.usage.costCents)} />
         </div>
+
+        {run.activitiesFailed > 0 ? (
+          <p className="mt-3 text-ui text-muted-foreground">
+            {run.activitiesFailed === 1
+              ? 'No se han podido leer las entregas de una actividad. Revisa tu conexión con Moodle en Ajustes.'
+              : `No se han podido leer las entregas de ${formatInteger(run.activitiesFailed)} actividades. Revisa tu conexión con Moodle en Ajustes.`}
+          </p>
+        ) : null}
 
         {run.submissionsAutoPublished > 0 ? (
           <p className="mt-3 text-ui text-muted-foreground">
@@ -105,6 +115,11 @@ function RunCard({ run }: { run: BatchRun }) {
 
 export function ProcessesPage() {
   const queryClient = useQueryClient();
+  const { user } = useAuth();
+  // Forzar el proceso gasta dinero real en cuanto el proveedor deja de ser el
+  // simulado, así que el API lo restringe a administración. El botón se esconde
+  // en vez de fallar con un 403 después de pulsarlo.
+  const canTrigger = user?.role === 'admin';
 
   const query = useQuery({
     queryKey: queryKeys.batchRuns,
@@ -117,13 +132,18 @@ export function ProcessesPage() {
       void queryClient.invalidateQueries({ queryKey: queryKeys.batchRuns });
       void queryClient.invalidateQueries({ queryKey: queryKeys.queueRoot });
       void queryClient.invalidateQueries({ queryKey: queryKeys.overview });
+      const ingested = response.run.submissionsIngested;
+      const traidas =
+        ingested === 0
+          ? ''
+          : ` ${formatInteger(ingested)} ${ingested === 1 ? 'entrega nueva' : 'entregas nuevas'} desde Moodle.`;
       notify.success(
         'Proceso lanzado',
         response.queued === 0
-          ? 'No había entregas pendientes.'
+          ? `No había entregas pendientes.${traidas}`
           : `${formatInteger(response.queued)} ${
               response.queued === 1 ? 'entrega procesada' : 'entregas procesadas'
-            }.`,
+            }.${traidas}`,
       );
     },
     onError: (error) => notify.error('No se ha podido lanzar el proceso', error),
@@ -137,14 +157,12 @@ export function ProcessesPage() {
         eyebrow="Corrección"
         title="Procesos"
         actions={
-          <Button
-            variant="default"
-            loading={trigger.isPending}
-            onClick={() => trigger.mutate()}
-          >
-            <Play aria-hidden="true" />
-            Forzar proceso
-          </Button>
+          canTrigger ? (
+            <Button variant="default" loading={trigger.isPending} onClick={() => trigger.mutate()}>
+              <Play aria-hidden="true" />
+              Forzar proceso
+            </Button>
+          ) : null
         }
       >
         Cada pasada de corrección sobre las entregas pendientes de las actividades activas.
@@ -166,15 +184,17 @@ export function ProcessesPage() {
       ) : runs.length === 0 ? (
         <EmptyState
           title="Todavía no se ha ejecutado ningún proceso"
-          description="El planificador los lanza cada cierto tiempo. También puedes forzar uno ahora."
+          description={
+            canTrigger
+              ? 'El planificador los lanza cada cierto tiempo. También puedes forzar uno ahora.'
+              : 'El planificador los lanza cada cierto tiempo. Forzar uno es cosa de administración.'
+          }
           action={
-            <Button
-              variant="default"
-              loading={trigger.isPending}
-              onClick={() => trigger.mutate()}
-            >
-              Forzar proceso
-            </Button>
+            canTrigger ? (
+              <Button variant="default" loading={trigger.isPending} onClick={() => trigger.mutate()}>
+                Forzar proceso
+              </Button>
+            ) : null
           }
         />
       ) : (

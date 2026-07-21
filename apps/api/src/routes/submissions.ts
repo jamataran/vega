@@ -18,6 +18,8 @@ import { schema } from '../db/client.js';
 import { toCorrection, toIso, toSubmission, toTranscription } from '../db/mappers.js';
 import { buildFeedbackPdf, feedbackFilename } from '../feedback/pdf.js';
 import { badRequest, conflict, notFound, parseOrThrow, unprocessable } from '../http/errors.js';
+import { asHttpError, connectorForUser } from '../lms/factory.js';
+import { publishToLms, recordPublication } from '../publish/publish.js';
 import { requireActivity } from './activities.js';
 import { visibleActivityIds } from '../auth/scope.js';
 import type { TokenPayload } from '../auth/plugin.js';
@@ -286,40 +288,104 @@ export async function submissionRoutes(app: FastifyInstance, ctx: AppContext): P
     },
   );
 
-  // ── Publicar en Moodle ────────────────────────────────────────────────────
+  // ── Publicar en el LMS ────────────────────────────────────────────────────
   app.post<{ Params: { id: string } }>(
     routes.publish(':id'),
     { preHandler: app.authenticate },
     async (request): Promise<CorrectionResponse> => {
       const submissionId = request.params.id;
+      const user = currentUser(request);
 
-      const [submission] = await db
+      const [submissionRow] = await db
         .select()
         .from(schema.submissions)
         .where(eq(schema.submissions.id, submissionId))
         .limit(1);
-      if (!submission) throw notFound('No existe esa entrega.');
+      if (!submissionRow) throw notFound('No existe esa entrega.');
 
       // La regla de oro del producto: nada llega al alumno sin validación
       // previa. La excepción son los modos de autonomía, y ésos publican solos
       // desde el lote, no por esta ruta.
-      if (submission.status !== 'validated') {
+      //
+      // `error` también entra: una publicación que falló a mitad deja ahí la
+      // entrega, y reintentar no debe obligar al profesor a validar otra vez
+      // algo que ya validó (HU-17, RN-7).
+      if (submissionRow.status !== 'validated' && submissionRow.status !== 'error') {
         throw conflict('Sólo se pueden publicar entregas que el profesor haya validado.');
       }
 
-      const now = new Date();
-      // TODO(vega): aquí irá la llamada real al conector LMS (publishGrade +
-      // publishFeedbackFile). Con LMS_CONNECTOR=mock nos limitamos a marcarla.
-      await db
-        .update(schema.corrections)
-        .set({ publishedAt: now, publishedAutomatically: false })
-        .where(eq(schema.corrections.submissionId, submissionId));
-      await db
-        .update(schema.submissions)
-        .set({ status: 'published', updatedAt: now })
-        .where(eq(schema.submissions.id, submissionId));
+      const detail = await loadDetail(ctx, submissionId, user);
+      const correction = detail.correction;
+      if (!correction) throw notFound('Esta entrega todavía no tiene corrección.');
+      if (correction.validatedAt === null) {
+        throw conflict('Sólo se pueden publicar entregas que el profesor haya validado.');
+      }
 
-      return loadCorrectionResponse(ctx, submissionId, currentUser(request));
+      const [correctionRow] = await db
+        .select()
+        .from(schema.corrections)
+        .where(eq(schema.corrections.id, correction.id))
+        .limit(1);
+      if (!correctionRow) throw notFound('Esta entrega todavía no tiene corrección.');
+
+      // El `remoteId` es la identidad de la entrega en el LMS y lo dio la
+      // ingesta. Sin él —entregas sembradas, o anteriores a que hubiera
+      // ingesta— no hay a qué publicar: decirlo es mejor que fingir un éxito.
+      if (submissionRow.remoteId === null) {
+        throw conflict(
+          'Esta entrega no viene del LMS (no tiene referencia remota), así que no hay dónde ' +
+            'publicarla. Ocurre con los datos de ejemplo y con las entregas anteriores a la ingesta.',
+        );
+      }
+
+      // Se publica con la credencial de quien importó la actividad, que es la
+      // misma con la que se ingirió. Publicar con la del profesor que pulsa el
+      // botón fallaría en cuanto dos docentes comparten un curso y sólo uno
+      // tiene permiso de calificación en Moodle.
+      const [activityRow] = await db
+        .select({ importedBy: schema.activities.importedBy, moodleRef: schema.activities.moodleRef })
+        .from(schema.activities)
+        .where(eq(schema.activities.id, submissionRow.activityId))
+        .limit(1);
+
+      const connector = await connectorForUser(ctx, activityRow?.importedBy ?? user.sub);
+
+      const ref = {
+        activity: {
+          slug: detail.activity.slug,
+          lmsRef: activityRow?.moodleRef ?? null,
+          kind: detail.activity.kind,
+        },
+        studentRef: detail.submission.studentRef,
+        remoteId: submissionRow.remoteId,
+      };
+
+      let outcome;
+      try {
+        outcome = await publishToLms(connector, ref, {
+          submission: detail.submission,
+          activity: detail.activity,
+          correction,
+          alreadyPublished: {
+            grade: correctionRow.gradePublishedAt !== null,
+            file: correctionRow.feedbackFilePublishedAt !== null,
+          },
+          transcription: detail.transcription,
+        });
+      } catch (error) {
+        // La nota no ha llegado: nada ha cambiado en el LMS. La entrega queda
+        // en `error` con el motivo y se puede reintentar sin volver a validar.
+        const message = asHttpError(error).message;
+        await db
+          .update(schema.submissions)
+          .set({ status: 'error', errorMessage: message.slice(0, 500), updatedAt: new Date() })
+          .where(eq(schema.submissions.id, submissionId));
+        throw asHttpError(error);
+      }
+
+      await recordPublication(ctx, correctionRow, submissionId, outcome);
+
+      return loadCorrectionResponse(ctx, submissionId, user);
     },
   );
 

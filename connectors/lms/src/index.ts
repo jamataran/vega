@@ -10,7 +10,7 @@ registerConnector('mock', createMockConnector);
 
 export * from './types.js';
 export * from './connector.js';
-export { MockLmsConnector, createMockConnector } from './mock.js';
+export { MockLmsConnector, createMockConnector, simulatedPdf } from './mock.js';
 export type {
   MockLmsConnectorOptions,
   PublishedFile,

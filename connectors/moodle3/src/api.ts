@@ -39,6 +39,12 @@ export const WS_FUNCTIONS = {
   getForums: 'mod_forum_get_forums_by_courses',
   /** Debates de un foro; de ahí cuelgan los mensajes de cada alumno. */
   getForumDiscussions: 'mod_forum_get_forum_discussions_paginated',
+  /**
+   * Mensajes de un debate. El listado de debates trae el primer mensaje, pero
+   * no las respuestas, y sin ellas no se puede saber si la pregunta que abre el
+   * debate sigue sin contestar, que es lo único a lo que Vega responde.
+   */
+  getDiscussionPosts: 'mod_forum_get_forum_discussion_posts',
   saveGrade: 'mod_assign_save_grade',
 } as const;
 
@@ -160,6 +166,79 @@ export const GetForumsResponse = z.array(
   }),
 );
 export type GetForumsResponse = z.infer<typeof GetForumsResponse>;
+
+/**
+ * Un debate tal y como lo devuelve
+ * `mod_forum_get_forum_discussions_paginated`. Moodle no entrega aquí el
+ * debate «pelado»: entrega el primer mensaje con los datos del debate pegados
+ * encima, de ahí que convivan `id` (el del mensaje) y `discussion` (el del
+ * debate). Sólo se declaran los campos que Vega mira; el resto lo descarta Zod.
+ *
+ * TODO(vega): sin verificar contra Moodle real — falta confirmar que `id` es el
+ * identificador del primer mensaje y `discussion` el del debate, y no al revés.
+ * Si en alguna versión `discussion` no llegara, el conector usa `id` como
+ * identificador del debate y pediría los mensajes del debate equivocado.
+ */
+export const MoodleForumDiscussion = z.object({
+  id: z.number(),
+  discussion: z.number().optional(),
+  name: z.string().optional(),
+  subject: z.string().optional(),
+  message: z.string().optional(),
+  userid: z.number().optional(),
+  created: z.number().optional(),
+  modified: z.number().optional(),
+  numreplies: z.number().optional(),
+});
+export type MoodleForumDiscussion = z.infer<typeof MoodleForumDiscussion>;
+
+/**
+ * TODO(vega): sin verificar contra Moodle real — falta comprobar si esta
+ * función devuelve además un total de debates con el que decidir cuándo parar.
+ * Mientras no se sepa, el conector pagina hasta que una página venga incompleta
+ * y se protege con un tope de páginas.
+ */
+export const GetForumDiscussionsResponse = z.object({
+  discussions: z.array(MoodleForumDiscussion),
+  warnings: z.array(z.object({ item: z.string().optional(), message: z.string() })).optional(),
+});
+export type GetForumDiscussionsResponse = z.infer<typeof GetForumDiscussionsResponse>;
+
+/**
+ * Un mensaje de un debate. `id` y `userid` son imprescindibles —sin ellos no
+ * hay ni referencia estable ni autor al que atribuir la intervención—, y
+ * `created` marca cuándo se escribió. El resto se declara opcional porque la
+ * estructura varía entre versiones y perder un foro entero por un campo
+ * decorativo que falta sería un mal negocio.
+ *
+ * `message` viaja en HTML, no en texto plano: quien lo consuma tiene que
+ * limpiarlo antes de enseñárselo a nadie o de mandarlo al motor de IA.
+ */
+export const MoodleForumPost = z.object({
+  id: z.number(),
+  userid: z.number(),
+  created: z.number(),
+  discussion: z.number().optional(),
+  /** `0` en el mensaje que abre el debate; el id del mensaje al que responde en el resto. */
+  parent: z.number().optional(),
+  modified: z.number().optional(),
+  subject: z.string().optional(),
+  message: z.string().optional(),
+});
+export type MoodleForumPost = z.infer<typeof MoodleForumPost>;
+
+/**
+ * TODO(vega): sin verificar contra Moodle real — `mod_forum_get_forum_discussion_posts`
+ * quedó obsoleta en Moodle 3.8 en favor de `mod_forum_get_discussion_posts`, que
+ * devuelve los mensajes con otra forma (autor anidado y el texto en `message`
+ * dentro de otro objeto). Hay que comprobar contra qué versión se despliega y,
+ * si hace falta, elegir una u otra función según `core_webservice_get_site_info`.
+ */
+export const GetDiscussionPostsResponse = z.object({
+  posts: z.array(MoodleForumPost),
+  warnings: z.array(z.object({ item: z.string().optional(), message: z.string() })).optional(),
+});
+export type GetDiscussionPostsResponse = z.infer<typeof GetDiscussionPostsResponse>;
 
 /** Módulos de un curso. Se usa para resolver el nombre del curso del catálogo. */
 export const GetCourseContentsResponse = z.array(

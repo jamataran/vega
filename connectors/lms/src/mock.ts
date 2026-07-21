@@ -258,12 +258,14 @@ export class MockLmsConnector implements LmsConnector {
         ),
       );
     }
-    // PDF mínimo válido: suficiente para que el visor no proteste en la maqueta.
-    const body = `%PDF-1.4\n% Entrega simulada de ${ref.studentRef} en ${ref.activity.slug}\n%%EOF\n`;
+    // Un PDF **de verdad**, no un fichero con cabecera de PDF. La diferencia
+    // importa: la ingesta cuenta las páginas al descargar y marca la entrega en
+    // `error` si no puede abrir el fichero, así que un mock inválido haría
+    // fallar el camino feliz y nadie vería el circuito completo.
     return Promise.resolve({
       filename: `${ref.activity.slug}-${ref.studentRef}.pdf`,
       mediaType: 'application/pdf',
-      bytes: new TextEncoder().encode(body),
+      bytes: simulatedPdf(3, `${ref.activity.slug} · ${ref.studentRef}`),
     });
   }
 
@@ -276,6 +278,57 @@ export class MockLmsConnector implements LmsConnector {
     this.#files.push({ ref, file });
     return Promise.resolve();
   }
+}
+
+/**
+ * PDF sintético válido, escrito a mano.
+ *
+ * Se construye byte a byte en vez de usar una librería porque `connectors/lms`
+ * es la frontera con el exterior y no debe arrastrar dependencias: `pdf-lib`
+ * vive en `apps/api`, que es quien genera documentos de verdad. Aquí basta con
+ * un documento que un lector de PDF acepte y del que se puedan contar páginas.
+ */
+export function simulatedPdf(pageCount: number, label: string): Uint8Array {
+  const pages = Math.max(1, pageCount);
+  const encoder = new TextEncoder();
+
+  const objects: string[] = [];
+  // 1: catálogo · 2: árbol de páginas · 3..: una página y su contenido.
+  const pageIds = Array.from({ length: pages }, (_unused, index) => 3 + index * 2);
+
+  objects.push('<< /Type /Catalog /Pages 2 0 R >>');
+  objects.push(
+    `<< /Type /Pages /Count ${pages} /Kids [${pageIds.map((id) => `${id} 0 R`).join(' ')}] >>`,
+  );
+
+  for (const [index, id] of pageIds.entries()) {
+    const text = `Entrega simulada · ${label} · pagina ${index + 1} de ${pages}`
+      .replace(/\\/g, '')
+      .replace(/[()]/g, '');
+    const stream = `BT /F1 12 Tf 60 760 Td (${text}) Tj ET`;
+    objects.push(
+      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] ` +
+        `/Resources << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >> ` +
+        `/Contents ${id + 1} 0 R >>`,
+    );
+    objects.push(`<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`);
+  }
+
+  let body = '%PDF-1.4\n';
+  const offsets: number[] = [];
+  for (const [index, object] of objects.entries()) {
+    offsets.push(body.length);
+    body += `${index + 1} 0 obj\n${object}\nendobj\n`;
+  }
+
+  const xrefStart = body.length;
+  body += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  for (const offset of offsets) {
+    body += `${String(offset).padStart(10, '0')} 00000 n \n`;
+  }
+  body += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF\n`;
+
+  return encoder.encode(body);
 }
 
 /** Convención del catálogo simulado: los foros llevan `foro`/`forum` en el slug. */

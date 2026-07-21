@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { ChevronLeft, Lock } from 'lucide-react';
+import { ChevronLeft, Info, Lock } from 'lucide-react';
 import { ACTIVITY_KIND_LABEL, hasStudentFile } from '@vega/shared';
 import { api } from '@/lib/api';
 import { queryKeys } from '@/lib/queryKeys';
@@ -240,6 +240,18 @@ export function SubmissionPage() {
           <p className="flex items-center justify-center gap-2 border-t border-border bg-muted px-4 py-2 text-ui text-muted-foreground">
             <Lock className="size-4 shrink-0" aria-hidden="true" />
             Publicada en Moodle: esta corrección ya no se puede modificar.
+          </p>
+        ) : null}
+
+        {/*
+          Publicar son dos operaciones —la nota y el PDF de corrección— y hay
+          conectores que no admiten la segunda. No es un fallo, pero callarlo
+          dejaría creer que el alumno ha recibido un PDF que nunca salió.
+        */}
+        {detail.correction?.publishNotice ? (
+          <p className="flex items-start justify-center gap-2 border-t border-border bg-muted px-4 py-2 text-ui text-muted-foreground">
+            <Info className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+            {detail.correction.publishNotice}
           </p>
         ) : null}
       </header>

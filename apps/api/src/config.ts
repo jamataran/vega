@@ -23,6 +23,14 @@ const EnvSchema = z.object({
   ANTHROPIC_API_KEY: z.string().optional(),
   AI_MODEL_TRANSCRIPTION: z.string().default('claude-opus-4-8'),
   AI_MODEL_GRADING: z.string().default('claude-opus-4-8'),
+  /**
+   * Dónde se guardan los ficheros que los alumnos entregan. Es un directorio
+   * del contenedor —un volumen en el compose—, no un almacén de objetos: para
+   * una academia con decenas de entregas por noche, S3 sería una dependencia de
+   * infraestructura sin contrapartida. La frontera está en `storage/files.ts`,
+   * así que cambiarlo el día que haga falta no toca ni la ingesta ni el motor.
+   */
+  STORAGE_ROOT: z.string().default('./var/storage'),
   LMS_CONNECTOR: z.enum(['mock', 'filesystem', 'moodle3']).default('mock'),
   LMS_FILESYSTEM_ROOT: z.string().optional(),
   MOODLE_BASE_URL: z.string().optional(),

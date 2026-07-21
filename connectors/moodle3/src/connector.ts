@@ -15,6 +15,8 @@ import type {
 } from '@vega/connector-lms';
 import {
   GetAssignmentsResponse,
+  GetDiscussionPostsResponse,
+  GetForumDiscussionsResponse,
   GetForumsResponse,
   GetSiteInfoResponse,
   GetSubmissionsResponse,
@@ -22,7 +24,7 @@ import {
   MoodleClient,
   WS_FUNCTIONS,
 } from './api.js';
-import type { MoodleSubmission } from './api.js';
+import type { MoodleForumDiscussion, MoodleForumPost, MoodleSubmission } from './api.js';
 
 /**
  * Conector para Moodle 3.x vía web services REST.
@@ -49,6 +51,20 @@ export type Moodle3Config = z.infer<typeof Moodle3Config>;
 /** Área de ficheros donde Moodle guarda lo que sube el alumno. */
 const SUBMISSION_FILE_AREA = 'submission_files';
 
+/**
+ * Tamaño de página al recorrer los debates de un foro. Cincuenta es un
+ * compromiso: bastante alto para que la mayoría de foros quepan en una sola
+ * llamada y bastante bajo para que una respuesta no ocupe megas de HTML.
+ */
+const DISCUSSIONS_PER_PAGE = 50;
+
+/**
+ * Tope de páginas de debates. No está para limitar el foro, sino para que una
+ * versión de Moodle que ignore `page` y devuelva siempre la primera página no
+ * deje el proceso girando para siempre.
+ */
+const MAX_DISCUSSION_PAGES = 20;
+
 /** Las entregas antes que los foros: es el orden en que el profesor los busca. */
 const KIND_ORDER: Readonly<Record<ActivityKind, number>> = { assignment: 0, forum: 1 };
 
@@ -65,8 +81,13 @@ export class Moodle3Connector implements LmsConnector {
   readonly #fileUrls = new Map<string, string>();
   #siteInfo: Promise<GetSiteInfoResponse> | undefined;
 
-  constructor(config: Moodle3Config) {
-    this.#client = new MoodleClient({ baseUrl: config.baseUrl, token: config.token });
+  /**
+   * `fetchImpl` sólo lo usan las pruebas. Sin él no habría forma de ejercitar
+   * el conector entero —que es donde vive la lógica de producto— sin un Moodle
+   * delante, y justamente de ese Moodle es de lo que no se dispone.
+   */
+  constructor(config: Moodle3Config, fetchImpl?: typeof fetch) {
+    this.#client = new MoodleClient({ baseUrl: config.baseUrl, token: config.token, fetchImpl });
   }
 
   /**
@@ -347,20 +368,16 @@ export class Moodle3Connector implements LmsConnector {
   }
 
   /**
+   * Lo que hay pendiente de corregir en una actividad. Son dos caminos que no
+   * se parecen: una tarea entrega ficheros, uno por alumno, y un foro entrega
+   * texto, como mucho uno por debate (ver `#listForumQuestions`).
+   *
    * TODO(vega): sin verificar contra Moodle real — falta comprobar el filtro por
    * `status` (sólo queremos `submitted`), la paginación cuando hay muchos
    * alumnos, y si `plugins` llega siempre o hay que pedirlo aparte.
    */
   async listSubmissions(activityRef: ActivityRef): Promise<RemoteSubmission[]> {
-    // TODO(vega): sin verificar contra Moodle real — falta el camino del foro:
-    // `mod_forum_get_forum_discussions_paginated` más los posts de cada debate,
-    // concatenados por alumno en `textContent`.
-    if (activityRef.kind === 'forum') {
-      throw new Error(
-        `Todavía no se leen las intervenciones de un foro de Moodle 3 ("${activityRef.slug}"). ` +
-          'Usa el conector mock o filesystem para probar el camino de foros.',
-      );
-    }
+    if (activityRef.kind === 'forum') return this.#listForumQuestions(activityRef);
 
     const assignmentId = assignmentIdOf(activityRef);
 
@@ -396,12 +413,104 @@ export class Moodle3Connector implements LmsConnector {
   }
 
   /**
+   * Las preguntas de un foro que están esperando respuesta.
+   *
+   * REGLA DE PRODUCTO: en un foro Vega contesta **sólo a la primera pregunta no
+   * respondida** de cada debate. De ahí salen las dos decisiones que gobiernan
+   * este método:
+   *
+   *  - de cada debate sale **como mucho una** intervención, la del mensaje que
+   *    lo abre (`parent === 0`), porque es ahí donde está la pregunta; los
+   *    mensajes que cuelgan de él son conversación, no preguntas nuevas;
+   *  - si el debate ya tiene una respuesta de alguien distinto de quien lo
+   *    abrió, se omite entero. Alguien —otro alumno o el propio profesor— ya ha
+   *    contestado, y meter encima una respuesta de la IA no ayudaría a nadie:
+   *    duplicaría lo ya dicho o lo contradiría en público.
+   *
+   * Que el autor se responda a sí mismo no cuenta como respuesta: matizar la
+   * propia pregunta es justo lo contrario de haberla resuelto.
+   */
+  async #listForumQuestions(activityRef: ActivityRef): Promise<RemoteSubmission[]> {
+    const forumId = forumIdOf(activityRef);
+    const discussions = await this.#listDiscussions(forumId);
+
+    const submissions: RemoteSubmission[] = [];
+    // Un debate detrás de otro y no en paralelo: son foros de un curso, no hay
+    // prisa, y un profesor con cincuenta debates no debería provocarle a su
+    // Moodle cincuenta peticiones simultáneas.
+    for (const discussion of discussions) {
+      const discussionId = discussion.discussion ?? discussion.id;
+      const { posts } = await this.#client.call(
+        WS_FUNCTIONS.getDiscussionPosts,
+        { discussionid: discussionId },
+        GetDiscussionPostsResponse,
+      );
+
+      const question = pendingQuestionOf(posts);
+      if (question === null) continue;
+
+      submissions.push(forumSubmission(activityRef, forumId, discussionId, question));
+    }
+    return submissions;
+  }
+
+  /**
+   * Todos los debates de un foro, página a página.
+   *
+   * Se ordena por `timemodified` ascendente para que la paginación sea estable:
+   * con el orden por defecto —el debate tocado más recientemente primero— un
+   * mensaje nuevo escrito a mitad del recorrido reordena la lista y hace que un
+   * debate salga dos veces o ninguna.
+   *
+   * TODO(vega): sin verificar contra Moodle real — falta comprobar que `page`
+   * empieza en 0 y que Moodle respeta `perpage`; si devolviera siempre el
+   * tamaño de página por defecto del sitio, el corte de «página incompleta»
+   * nunca se cumpliría y el recorrido pararía en el tope de páginas. Falta
+   * también ver qué hace con los debates fijados arriba, que algunas versiones
+   * repiten en todas las páginas.
+   */
+  async #listDiscussions(forumId: number): Promise<MoodleForumDiscussion[]> {
+    const all: MoodleForumDiscussion[] = [];
+
+    for (let page = 0; page < MAX_DISCUSSION_PAGES; page += 1) {
+      const { discussions } = await this.#client.call(
+        WS_FUNCTIONS.getForumDiscussions,
+        {
+          forumid: forumId,
+          page,
+          perpage: DISCUSSIONS_PER_PAGE,
+          sortby: 'timemodified',
+          sortdirection: 'ASC',
+        },
+        GetForumDiscussionsResponse,
+      );
+
+      all.push(...discussions);
+      // Una página incompleta es la última: Moodle no dice cuántos debates hay
+      // en total, así que es la única señal de fin que se puede leer.
+      if (discussions.length < DISCUSSIONS_PER_PAGE) break;
+    }
+
+    return all;
+  }
+
+  /**
    * TODO(vega): sin verificar contra Moodle real — la descarga por
    * `pluginfile.php` con `?token=` funciona en la documentación, pero hay que
    * comprobar el comportamiento con `forcedownload`, con ficheros grandes y con
    * instalaciones tras un proxy que reescribe URLs.
    */
   async download(ref: SubmissionRef): Promise<DownloadedFile> {
+    // En un foro no hay nada que descargar, y el mensaje tiene que decirlo así:
+    // el fallo genérico de más abajo («no hay URL de descarga») mandaría a
+    // llamar antes a listSubmissions(), que en un foro no arreglaría nada.
+    if (refersToForum(ref.activity)) {
+      throw new Error(
+        `La intervención "${ref.remoteId}" es un mensaje del foro "${ref.activity.slug}" y en un foro no hay fichero que descargar. ` +
+          'El texto del alumno viaja en textContent de listSubmissions().',
+      );
+    }
+
     const fileUrl = this.#fileUrls.get(ref.remoteId);
     if (fileUrl === undefined) {
       throw new Error(
@@ -553,6 +662,134 @@ function assignmentIdOf(activityRef: ActivityRef): number {
 
   throw new Error(
     `La actividad "${activityRef.slug}" no tiene asignada una tarea de Moodle (lmsRef vacío o con formato desconocido: "${lmsRef}").`,
+  );
+}
+
+/** El equivalente de `assignmentIdOf` para los foros, con la misma tolerancia. */
+function forumIdOf(activityRef: ActivityRef): number {
+  const lmsRef = activityRef.lmsRef ?? '';
+
+  const parsed = parseMoodleRef(lmsRef);
+  if (parsed !== null) {
+    if (parsed.kind !== 'forum') {
+      throw new Error(
+        `La actividad "${activityRef.slug}" apunta a una tarea de Moodle ("${lmsRef}"), no a un foro.`,
+      );
+    }
+    return parsed.id;
+  }
+
+  // Compatibilidad con las actividades dadas de alta antes del prefijo, que
+  // guardaron el id pelado ("42"). Ver `assignmentIdOf`.
+  if (/^\d+$/.test(lmsRef)) return Number(lmsRef);
+
+  throw new Error(
+    `La actividad "${activityRef.slug}" no tiene asignado un foro de Moodle (lmsRef vacío o con formato desconocido: "${lmsRef}").`,
+  );
+}
+
+/**
+ * Si la actividad es un foro. `kind` es opcional en `ActivityRef`, así que
+ * cuando no viene se mira el `lmsRef`: un `forum-42` es un foro aunque nadie lo
+ * haya dicho, y el mensaje de error acierta más si se tiene esto en cuenta.
+ */
+function refersToForum(activityRef: ActivityRef): boolean {
+  if (activityRef.kind !== undefined) return activityRef.kind === 'forum';
+  return parseMoodleRef(activityRef.lmsRef ?? '')?.kind === 'forum';
+}
+
+/**
+ * El mensaje que abre el debate, si sigue sin respuesta de nadie más. `null`
+ * cuando el debate ya está atendido o cuando no hay mensaje raíz que leer.
+ * Ver la regla de producto en `#listForumQuestions`.
+ */
+function pendingQuestionOf(posts: readonly MoodleForumPost[]): MoodleForumPost | null {
+  // El mensaje raíz es el único sin padre. No se toma el primero del array
+  // porque Moodle no promete ningún orden concreto en `posts`.
+  const root = posts.find((post) => (post.parent ?? 0) === 0);
+  if (root === undefined) return null;
+
+  const answered = posts.some((post) => post.id !== root.id && post.userid !== root.userid);
+  return answered ? null : root;
+}
+
+/** La pregunta pendiente de un debate, ya en la forma que entiende Vega. */
+function forumSubmission(
+  activityRef: ActivityRef,
+  forumId: number,
+  discussionId: number,
+  post: MoodleForumPost,
+): RemoteSubmission {
+  const subject = htmlToPlainText(post.subject ?? '');
+  const body = htmlToPlainText(post.message ?? '');
+  // El asunto es parte de la pregunta —muchas veces es la pregunta entera— y
+  // sin él el motor corrige un texto al que le falta el enunciado.
+  const textContent = subject === '' ? body : `${subject}\n\n${body}`;
+
+  return {
+    ref: {
+      activity: activityRef,
+      // Nunca el nombre real del alumno: el id numérico de Moodle basta para
+      // publicar la respuesta y no identifica a nadie fuera de Moodle.
+      studentRef: `moodle-${post.userid}`,
+      // Foro, debate y mensaje: los tres son ids de Moodle y no cambian, así
+      // que la misma pregunta conserva su referencia entre ejecuciones y no se
+      // importa dos veces.
+      remoteId: `${forumId}:${discussionId}:${post.id}`,
+    },
+    // En un foro el alumno no sube nada: lo que entrega es el texto.
+    filename: null,
+    submittedAt: new Date(post.created * 1000).toISOString(),
+    sizeBytes: new TextEncoder().encode(textContent).length,
+    mediaType: 'text/plain',
+    textContent,
+  };
+}
+
+/** Entidades HTML que aparecen en un mensaje de foro escrito con el editor de Moodle. */
+const HTML_ENTITIES: readonly (readonly [RegExp, string])[] = [
+  [/&nbsp;/gi, ' '],
+  [/&lt;/gi, '<'],
+  [/&gt;/gi, '>'],
+  [/&quot;/gi, '"'],
+  [/&#0*39;/g, "'"],
+  // `&amp;` va la última a propósito: decodificarla antes convertiría un
+  // `&amp;lt;` escrito literalmente por el alumno en un `<` que no puso él.
+  [/&amp;/gi, '&'],
+];
+
+/**
+ * El mensaje de un foro de Moodle viaja en HTML, y lo que necesitan tanto el
+ * motor de IA como el profesor es el texto. Convertir aquí —y no más adelante—
+ * evita que las etiquetas se cuelen en el prompt, donde gastan contexto y
+ * confunden al modelo, o en la pantalla, donde se leerían en crudo.
+ *
+ * No pretende ser un renderizador: conserva la separación en párrafos, que es
+ * lo único de la estructura que aporta significado a un texto de foro, y tira
+ * el resto.
+ */
+export function htmlToPlainText(html: string): string {
+  const text = HTML_ENTITIES.reduce(
+    (accumulated, [pattern, replacement]) => accumulated.replace(pattern, replacement),
+    html
+      // El contenido de un `<script>` o un `<style>` no es texto del alumno:
+      // quitando sólo las etiquetas quedaría el código suelto en medio.
+      .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '')
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<\/p\s*>/gi, '\n\n')
+      .replace(/<[^>]*>/g, ''),
+  );
+
+  return (
+    text
+      .split('\n')
+      // El HTML se escribe con sangrías y saltos que no significan nada: se
+      // colapsan dentro de cada línea, pero sin tocar los saltos que sí vienen
+      // de los párrafos y los `<br>`.
+      .map((line) => line.replace(/[^\S\n]+/g, ' ').trim())
+      .join('\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim()
   );
 }
 

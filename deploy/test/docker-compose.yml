@@ -78,6 +78,10 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       AI_MODEL_TRANSCRIPTION: ${AI_MODEL_TRANSCRIPTION:-claude-opus-4-8}
       AI_MODEL_GRADING: ${AI_MODEL_GRADING:-claude-opus-4-8}
+      # Dónde se guardan los ficheros que entregan los alumnos. Cuelga de
+      # /app/data, que ya es un volumen: sin eso, cada redespliegue borraría los
+      # exámenes descargados y las correcciones se quedarían sin original.
+      STORAGE_ROOT: /app/data/entregas-recibidas
       LMS_CONNECTOR: ${LMS_CONNECTOR:-mock}
       LMS_FILESYSTEM_ROOT: /app/data/entregas
       MOODLE_BASE_URL: ${MOODLE_BASE_URL:-}

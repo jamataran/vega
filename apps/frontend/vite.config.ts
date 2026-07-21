@@ -73,7 +73,9 @@ export default defineConfig({
     allowedHosts: ['.ts.net'],
     proxy: {
       '/api': {
-        target: 'http://localhost:3000',
+        // Configurable para poder levantar una segunda copia del proyecto (otro
+        // worktree, otra rama) sin chocar con la que ya está corriendo.
+        target: process.env['VITE_PROXY_TARGET'] ?? 'http://localhost:3000',
         changeOrigin: true,
       },
     },
