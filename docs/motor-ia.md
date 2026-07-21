@@ -7,6 +7,24 @@ Este documento es el diseño técnico del hito **H4** (llamadas reales a la API)
 estado objetivo; lo que hoy existe está en «[Estado real](arquitectura.md#estado-real)» de
 `arquitectura.md`, y lo que falta está marcado como **pendiente** en cada sección.
 
+> ### Relación con `diseno-motor-ia.md`
+>
+> Hay **dos** documentos de motor en `docs/` y no son rivales; se leen en este orden:
+>
+> - **`diseno-motor-ia.md`** — el análisis del hito: alcance, dónde vive cada dato, la API key y
+>   la prueba de conexión, la revisión del modelo de datos. Su §4 quedó abierta explícitamente a
+>   que se propusiera una alternativa mejor en ahorro de tokens **antes** de implementarla.
+> - **Este documento** — la respuesta a esa invitación, desarrollada: el pipeline completo, la
+>   estrategia anti-alucinación y el coste medido por operación.
+>
+> **Dónde se contradicen, y cómo se resuelve.** `diseno-motor-ia.md` §6 fija **un solo modelo**
+> para esta iteración y aplaza el enrutado por complejidad. Este documento propone tres modelos
+> escalonados con triaje. **Manda el alcance del hito**: el escalonado es **fase 2**, y lo que
+> entra ahora es lo que no depende de él —salida estructurada, niveles de contexto con caché,
+> verificación mecánica en código y la cita literal por descuento—, que además es lo que sostiene
+> la parte anti-alucinación. La política de modelos de [§5](#5-política-de-modelos) se lee como
+> destino, no como trabajo de esta iteración.
+
 ---
 
 ## 1. Explicado para niños de cinco años
