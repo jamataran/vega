@@ -13,6 +13,7 @@ import type {
   GradeResult,
   TranscribeInput,
   TranscribeResult,
+  VerifyConnectionResult,
 } from './provider.js';
 
 /**
@@ -751,6 +752,17 @@ export class MockAiProvider implements AiProvider {
         alternativeMethod,
       };
     });
+  }
+
+  async verifyConnection(): Promise<VerifyConnectionResult> {
+    await sleep(this.#delayMs);
+    return {
+      ok: true,
+      message:
+        'Proveedor simulado: no se ha contactado con Anthropic y no se consumen tokens. Elige el proveedor «Anthropic» y configura una clave para probar la conexión real.',
+      model: this.#model,
+      usage: null,
+    };
   }
 }
 

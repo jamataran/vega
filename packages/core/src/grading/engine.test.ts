@@ -59,6 +59,9 @@ function stubProvider(
         ...grade,
       };
     },
+    async verifyConnection() {
+      return { ok: true, message: 'stub', model: 'stub-grader', usage: null };
+    },
   };
 }
 

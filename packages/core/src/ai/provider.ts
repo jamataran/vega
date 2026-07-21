@@ -137,6 +137,23 @@ export const GradeResult = z.object({
 });
 export type GradeResult = z.infer<typeof GradeResult>;
 
+// ── Prueba de conexión ──────────────────────────────────────────────────────
+
+/**
+ * Resultado de una prueba de conexión con el proveedor. El mock la responde sin
+ * red y sin coste; el proveedor real hace una llamada mínima que valida la clave
+ * y el modelo. Nunca lanza: un fallo de credencial es una respuesta legítima.
+ */
+export const VerifyConnectionResult = z.object({
+  ok: z.boolean(),
+  message: z.string(),
+  /** Modelo con el que se ha probado, o `null` si no se llegó a llamar. */
+  model: z.string().nullable(),
+  /** Consumo de la prueba. `null` cuando no hubo llamada real (mock). */
+  usage: UsageMetrics.nullable(),
+});
+export type VerifyConnectionResult = z.infer<typeof VerifyConnectionResult>;
+
 // ── Proveedor ───────────────────────────────────────────────────────────────
 
 export interface AiProvider {
@@ -144,6 +161,11 @@ export interface AiProvider {
   readonly name: string;
   transcribe(input: TranscribeInput): Promise<TranscribeResult>;
   grade(input: GradeInput): Promise<GradeResult>;
+  /**
+   * Comprueba que el proveedor responde con la configuración actual. Pensada
+   * para el botón «Probar conexión» de Ajustes; no corrige nada.
+   */
+  verifyConnection(): Promise<VerifyConnectionResult>;
 }
 
 /** Nombres de proveedor admitidos por `createAiProvider`. */

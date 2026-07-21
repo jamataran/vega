@@ -12,6 +12,7 @@ import type {
   PageSource,
   TranscribeInput,
   TranscribeResult,
+  VerifyConnectionResult,
 } from './provider.js';
 
 /**
@@ -43,6 +44,8 @@ export interface AnthropicAiProviderOptions {
   readonly apiKey?: string;
   readonly transcriptionModel?: string;
   readonly gradingModel?: string;
+  /** Tope de tokens de respuesta. Lo fija el administrador en Ajustes. */
+  readonly maxTokens?: number;
   /** Inyectable para poder testear sin red. */
   readonly client?: Anthropic;
 }
@@ -137,11 +140,15 @@ export class AnthropicAiProvider implements AiProvider {
   readonly #client: Anthropic;
   readonly #transcriptionModel: string;
   readonly #gradingModel: string;
+  readonly #maxTokens: number;
 
   constructor(options: AnthropicAiProviderOptions = {}) {
     this.#client = options.client ?? new Anthropic({ apiKey: options.apiKey });
     this.#transcriptionModel = options.transcriptionModel ?? DEFAULT_TRANSCRIPTION_MODEL;
     this.#gradingModel = options.gradingModel ?? DEFAULT_GRADING_MODEL;
+    // El tope configurado manda; `MAX_TOKENS` es sólo el valor por defecto de
+    // una instalación que aún no lo ha tocado.
+    this.#maxTokens = options.maxTokens && options.maxTokens > 0 ? options.maxTokens : MAX_TOKENS;
   }
 
   async transcribe(input: TranscribeInput): Promise<TranscribeResult> {
@@ -153,7 +160,7 @@ export class AnthropicAiProvider implements AiProvider {
     const response = await this.#client.messages.create(
       buildParams({
         model: this.#transcriptionModel,
-        max_tokens: MAX_TOKENS,
+        max_tokens: this.#maxTokens,
         system: [{ type: 'text', text: TRANSCRIPTION_SYSTEM, cache_control: { type: 'ephemeral' } }],
         messages: [
           {
@@ -215,7 +222,7 @@ export class AnthropicAiProvider implements AiProvider {
     const response = await this.#client.messages.create(
       buildParams({
         model: this.#gradingModel,
-        max_tokens: MAX_TOKENS,
+        max_tokens: this.#maxTokens,
         system: [
           { type: 'text', text: GRADING_SYSTEM },
           {
@@ -250,6 +257,35 @@ export class AnthropicAiProvider implements AiProvider {
       model: this.#gradingModel,
       usage: toUsage(this.#gradingModel, response.usage),
     };
+  }
+
+  /**
+   * Prueba mínima de conexión: un mensaje de coste ínfimo que valida clave y
+   * modelo. NO usa `buildParams` a propósito —ni thinking ni effort— porque aquí
+   * sólo se comprueba que la tubería responde, no se corrige nada. Nunca lanza:
+   * un fallo de credencial se devuelve como `ok: false` con un mensaje accionable.
+   */
+  async verifyConnection(): Promise<VerifyConnectionResult> {
+    try {
+      const response = await this.#client.messages.create({
+        model: this.#gradingModel,
+        max_tokens: 8,
+        messages: [{ role: 'user', content: 'Responde solo con: OK' }],
+      });
+      return {
+        ok: true,
+        message: `Conexión correcta con Anthropic. Modelo «${this.#gradingModel}» disponible.`,
+        model: this.#gradingModel,
+        usage: toUsage(this.#gradingModel, response.usage),
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        message: describeAnthropicError(error, this.#gradingModel),
+        model: this.#gradingModel,
+        usage: null,
+      };
+    }
   }
 }
 
@@ -325,4 +361,29 @@ function toUsage(model: string, usage: Anthropic.Usage) {
     cachedInputTokens: usage.cache_read_input_tokens ?? 0,
   };
   return { ...tokens, costCents: estimateCostCents(model, tokens) };
+}
+
+/**
+ * Traduce un fallo de la API de Anthropic a un mensaje accionable en español.
+ * Los errores del SDK son tipados: los reconocemos por su clase, no por el texto.
+ */
+function describeAnthropicError(error: unknown, model: string): string {
+  if (error instanceof Anthropic.AuthenticationError) {
+    return 'La clave de API de Anthropic no es válida. Revísala en Ajustes.';
+  }
+  if (error instanceof Anthropic.PermissionDeniedError) {
+    return `La clave no tiene permiso para usar el modelo «${model}».`;
+  }
+  if (error instanceof Anthropic.NotFoundError) {
+    return `El modelo «${model}» no existe o no está disponible para esta clave.`;
+  }
+  if (error instanceof Anthropic.RateLimitError) {
+    return 'Anthropic ha limitado las peticiones. Espera unos segundos y reinténtalo.';
+  }
+  if (error instanceof Anthropic.APIConnectionError) {
+    return 'No se ha podido contactar con la API de Anthropic. Comprueba la conexión de red.';
+  }
+  return error instanceof Error
+    ? error.message
+    : 'No se ha podido probar la conexión con Anthropic.';
 }

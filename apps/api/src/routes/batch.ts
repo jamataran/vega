@@ -9,9 +9,10 @@ import {
   type TriggerBatchResponse,
   type UsageMetrics,
 } from '@vega/shared';
-import { createAiProvider, gradeSubmission } from '@vega/core';
+import { gradeSubmission } from '@vega/core';
 import type { AiProvider, PageSource, ResolveContextInput } from '@vega/core';
 import { currentUser } from '../auth/plugin.js';
+import { aiProviderForInstall } from '../ai/factory.js';
 import { schema } from '../db/client.js';
 import { toBatchRun } from '../db/mappers.js';
 import { readContextLevel } from './contexts.js';
@@ -133,14 +134,10 @@ export async function runBatch(
   const contextCache = new Map<string, ResolveContextInput>();
 
   // Un único proveedor para todo el lote: es lo que permite que la caché del
-  // prompt de Anthropic sirva de una entrega a la siguiente.
-  const provider = createAiProvider({
-    provider: ctx.config.AI_PROVIDER,
-    ...(ctx.config.ANTHROPIC_API_KEY ? { apiKey: ctx.config.ANTHROPIC_API_KEY } : {}),
-    transcriptionModel: ctx.config.AI_MODEL_TRANSCRIPTION,
-    gradingModel: ctx.config.AI_MODEL_GRADING,
-    mockDelayMs: 0,
-  });
+  // prompt de Anthropic sirva de una entrega a la siguiente. Se construye desde
+  // `app_settings` (con el `.env` de respaldo), así que respeta el proveedor, los
+  // modelos y la clave que el administrador configura en la web.
+  const provider = await aiProviderForInstall(ctx);
 
   for (const { submission, activity } of enabled) {
     try {
