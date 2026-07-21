@@ -151,3 +151,9 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# Worktrees de Claude Code. Son copias completas del repositorio dentro del
+# propio repositorio: sin esto, un `git add -A` desde la raíz commitearía un
+# checkout entero dentro de sí mismo. El worktree tiene su propio .git y su
+# propia rama; nada de lo que hay dentro pertenece a este árbol.
+.claude/worktrees/
