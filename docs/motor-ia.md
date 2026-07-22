@@ -39,7 +39,7 @@
 | D4 | Modelos | **Fijos por rol, combo en Ajustes**: lectura y corrección `claude-opus-4-8`; triaje `claude-haiku-4-5`; verificación `claude-sonnet-5`. `claude-fable-5` como candidato techo a evaluar en el piloto (exige retención de datos de 30 días) | Sesión §2 (lectura con lo mejor y con esfuerzo), §3 (combo), §12 (triaje barato). Los modelos de los análisis de Gemini (`claude-3-5-sonnet`…) están retirados |
 | D5 | Formato de salida | **Structured outputs** (`output_config.format` + esquema Zod) en todas las llamadas. Se acabó el JSON-en-texto con `JSON.parse` | Fiabilidad + menos reintentos; compatible con Batches |
 | D6 | Anti-alucinación | Defensa por capas (§9): esquema → cita literal obligatoria en cada descuento → comprobación mecánica → doble lectura → `verify()` con contexto disjunto → profesor. **La capa mecánica no es desconectable** | ADR 0011 + requisito «es IMPRESCINDIBLE que no alucine» |
-| D7 | Niveles de contexto | **Cinco**: `global` (solo admin) → `activity_kind` → `template` → `course` → `activity`. `installation.md` se funde en `global`; se arreglan los permisos (hoy cualquier autenticado edita `global`) | Requisito literal: admin guarda pautas comunes, cada profesor sus aulas. `template` elimina la copia entre los ~15 «temas» (el huérfano `assignment-tema.md` es la prueba) |
+| D7 | Contextos: niveles y persistencia | **Cinco**: `global` (solo admin) → `activity_kind` → `template` → `course` → `activity`. Los Markdown aportan únicamente la semilla inicial; desde ese momento PostgreSQL conserva la versión activa y todo el historial inmutable. No hay sincronización ni commits Git en ejecución | Requisito literal: admin guarda pautas comunes, cada profesor sus aulas. La BD permite auditar exactamente qué versión se aplicó sin convertir el repositorio en almacenamiento de producción |
 | D8 | Prompts del sistema | **Tabla `prompts` versionada**, sembrada desde `prompts/`, editable por admin con «restaurar por defecto». Cada llamada registra clave+versión → reproducibilidad | Bloqueante nº 1 de `docs/revision/h2-preparacion-motor-ia.md`; requisito de afinar prompts con registro completo |
 | D9 | Triaje de dudas | Clasificador **ciego** en Haiku: `errata`/`administrativa`/`no_es_duda` → `parked` (coste 0); `sencilla` → modelo estándar; `dificil` → modelo experto. Umbrales asimétricos (aparcar ≥ 0,9; escalar < 0,7) | Sesión §12 + ADR 0011. La deduplicación que lo hacía inviable ya está resuelta (ADR 0012, `remote_id`) |
 | D10 | Depuración | **Panel de registros para el admin** (sin chat en la app): cada llamada con petición, respuesta, tokens, coste, prompt y contexto; exportable como JSON para hablar con Claude Code fuera | Sesión §5. Requisito: «registro de todo, qué llegó a la API, qué respondió» |
@@ -274,7 +274,7 @@ runBatch:  ingesta (ya existe) → FASE A: lote de lecturas (2 pasadas × bloque
 - **Permisos** (hoy rotos: cualquier autenticado edita `global`, `contexts.ts:85-99`): `global` y
   `activity_kind` exigen admin; `template` cualquier profesor (compartida, con `updatedBy`
   visible); `course` exige pertenencia (`course_teachers`); `activity` mantiene
-  `assertActivityAccess`. La lectura de contextos también se acota al alcance.
+  `assertActivityAccess`. La lectura de las versiones activas también se acota al alcance.
 - **`GradeInput.context` viaja segmentado** (ADR 0011): lista de segmentos por nivel. El proveedor
   coloca **dos `cache_control`** (de los 4 posibles): tras `template` (compartido entre
   actividades de la misma plantilla) y tras el bloque de actividad+solución (compartido entre
@@ -285,10 +285,81 @@ runBatch:  ingesta (ya existe) → FASE A: lote de lecturas (2 pasadas × bloque
   `count_tokens` en el piloto, no se estima.
 - **Higiene pendiente que este diseño ordena**: limpiar de `global.md` y `contexts/activities/*`
   las referencias muertas a `task-types/*` (instrucciones que apuntan a documentos que el modelo
-  no recibe); corregir `contexts/README.md` (afirma que falta `forum.md`, que existe); sembrar en
-  el arranque también plantillas (hoy `bootstrap()` solo siembra `global` y `activity_kind`).
-- La reconciliación fichero↔BD sigue siendo la de HU-06 («el fichero siembra, la BD manda»); no se
-  cambia en esta iteración.
+  no recibe); corregir `contexts/README.md` (afirma que falta `forum.md`, que existe) y completar el
+  paquete de semillas con las plantillas (hoy `bootstrap()` solo incluye `global` y
+  `activity_kind`).
+
+### Persistencia: semilla inicial y versiones en PostgreSQL
+
+`contexts/*.md` no es un almacén vivo ni participa en la resolución de una corrección. Es el
+paquete de valores predeterminados, auditable junto al código, con el que se inicializa una
+instalación:
+
+1. para cada contexto inexistente, la siembra crea su identidad y una versión 1 activa con
+   `source = 'seed'` y `created_by = NULL`;
+2. si el contexto ya existe, reiniciar o desplegar no crea una versión, no compara contenidos y no
+   sobrescribe nada, aunque haya cambiado el Markdown empaquetado;
+3. después de la siembra, todas las lecturas y escrituras se hacen exclusivamente en PostgreSQL;
+4. no se ejecuta Git, no se escribe en el repositorio y el contenedor no necesita credenciales de
+   commit o push.
+
+El modelo de datos separa identidad e historial:
+
+```text
+grading_contexts
+  id, level, key, active_version
+  UNIQUE(level, key)
+
+grading_context_versions
+  context_id, version, content, content_hash, source, created_at, created_by
+  PRIMARY KEY(context_id, version)
+  FOREIGN KEY(context_id) → grading_contexts(id)
+```
+
+La pareja `(grading_contexts.id, active_version)` referencia una versión existente. Cada guardado
+crea `N + 1` de forma inmutable y mueve el puntero activo en la misma transacción; nunca actualiza
+ni borra el contenido histórico. Dos ediciones concurrentes usan bloqueo optimista con la versión
+esperada —o bloqueo de fila— y una de ellas recibe `409 CONFLICT` en vez de pisar silenciosamente
+a la otra.
+
+La migración convierte cada fila actual de `grading_contexts` en su versión 1 activa, conservando
+contenido, autor y fecha. `readContextLevel()` y `resolveContext()` leen sólo la versión activa.
+Al comenzar una corrección se fijan las parejas `context_id/version` de todos los segmentos
+presentes y la ausencia explícita de cualquier nivel sin contexto; un cambio posterior no modifica
+una ejecución en curso ni sus reintentos. El ledger conserva ese conjunto además del hash del
+contexto efectivo: el hash aislado no permite reconstruir la entrada.
+
+### Historial visible: política y alcance
+
+Las versiones inactivas son información de auditoría. En esta iteración no se añade endpoint ni
+pantalla para consultarlas, tampoco reutilizando las rutas actuales. La futura consulta desde la
+aplicación será **exclusiva de administración**; el profesorado continúa viendo y editando sólo la
+versión activa dentro de su alcance.
+
+Hasta implementar esa pantalla, desarrollo dispone de esta consulta SQL de sólo lectura para
+inspeccionar las versiones no activas:
+
+```sql
+SELECT
+  c.level,
+  c.key,
+  v.version,
+  v.source,
+  v.created_at,
+  u.email AS created_by,
+  v.content
+FROM grading_contexts AS c
+JOIN grading_context_versions AS v
+  ON v.context_id = c.id
+LEFT JOIN users AS u
+  ON u.id = v.created_by
+WHERE v.version <> c.active_version
+ORDER BY c.level, c.key, v.version DESC;
+```
+
+Esta consulta requiere acceso operativo directo a PostgreSQL y no se expone como funcionalidad de
+usuario. Una futura restauración desde el historial creará una versión nueva copiando el contenido
+elegido; no reactivará ni modificará una fila histórica.
 
 ### Dónde viven las instrucciones de transcripción (cierra HU-10 p1)
 
@@ -381,6 +452,7 @@ existe y pasa a cargarse con seguridad (§7).
 Una fila por **intento** de llamada: `id, batch_run_id, ai_batch_id, submission_id, operation
 (reading_a|reading_b|grade|triage|verify|forum_answer|connection_test), transport (batch|sync),
 provider, model_requested, model_returned, prompt_key, prompt_version, context_hash,
+context_versions (jsonb con level, key, context_id, version y content_hash),
 request_params (jsonb, sin binarios: los bloques de páginas se referencian por storage_path+hash),
 response_raw (jsonb), parsed_ok, stop_reason, error, latency_ms, input_tokens, output_tokens,
 cache_read_tokens, cache_creation_tokens, cost_cents, simulated (provider=mock), created_at`.
@@ -458,7 +530,8 @@ supresión RGPD desde la app. Son anteriores al motor y están registradas en AD
 | Tabla `ai_calls` | Ledger (§11), con índices por submission y batch_run |
 | Tabla `ai_batches` | Seguimiento de lotes del proveedor (§6) |
 | Tabla `prompts` | Registro versionado (§8) |
-| `grading_contexts.level` + `template`, `course` | Reconstruir CHECK de `0002:144-146` |
+| `grading_contexts.level` + `template`, `course`; `active_version` | Identidad estable y puntero a la versión activa; reconstruir CHECK de `0002:144-146` |
+| Tabla `grading_context_versions` | Historial inmutable: `(context_id, version)`, contenido, hash, origen, autor y fecha; backfill de cada contexto actual como v1 |
 | `activities.template_key` | text NULL |
 | `app_settings` claves nuevas | `anthropic.readingModel/verifyModel/triageModel`, `ai.transport`, `ai.verify`, `ai.explanations`, `ai.lowConfidenceThreshold`, `ai.logRetentionDays` |
 
@@ -524,9 +597,11 @@ Cada tarea es un PR con su migración/tests y deja el circuito completo en verde
 **Alcance**: migración 0007 (§13 completa); `enums.ts` (`parked`, `DISCREPANCIA`,
 `TriageLabel`, niveles `template`/`course`, `LOW_CONFIDENCE_THRESHOLD` único); `domain.ts`
 (campos nuevos de `Correction`, `CorrectionItem.aiQuote/aiQuotePage`, `Transcription.discrepancies`,
-`AiCall`, `Prompt`, `AppSettings.ai*`); `api.ts` (contratos de ledger, prompts, reprocess con
+`AiCall`, `Prompt`, `GradingContextVersion`, `AppSettings.ai*`); `api.ts` (contratos de ledger,
+prompts, contextos activos con id/versión, reprocess con
 `scope`, 202 del lote, cola con `parked`); `db/schema.ts` espejo.
-**Aceptación**: migra en limpio y sobre una BD 0006 con datos; `pnpm test` de shared en verde;
+**Aceptación**: migra en limpio y sobre una BD 0006 con datos; cada `grading_contexts` existente
+pasa a v1 activa sin perder contenido, autor ni fecha; `pnpm test` de shared en verde;
 `modelo-de-datos.md` actualizado en el mismo PR.
 **Depende de**: —
 
@@ -550,15 +625,42 @@ pantalla admin (lista, editor con diff, activar, restaurar); `prompt_key/version
 `ai_calls` (cuando exista, T8) registra versión; los 8 ficheros de `prompts/` cargados.
 **Depende de**: T1
 
-### T4 — Niveles de contexto + permisos
-**Objetivo**: §7 completo.
-**Alcance**: `resolveContext()` con 5 niveles y salida **segmentada**; `activities.template_key`
-(ficha de actividad: selector de plantilla); `ContextPage` con pestañas por nivel y permisos;
-permisos en `routes/contexts.ts` (admin para global/kind; alcance para course/activity);
-fusión de `installation.md` en `global.md`; limpieza de referencias muertas (`task-types/*`);
-siembra completa en `bootstrap()`; filtro `upload_complete` en resolved.
-**Aceptación**: un teacher no puede editar `global` (403); dos actividades con la misma plantilla
-comparten segmento idéntico byte a byte; `GET /api/contexts/resolved/:id` muestra los 5 niveles.
+### T4 — Registro versionado, niveles y permisos de contextos
+**Objetivo**: completar §7 y retirar definitivamente Git como almacén de contextos en ejecución.
+**Alcance**:
+
+- `resolveContext()` con 5 niveles y salida **segmentada**; `activities.template_key` en la ficha de
+  actividad como selector de plantilla;
+- siembra inicial idempotente de identidad + v1 desde el paquete `contexts/`, incluida la plantilla;
+  una BD ya inicializada no compara ni reimporta ficheros al reiniciar o desplegar;
+- tabla `grading_context_versions` inmutable y servicio transaccional: cada `PUT` crea
+  `N + 1`, mueve `active_version` y exige la versión esperada para detectar concurrencia;
+- `readContextLevel()` y el contexto resuelto usan exclusivamente versiones activas y devuelven
+  `context_id`, `version` y `content_hash` para fijarlas al inicio de cada ejecución;
+- `ContextPage` conserva las pestañas de versiones activas por nivel; permisos en
+  `routes/contexts.ts` (admin para `global`/`activity_kind`, alcance docente para
+  `template`/`course`/`activity`); ninguna ruta expone versiones inactivas;
+- fusión de `installation.md` en `global.md`, limpieza de referencias muertas (`task-types/*`) y
+  filtro `upload_complete` en el contexto resuelto;
+- documentar y probar la consulta SQL de §7 que lista sólo versiones inactivas para desarrollo;
+- reconciliar en el mismo PR HU-06, `contexts/README.md`, `arquitectura.md`,
+  `modelo-de-datos.md`, `api.md` e `hitos.md`. El ADR 0015 sustituye expresamente al ADR 0003; el
+  ADR aceptado no se reescribe.
+
+**Aceptación**:
+
+1. en una BD vacía, cada semilla produce una única v1 activa con `source = 'seed'` y autor nulo;
+2. sobre una BD 0006, cada contenido actual pasa intacto a una v1 activa con su autor y fecha;
+3. cambiar un Markdown y redesplegar no crea versión ni modifica la BD ya inicializada;
+4. guardar crea una v2 inmutable y conserva byte a byte la v1;
+5. dos guardados concurrentes no obtienen el mismo número ni se pisan: uno termina o recibe 409;
+6. un teacher no puede editar `global` (403) y ninguna ruta devuelve versiones inactivas;
+7. dos actividades con la misma plantilla comparten el segmento activo idéntico byte a byte;
+8. `GET /api/contexts/resolved/:id` muestra los 5 niveles y los ids/versiones activos;
+9. la consulta de §7 no devuelve nunca la versión activa.
+
+**Fuera de alcance**: endpoint, pantalla, diff y restauración del historial. Cuando se implementen,
+serán exclusivamente de administración (E1).
 **Depende de**: T1
 
 ### T5 — Motor: 4 operaciones, doble lectura, verificación mecánica
@@ -600,7 +702,8 @@ run manual devuelve 202 al instante; ninguna entrega acaba `published`.
 `simulated`); rutas admin + panel de registros (lista, filtros, detalle, «Copiar JSON»); purga
 programada; resumen de razonamiento cuando `ai.explanations`.
 **Aceptación**: una corrección con mock deja ≥ 4 filas trazables (2 lecturas, 1 corrección,
-1 verificación) con `prompt_version` y `context_hash`; el JSON exportado reproduce la llamada.
+1 verificación) con `prompt_version`, `context_hash`, las versiones de todos los segmentos usados y
+la ausencia explícita de los que falten; el JSON exportado reproduce la llamada.
 **Depende de**: T2, T3, T7
 
 ### T9 — Foros: triaje + rutas de respuesta
@@ -664,8 +767,21 @@ modelo por rol y actualización de §5/§14 con números medidos.
 decisión Fable/Opus registrada (ADR si cambia el default).
 **Depende de**: todo lo anterior
 
+### E1 — Historial de contextos para administración (fase posterior)
+**Estado**: fuera del alcance de esta iteración; no forma parte de la ruta crítica T1–T14.
+**Objetivo**: permitir que sólo administración consulte y compare el historial que T4 ya conserva.
+**Alcance futuro**: endpoints admin-only para listar y leer versiones inactivas; pantalla con
+versión, autor, fecha, origen y diff; restaurar crea una versión nueva y auditada, nunca modifica
+una histórica; registro del acceso. El profesorado no recibe este permiso, aunque haya creado la
+versión desde un contexto de su curso o actividad.
+**Puente actual**: la consulta SQL de sólo lectura de §7 permite a desarrollo diagnosticar el
+historial sin abrir una API ni ampliar permisos de usuario.
+**Aceptación futura**: teacher obtiene 403; admin puede comparar activa↔histórica; restaurar genera
+`N + 1`; el ledger y las correcciones antiguas siguen apuntando a sus versiones originales.
+**Depende de**: T4, T8
+
 **Ruta crítica**: T1 → T2/T3/T4 (paralelas) → T5 → T6 → T7 → T8 → {T9, T10, T11, T12, T13 en
-paralelo} → T14.
+paralelo} → T14. E1 queda expresamente fuera.
 
 ---
 
@@ -702,6 +818,10 @@ paralelo} → T14.
   discrepancia, aparcada, plantilla, ledger; y corregir los pasajes obsoletos que niegan la tabla
   `courses` y el envío de la solución al modelo).
 - `contexts/README.md` (forum.md existe; niveles nuevos) y limpieza de `task-types/*` (T4).
+- HU-06 (cinco niveles, semilla sólo inicial, historial en BD, concurrencia y sin Git en
+  ejecución), `arquitectura.md`, `modelo-de-datos.md`, `api.md` e `hitos.md` (T4).
+- `docs/tareas-claude-code.md` T03 queda sustituida por T4: no se implementan commits Git de
+  contextos ni se usa el repositorio como almacenamiento vivo.
 - HU afectadas: HU-09 (202, batch_run_id), HU-10 (instrucciones OCR → registro de prompts),
   HU-11 (reprocess con alcance), HU-18 (simulado, tarifas fechadas), HU-20 (triaje/parked),
   HU-21 (autonomía diferida con la publicación).
