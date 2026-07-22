@@ -364,8 +364,18 @@ function validatePageAssembly(
   const duplicates = actual.filter((page, index) => actual.indexOf(page) !== index);
   const unexpected = actual.filter((page) => !expected.includes(page));
   if (missing.length > 0 || duplicates.length > 0 || unexpected.length > 0) {
+    // El detalle técnico va detrás, pero delante va lo que le importa a quien
+    // lo lee en la cola: qué ha pasado con SU entrega y que no se ha corregido
+    // media a ciegas. Se falla en vez de continuar a propósito: corregir una
+    // transcripción a la que le faltan páginas es peor que no corregir.
+    const partes = [
+      missing.length > 0 ? `no ha transcrito las páginas ${missing.join(', ')}` : '',
+      duplicates.length > 0 ? `ha repetido las páginas ${duplicates.join(', ')}` : '',
+      unexpected.length > 0 ? `ha inventado las páginas ${unexpected.join(', ')}` : '',
+    ].filter(Boolean);
     throw new Error(
-      `Ensamblado de transcripción inválido: faltan [${missing.join(', ')}], duplicadas [${duplicates.join(', ')}], inesperadas [${unexpected.join(', ')}].`,
+      `La lectura del examen no cuadra con el original: ${partes.join('; ')}. ` +
+        'La entrega no se corrige para no calificar media a ciegas; vuelve a procesarla.',
     );
   }
   return reading;
