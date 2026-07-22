@@ -179,3 +179,48 @@ test('si el sitio no devuelve el catálogo, la comprobación se declara omitida'
 
   assert.equal(nota?.status, 'skipped');
 });
+
+// ── Las funciones que usa la ingesta también se comprueban ──────────────────
+//
+// El agujero que motivó estos tests: `verifyConnection` probaba
+// `mod_assign_get_assignments` (con la que funciona el import) pero no
+// `mod_assign_get_submissions` (con la que la ingesta trae los envíos). Un
+// servicio web sin la segunda daba «Probar conexión» en verde y una ingesta
+// que fallaba entera, sin pista de por qué.
+
+test('la lectura de envíos se ensaya aunque no haya tareas a la vista', async () => {
+  const { connector, llamadas } = moodleCon();
+
+  const info = await connector.verifyConnection();
+  const envios = info.checks.find((check) => check.name === 'mod_assign_get_submissions');
+
+  // El mock responde `{}` a todo: la llamada se hace y el parte existe. Que
+  // aquí salga `failed` da igual; lo esencial es que se llama y se informa.
+  assert.notEqual(envios, undefined);
+  assert.equal(envios?.required, true);
+  assert.notEqual(llamadaA(llamadas, 'mod_assign_get_submissions'), undefined);
+});
+
+test('sin foros a la vista, los debates y mensajes se comprueban contra el catálogo', async () => {
+  const { connector, llamadas } = moodleCon([
+    'core_webservice_get_site_info',
+    'mod_forum_get_forum_discussions_paginated',
+  ]);
+
+  const info = await connector.verifyConnection();
+  const debates = info.checks.find(
+    (check) => check.name === 'mod_forum_get_forum_discussions_paginated',
+  );
+  const mensajes = info.checks.find(
+    (check) => check.name === 'mod_forum_get_forum_discussion_posts',
+  );
+
+  // Sin foro no hay llamada representativa posible: catálogo. La que está,
+  // en verde con su matiz; la que falta, señalada por su nombre.
+  assert.equal(debates?.status, 'ok');
+  assert.match(debates?.detail ?? '', /No se ha podido ensayar/);
+  assert.equal(mensajes?.status, 'failed');
+  assert.match(mensajes?.detail ?? '', /Servicios externos/);
+  assert.equal(llamadaA(llamadas, 'mod_forum_get_forum_discussions_paginated'), undefined);
+  assert.equal(llamadaA(llamadas, 'mod_forum_get_forum_discussion_posts'), undefined);
+});

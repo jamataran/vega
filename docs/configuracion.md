@@ -61,6 +61,14 @@ En la misma pantalla, sección «Motor de IA»:
 En **Ajustes**, arriba del todo, cada profesor pega su token personal de Moodle. Ese token decide
 qué cursos ve y con qué credencial se importan actividades. Sin token no hay ingesta.
 
+Tras pegarlo, pulsa **«Probar conexión»** y no des el paso por bueno hasta que todas las
+comprobaciones estén en verde: Moodle **no añade ninguna función al crear un servicio externo**
+y hay que darlas de alta a mano, una a una (Administración del sitio → Servidor → Servicios web
+→ Servicios externos → Funciones). La lista completa, con el porqué de cada una, está en la
+tabla «Moodle web services» del README del repositorio. Ojo con la trampa clásica: con
+`mod_assign_get_assignments` el import de actividades funciona, pero sin
+`mod_assign_get_submissions` la ingesta no puede traer **ningún envío** de los alumnos.
+
 ## 6. Prompts (administración)
 
 Pantalla **Prompts** del menú de administración. Son las **instrucciones globales del motor**:
