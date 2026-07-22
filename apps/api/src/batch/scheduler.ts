@@ -3,6 +3,7 @@ import type { ActivityKind } from '@vega/shared';
 import { getSettings, markScheduleRun } from '../settings/service.js';
 import type { AppContext } from '../context.js';
 import { purgeAiCalls } from '../ai/ledger.js';
+import { recoverInterruptedWork } from './recovery.js';
 
 /**
  * Planificador de los procesos de corrección.
@@ -31,6 +32,26 @@ export interface Scheduler {
 
 const KINDS: readonly ActivityKind[] = ['assignment', 'forum'];
 
+/**
+ * Cierra lo que quedó a medias y devuelve `false` si algo ha fallado, para que
+ * el tick no siga adelante sobre un estado que no ha podido sanear.
+ */
+async function recoverStale(ctx: AppContext, log: FastifyBaseLogger): Promise<boolean> {
+  try {
+    const recovered = await recoverInterruptedWork(ctx);
+    if (recovered.runsClosed > 0 || recovered.submissionsRequeued > 0) {
+      log.warn(
+        recovered,
+        'Recuperado trabajo interrumpido: procesos cerrados y entregas devueltas a la cola',
+      );
+    }
+    return true;
+  } catch (error) {
+    log.error({ err: error }, 'No se ha podido recuperar el trabajo interrumpido');
+    return false;
+  }
+}
+
 export function startScheduler(
   ctx: AppContext,
   runBatch: (kinds: readonly ActivityKind[]) => Promise<{ processed: number }>,
@@ -57,6 +78,16 @@ export function startScheduler(
         log.error({ err: error }, 'No se ha podido purgar el registro de IA'),
       );
     }
+
+    // Desatascar lo que quedó a medias también aquí, y no sólo al arrancar.
+    //
+    // La recuperación deja un margen de gracia antes de tocar nada, para no
+    // pisar a una réplica que esté trabajando de verdad. Si el contenedor
+    // vuelve antes de que ese margen pase —lo normal en un redespliegue— el
+    // arranque no encuentra nada que cerrar y el proceso interrumpido se queda
+    // en `running` **para siempre**, bloqueando todos los siguientes con un
+    // «ya hay un proceso en marcha» que no hay forma de quitar sin reiniciar.
+    if (!(await recoverStale(ctx, log))) return;
 
     const due = KINDS.filter((kind) => {
       const slot = settings.schedule[kind];
