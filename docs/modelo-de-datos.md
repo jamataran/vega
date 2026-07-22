@@ -1,7 +1,7 @@
 # Modelo de datos
 
-Derivado de las migraciones de `apps/api/migrations/` —`0001_init.sql`, `0002_activities.sql` y
-`0003_courses.sql`— y de `packages/shared/src/domain.ts`. El SQL manda: si algo aquí no cuadra con
+Derivado de las migraciones de `apps/api/migrations/` —de `0001_init.sql` a
+`0006_alumnos.sql`— y de `packages/shared/src/domain.ts`. El SQL manda: si algo aquí no cuadra con
 las migraciones, el error está en este documento.
 
 `0002_activities.sql` cambió el eje del modelo. Los antiguos «buzones» son ahora **actividades de
@@ -29,6 +29,29 @@ otro; con las actividades iban las entregas, que llevan trabajo de alumnos concr
 quién importó la actividad: en un curso co-impartido, atarlo a quien pulsó el botón dejaría al otro
 profesor sin ver media asignatura.
 
+`0005_ingesta_y_publicacion.sql` es la que convierte al conector en algo más que un catálogo. Trae
+cuatro cosas, todas exigidas por la ingesta y la publicación reales ([ADR 0012](decisiones/0012-ingesta-almacen-y-publicacion-en-dos-fases.md)):
+
+1. **Dónde vive el fichero del alumno.** `submissions.storage_path` (relativa a `STORAGE_ROOT`),
+   `media_type` y `size_bytes`. Antes no había ninguna: el lote fabricaba rutas falsas que sólo el
+   proveedor de IA simulado toleraba.
+2. **`submissions.remote_id` con índice único parcial `(activity_id, remote_id)`.** Es lo que
+   deduplica los foros, donde la clave natural no protege nada. Cada duplicado se pagaría en tokens.
+3. **La publicación en dos marcas**: `corrections.grade_published_at` y
+   `feedback_file_published_at`, más `publish_notice`. `published_at` pasa a significar
+   «publicación completa». Sin esto, un reintento tras un fallo parcial republicaría la nota.
+4. **La ingesta se mide**: `batch_runs.submissions_ingested` y `activities_failed`. Sin ellos, «no
+   había nada que corregir» y «no ha entrado nada» son el mismo cero.
+
+`0006_alumnos.sql` añade la tabla **`students`** y `submissions.student_id`. Hasta ella, de un
+alumno sólo se sabía un identificador; ahora se guarda su ficha del LMS, y el motivo no es de
+comodidad: **la corrección depende de la comunidad autónoma**, porque el tribunal y los criterios de
+una oposición no son los mismos en dos comunidades. Ese dato vive en Moodle como campo personalizado
+y no llegaba a Vega. Ver [ADR 0013](decisiones/0013-ficha-del-alumno-y-contexto-al-modelo.md).
+
+Tabla propia y no columnas en `submissions` porque un alumno entrega muchas veces: repetir su perfil
+en cada fila haría que actualizar un dato exigiera recorrerlas todas.
+
 Como la 0002, todo con `ALTER` e idempotente.
 
 Las migraciones se aplican al arrancar el contenedor del API y quedan registradas con su suma de
@@ -46,6 +69,7 @@ erDiagram
   users ||--o{ course_teachers : "alcanza"
   courses ||--o{ course_teachers : "lo imparten"
   courses ||--o{ activities : "agrupa"
+  students ||--o{ submissions : "entrega"
   activities ||--o{ submissions : "agrupa"
   activities ||--o{ activity_files : "adjunta"
   submissions ||--o| transcriptions : "tiene (sólo assignment)"
@@ -109,15 +133,40 @@ erDiagram
     timestamptz uploaded_at
   }
 
+  students {
+    uuid id PK
+    text student_ref UK "identidad del LMS · moodle-4217"
+    text username
+    text first_name
+    text last_name
+    text full_name
+    text email
+    text phone
+    text idnumber "del centro · NO es el NIF"
+    text institution
+    text department
+    text city
+    text country
+    text community "comunidad autónoma · VARIAS separadas por coma"
+    jsonb custom_fields "campos personalizados del LMS, sin interpretar"
+    timestamptz synced_at
+    timestamptz created_at
+  }
+
   submissions {
     uuid id PK
     uuid activity_id FK
-    text student_ref "id interno, nunca el nombre"
-    text student_alias "nullable · sólo para el profesor"
+    text student_ref "id interno del LMS, nunca el nombre"
+    text student_alias "nullable · el nombre, para el profesor"
+    uuid student_id FK "nullable · ON DELETE SET NULL"
     text status "SubmissionStatus"
-    text original_filename "nullable · NULL en foros"
-    integer page_count "0 en foros"
+    text original_filename "nullable · NULL en foros · el nombre tal cual lo puso el alumno"
+    integer page_count "0 en foros · contado del PDF al ingerir"
     text text_content "nullable · el texto del foro"
+    text remote_id "nullable · identidad en el LMS · único por actividad si no es NULL"
+    text storage_path "nullable · relativa a STORAGE_ROOT · NULL en foros"
+    text media_type "nullable"
+    integer size_bytes "0 si no hay fichero"
     text error_message "nullable"
     timestamptz submitted_at
     timestamptz updated_at
@@ -151,7 +200,10 @@ erDiagram
     boolean published_automatically "default false"
     uuid validated_by FK "nullable"
     timestamptz validated_at "nullable"
-    timestamptz published_at "nullable"
+    timestamptz published_at "nullable · publicación COMPLETA"
+    timestamptz grade_published_at "nullable · la nota ya está en el LMS"
+    timestamptz feedback_file_published_at "nullable · el PDF ya está en el LMS"
+    text publish_notice "nullable · qué no llegó y por qué"
     timestamptz created_at
   }
 
@@ -179,6 +231,8 @@ erDiagram
     integer submissions_processed
     integer submissions_failed
     integer submissions_auto_published
+    integer submissions_ingested
+    integer activities_failed
     integer input_tokens
     integer output_tokens
     integer cached_input_tokens
@@ -237,7 +291,9 @@ referencial:
 | Quitar a un profesor de un curso borra su acceso, no el curso | `course_teachers ... ON DELETE CASCADE` en las dos columnas | Y al revés: dar de baja al usuario le retira el acceso. **Nada limpia la tabla automáticamente**: el acceso se anota al listar cursos y no caduca, para que un Moodle caído o un token expirado no dejen a nadie sin poder validar lo que ya está en Vega. |
 | Una entrega tiene **como mucho una** transcripción | `transcriptions.submission_id UNIQUE` | Reprocesar sustituye, no acumula. No hay historial de transcripciones. |
 | Una entrega tiene **como mucho una** corrección | `corrections.submission_id UNIQUE` | Ídem: no hay historial de correcciones. El lote borra la anterior antes de insertar. |
-| No se importa dos veces la misma entrega | `UNIQUE (activity_id, student_ref, original_filename)` | La ingesta es idempotente **en actividades con fichero**. Ver el aviso de abajo. |
+| No se importa dos veces la misma entrega | `UNIQUE (activity_id, student_ref, original_filename)` **y** `UNIQUE (activity_id, remote_id) WHERE remote_id IS NOT NULL` | La ingesta es idempotente en los dos tipos de actividad. La segunda, parcial, es la que cubre los foros. Ver el aviso de abajo. |
+| Borrar la ficha de un alumno **no** borra sus entregas | `submissions.student_id ... ON DELETE SET NULL` | Un derecho de supresión no puede llevarse por delante una corrección que un profesor firmó. La entrega sobrevive con su `student_ref`, que es un identificador y no un dato personal. **No hay ruta que lo haga**: hoy se atiende con SQL a mano. |
+| Un alumno está una sola vez | `students.student_ref UNIQUE` | Es lo que permite refrescar su ficha en cada ingesta en vez de acumular duplicados. Un opositor cambia de comunidad entre convocatorias. |
 | Borrar una actividad borra sus entregas y sus ficheros | `ON DELETE CASCADE` | Y en cascada, transcripciones y correcciones. Operación destructiva. |
 | Borrar un usuario no borra lo que validó, lanzó o configuró | `validated_by`, `triggered_by`, `updated_by` … `ON DELETE SET NULL` | Se pierde el quién, no el qué. Por eso los usuarios se **desactivan** (`active = false`) en lugar de borrarse. |
 | Los puntos nunca son negativos | `CHECK (ai_points >= 0)`, `CHECK (teacher_points >= 0)` | No existe la penalización con puntos negativos a nivel de apartado. |
@@ -245,13 +301,16 @@ referencial:
 | El coste se guarda en céntimos | `cost_cents numeric(10,4)` | Nada de flotantes para dinero. `UsageMetrics.costCents`. |
 | Una subida a medias no existe para nadie | `activity_files.upload_complete` | Todas las consultas de ficheros filtran por `upload_complete = true`, así que una subida cortada ni se lista ni entra en el contexto ni acaba en un prompt. Las huérfanas se barren tras una hora, al empezar otra subida en la misma actividad. **Salvo un hueco**: `GET /api/contexts/resolved/{id}` lee el `content` de todas las filas sin filtrar por esta columna. |
 
-> **La clave natural no protege los foros.** `original_filename` dejó de ser `NOT NULL` en la
-> migración `0002`, y en PostgreSQL dos `NULL` no colisionan en un índice único (`NULLS DISTINCT` es
-> el comportamiento por defecto). Como en un foro esa columna siempre es `NULL`, ese índice único
-> **no deduplica nada** ahí: reingerir el mismo foro crea entregas nuevas
-> del mismo alumno. Resolverlo requiere una migración —`NULLS NOT DISTINCT`, o un índice parcial por
-> tipo de actividad, o llevar la clave natural al `remoteId` del conector— y es una decisión
-> pendiente.
+> **La clave natural no protegía los foros, y por eso hay una segunda.** `original_filename` dejó de
+> ser `NOT NULL` en la migración `0002`, y en PostgreSQL dos `NULL` no colisionan en un índice único
+> (`NULLS DISTINCT` es el comportamiento por defecto): en un foro esa columna siempre es `NULL`, así
+> que ese índice **no deduplicaba nada** ahí. La `0005` añade
+> `UNIQUE (activity_id, remote_id) WHERE remote_id IS NOT NULL`, que expresa la identidad real —la
+> decide el sistema de origen, no el nombre del fichero—. **Las dos conviven**: `ON CONFLICT DO
+> NOTHING` sin `target` respeta ambas. Ver [ADR 0012](decisiones/0012-ingesta-almacen-y-publicacion-en-dos-fases.md).
+>
+> Lo que sigue sin resolver son las **reentregas**: quien vuelve a subir un fichero con el mismo
+> nombre no crea entrega nueva y su versión buena se pierde en silencio (HU-08, pregunta abierta 1).
 
 ### Lo que el esquema *no* impone
 
@@ -329,7 +388,8 @@ hay arista de `transcribing` a `grading`.
 | `transcribing` / `grading` | `published` | Ídem, pero la autonomía decide `publish` | Lo anterior más `published_at` y `published_automatically = true`. **Sin `validated_at`** |
 | `graded` | `graded` | `PATCH /api/submissions/{id}/correction` | `teacher_points`, `teacher_feedback`, `teacher_summary`, `teacher_latex`. **No** toca `validated_*` |
 | `graded` | `validated` | `POST /api/submissions/{id}/validate` | Guarda los cambios pendientes + `validated_by`, `validated_at` |
-| `validated` | `published` | `POST /api/submissions/{id}/publish` con éxito en el conector | `published_at`, `published_automatically = false` |
+| `validated` | `published` | `POST /api/submissions/{id}/publish` con éxito en el conector | `published_at`, `grade_published_at`, `feedback_file_published_at` si procede, `published_automatically = false` |
+| `validated` / `error` | `error` | Falla `publishGrade`: no ha llegado nada al alumno | `error_message`. Se reintenta sin volver a validar |
 | cualquiera | `error` | Excepción no recuperable en el paso en curso | `error_message` con texto legible en español |
 | cualquiera salvo `published` | `pending` | `POST /api/submissions/{id}/reprocess` | Limpia `error_message`. El siguiente lote la recoge y **sustituye** transcripción y corrección |
 
@@ -363,10 +423,11 @@ El SQL usa `snake_case`; el contrato HTTP, `camelCase`. La capa de acceso a dato
 | `courses` | `Course` / `DiscoveredCourse` | `Course` es la fila guardada; `DiscoveredCourse` es lo que devuelve el LMS antes de guardarla, y añade `shortName`, que no se persiste |
 | `course_teachers` | — | **No tiene tipo en el contrato**: no se expone. Es la regla de alcance, y actúa filtrando lo que devuelven las demás rutas |
 | `activities` | `Activity` | `points_allocation` (jsonb) ↔ `PointsAllocation[]`; los ficheros adjuntos se cargan aparte y se sirven en `files`. `imported_by` **no se expone**: es fontanería de la ingesta, no información del profesor |
-| `activity_files` | `ActivityFile` | `storage_path` no se expone; en su lugar la API calcula `url`. `content` tampoco: se resume en `hasContent` (`content IS NOT NULL`) y se lee aparte con `GET .../content` |
-| `submissions` | `Submission` | 1:1 en columnas |
+| `activity_files` | `ActivityFile` | `storage_path` sigue siempre a `null` (los ficheros de contexto binarios no tienen almacén) y no se expone; en su lugar la API calcula `url`. `content` tampoco: se resume en `hasContent` (`content IS NOT NULL`) y se lee aparte con `GET .../content` |
+| `students` | `Student` | Sale **entera** hacia el profesor. Lo que llega al modelo es otra cosa: el recorte de `studentContextFor()`, que deja fuera correo, teléfono, NIF y domicilio |
+| `submissions` | `Submission` | `remote_id`, `storage_path`, `media_type`, `size_bytes` y `student_id` **no se exponen**: son fontanería. La ficha del alumno se sirve aparte en `SubmissionDetail.student` |
 | `transcriptions` | `Transcription` | `pages` y `flags` son jsonb ↔ `TranscriptionPage[]` / `TranscriptionFlag[]` |
-| `corrections` | `Correction` | Las cuatro columnas de consumo se agrupan en `usage: UsageMetrics`; los apartados llegan en `items` |
+| `corrections` | `Correction` | Las cuatro columnas de consumo se agrupan en `usage: UsageMetrics`; los apartados llegan en `items`. De las tres columnas de publicación sólo sale `publish_notice`: las dos fechas parciales son internas |
 | `correction_items` | `CorrectionItem` | Se sirven ordenados por `position` |
 | `grading_contexts` | `GradingContext` | |
 | `batch_runs` | `BatchRun` | Mismo agrupamiento de `usage` |

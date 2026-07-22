@@ -59,6 +59,9 @@ function stubProvider(
         ...grade,
       };
     },
+    async verifyConnection() {
+      return { ok: true, message: 'stub', model: 'stub-grader', usage: null };
+    },
   };
 }
 
@@ -465,4 +468,51 @@ test('avisa cuando la autonomía publicaría sola una corrección de baja confia
     autonomy: 'autonomous',
   });
   assert.ok(!confident.review.some((flag) => flag.reason === 'autonomy_below_threshold'));
+});
+
+test('los datos del alumno viajan aparte y NO dentro del contexto cacheado', async () => {
+  // No es una cuestión de orden: el contexto es el prefijo que comparten todas
+  // las entregas de una actividad y que lleva `cache_control`. Meter ahí el
+  // nombre —que cambia en cada entrega— invalidaría la caché en todas ellas, y
+  // ese fallo no da error: sólo multiplica la factura.
+  const provider = stubProvider({}, {});
+
+  await gradeSubmission({
+    provider,
+    submissionId: '00000000-0000-4000-8000-0000000000f1',
+    studentRef: 'moodle-4217',
+    student: { name: 'Ana Beltrán Ruiz', community: 'ANDALUCIA, MURCIA', fields: [] },
+    activityKind: 'forum',
+    pages: [],
+    textContent: 'Una intervención cualquiera.',
+    context: { global: 'Global.', activityKind: 'Foro.', activity: 'Actividad.' },
+    pointsAllocation: [],
+    graded: false,
+    maxScore: null,
+  });
+
+  const input = provider.calls.grade[0];
+  assert.equal(input?.student?.name, 'Ana Beltrán Ruiz');
+  assert.equal(input?.student?.community, 'ANDALUCIA, MURCIA');
+  assert.doesNotMatch(input?.context ?? '', /Ana Beltrán/);
+  assert.doesNotMatch(input?.context ?? '', /ANDALUCIA/);
+});
+
+test('sin ficha del alumno el motor manda `null`, no un objeto vacío', async () => {
+  const provider = stubProvider({}, {});
+
+  await gradeSubmission({
+    provider,
+    submissionId: '00000000-0000-4000-8000-0000000000f2',
+    studentRef: 'moodle-4217',
+    activityKind: 'forum',
+    pages: [],
+    textContent: 'Otra intervención.',
+    context: { global: 'Global.', activityKind: 'Foro.', activity: 'Actividad.' },
+    pointsAllocation: [],
+    graded: false,
+    maxScore: null,
+  });
+
+  assert.equal(provider.calls.grade[0]?.student, null);
 });

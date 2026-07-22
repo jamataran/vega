@@ -10,6 +10,7 @@ import {
   Id,
   IsoDate,
   PointsAllocation,
+  Student,
   Submission,
   Transcription,
   UsageMetrics,
@@ -150,6 +151,12 @@ export type QueueCounts = z.infer<typeof QueueCounts>;
 export const SubmissionDetail = z.object({
   submission: Submission,
   activity: Activity,
+  /**
+   * Ficha del alumno. `null` en entregas sembradas o cuando el LMS no deja leer
+   * perfiles. **Es lo que Vega guarda, no lo que el modelo ve**: al prompt sólo
+   * viaja el recorte de `studentContextFor()`.
+   */
+  student: Student.nullable(),
   transcription: Transcription.nullable(),
   correction: Correction.nullable(),
   /** URLs de las páginas escaneadas. Vacío en actividades sin fichero. */
@@ -495,6 +502,31 @@ export const MoodleConnectionResponse = z.object({
 });
 export type MoodleConnectionResponse = z.infer<typeof MoodleConnectionResponse>;
 
+// ── Prueba de conexión con Anthropic (sólo administrador) ───────────────────
+
+/**
+ * Resultado de probar la conexión con Anthropic con la clave y el modelo
+ * configurados.
+ *
+ * Como la prueba de Moodle, **no es 200/500**: una clave inválida es una
+ * respuesta legítima de esta ruta, y el administrador necesita leer *por qué*
+ * falla en el mismo sitio donde acaba de pegarla. Por eso el fallo viaja en el
+ * cuerpo con `ok: false`.
+ */
+export const AnthropicConnectionResponse = z.object({
+  /** `true` sólo si la llamada de prueba a Anthropic ha respondido. */
+  ok: z.boolean(),
+  /** Qué ha pasado, en un lenguaje que lleve a la solución. */
+  message: z.string(),
+  /** Con qué proveedor se ha probado: el simulado no consume tokens. */
+  provider: z.enum(['mock', 'anthropic']),
+  /** Modelo con el que se ha probado, o `null` si no se llegó a llamar. */
+  model: z.string().nullable(),
+  /** Consumo de la prueba. `null` en el proveedor simulado. */
+  usage: UsageMetrics.nullable(),
+});
+export type AnthropicConnectionResponse = z.infer<typeof AnthropicConnectionResponse>;
+
 // ── Panel ───────────────────────────────────────────────────────────────────
 
 export const OverviewResponse = z.object({
@@ -621,6 +653,8 @@ export const routes = {
   testUserMoodleConnection: (id: string) => `/api/users/${id}/moodle-token/test`,
 
   settings: '/api/settings',
+  /** Prueba la conexión con Anthropic con la clave y el modelo configurados. Sólo admin. */
+  testAnthropicConnection: '/api/settings/anthropic/test',
   /** Token de Moodle del usuario en sesión. Cualquier rol; sólo el suyo. */
   myMoodleToken: '/api/auth/me/moodle-token',
   testMyMoodleConnection: '/api/auth/me/moodle-token/test',

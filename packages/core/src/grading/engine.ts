@@ -10,7 +10,7 @@ import type {
 } from '@vega/shared';
 import { resolveContext } from '../context/resolve.js';
 import type { ResolveContextInput } from '../context/resolve.js';
-import type { AiProvider, GradedItem, PageSource } from '../ai/provider.js';
+import type { AiProvider, GradedItem, PageSource, StudentContext } from '../ai/provider.js';
 
 /**
  * Motor de corrección: transcribir → resolver contexto → corregir → devolver un
@@ -86,6 +86,14 @@ export interface GradeSubmissionInput {
   /** Texto de la entrega cuando no hay fichero (mensajes del foro). */
   readonly textContent?: string | null;
   readonly context: ResolveContextInput;
+  /**
+   * Lo que el modelo puede saber del alumno, ya recortado por
+   * `studentContextFor()` de `@vega/shared`. **No es la ficha del alumno**: el
+   * motor nunca ve el correo, el teléfono ni el NIF, para que no pueda mandarlos
+   * ni por descuido. Va aparte del contexto porque cambia en cada entrega y el
+   * contexto es el prefijo cacheado.
+   */
+  readonly student?: StudentContext | null;
   readonly pointsAllocation: readonly PointsAllocation[];
   /** Si la actividad se puntúa. Con `false` no hay apartados ni nota. */
   readonly graded: boolean;
@@ -143,6 +151,7 @@ export async function gradeSubmission(input: GradeSubmissionInput): Promise<Grad
   const graded = await input.provider.grade({
     submissionId: input.submissionId,
     activityKind: input.activityKind,
+    student: input.student ?? null,
     transcription:
       transcription === null
         ? null

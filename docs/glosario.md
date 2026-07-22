@@ -88,10 +88,23 @@ Lo que un alumno concreto ha entregado en una actividad concreta, más su estado
 un `assignment` es el fichero (`originalFilename`, `pageCount`); en un `forum` es el texto
 (`textContent`), y ahí `originalFilename` es `null`.
 
-**Alumno** (`Submission.studentRef`, `Submission.studentAlias`)
-Vega **no almacena el nombre real**. Usa `studentRef`, el identificador interno que llega del LMS, y
-opcionalmente un `studentAlias` que sólo ve el profesor dentro de Vega. A la API de IA nunca viaja
-más que `studentRef`.
+**Alumno** (`Student`, `Submission.studentRef`, `Submission.studentAlias`)
+Vega **sí guarda la ficha del alumno** desde la migración `0006`: nombre, correo, teléfono, centro y
+los campos personalizados del LMS, en la tabla `students`. `studentRef` (`moodle-4217`) sigue siendo
+la identidad con la que se deduplica y se publica; `studentAlias` es el nombre legible que ve el
+profesor.
+
+**Lo que Vega guarda y lo que el modelo llega a ver no son lo mismo**, y la distinción es
+deliberada. Al prompt viaja sólo el recorte que produce `studentContextFor()` de `@vega/shared`:
+nombre, comunidad autónoma, provincia y población. Correo, teléfono, nombre de usuario, NIF, DNI
+validado, dirección y código postal **no salen nunca**, aunque estén guardados. Ver
+[ADR 0013](decisiones/0013-ficha-del-alumno-y-contexto-al-modelo.md).
+
+**Comunidad autónoma** (`Student.community`)
+De qué comunidad se examina el alumno, extraída del campo personalizado `CCAA` del perfil de Moodle
+(el nombre del campo es configurable). Puede traer **varias separadas por coma**: un opositor se
+presenta en más de una. Es el único dato del perfil que **afecta a la nota** —cambian el tribunal y
+los criterios de una comunidad a otra—, y es el motivo por el que la ficha se trae.
 
 **Contenido textual** (`Submission.textContent`)
 Lo que el alumno escribió cuando no hay fichero: sus mensajes del foro, ya concatenados por el

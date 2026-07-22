@@ -208,23 +208,44 @@ A=\displaystyle\int_{-2}^{0}(x^{3}-4x)\,dx-\int_{0}^{2}(x^{3}-4x)\,dx=4+4=8\ \te
 ];
 
 /** Alias internos. Nunca sale de aquí el nombre real del alumno. */
-export const STUDENTS: { ref: string; alias: string }[] = [
-  { ref: 'A-1042', alias: 'Alumno 1042' },
-  { ref: 'A-1078', alias: 'Alumno 1078' },
-  { ref: 'A-1103', alias: 'Alumno 1103' },
-  { ref: 'A-1119', alias: 'Alumno 1119' },
-  { ref: 'A-1156', alias: 'Alumno 1156' },
-  { ref: 'A-1187', alias: 'Alumno 1187' },
-  { ref: 'A-1204', alias: 'Alumno 1204' },
-  { ref: 'A-1233', alias: 'Alumno 1233' },
-  { ref: 'A-1260', alias: 'Alumno 1260' },
-  { ref: 'A-1291', alias: 'Alumno 1291' },
-  { ref: 'A-1318', alias: 'Alumno 1318' },
-  { ref: 'A-1344', alias: 'Alumno 1344' },
-  { ref: 'A-1370', alias: 'Alumno 1370' },
-  { ref: 'A-1402', alias: 'Alumno 1402' },
-  { ref: 'A-1435', alias: 'Alumno 1435' },
-  { ref: 'A-1461', alias: 'Alumno 1461' },
+/**
+ * Alumnos de ejemplo, con ficha completa.
+ *
+ * Llevan nombre, comunidad autónoma y provincia porque son los datos que de
+ * verdad viajan al modelo, y sin ellos la maqueta no enseña lo que el profesor
+ * va a ver. Dos detalles buscados a propósito:
+ *
+ *  - Alguno se presenta en **dos comunidades**, separadas por coma, que es como
+ *    las guarda el sistema de origen.
+ *  - Todos llevan un `NIF` claramente falso. No está para usarlo: está para que
+ *    se pueda comprobar —en la pantalla y en las pruebas— que ese campo se
+ *    guarda y **no** acaba en el prompt.
+ */
+export const STUDENTS: {
+  ref: string;
+  alias: string;
+  firstName: string;
+  lastName: string;
+  email: string;
+  community: string;
+  province: string;
+}[] = [
+  { ref: 'A-1042', alias: 'Ana Beltrán Ruiz', firstName: 'Ana', lastName: 'Beltrán Ruiz', email: 'ana.beltran@ejemplo.es', community: 'ANDALUCIA', province: 'Granada' },
+  { ref: 'A-1078', alias: 'Diego Sanchís Mora', firstName: 'Diego', lastName: 'Sanchís Mora', email: 'diego.sanchis@ejemplo.es', community: 'COMUNIDAD_VALENCIANA', province: 'Valencia' },
+  { ref: 'A-1103', alias: 'Lucía Ferrer Ibáñez', firstName: 'Lucía', lastName: 'Ferrer Ibáñez', email: 'lucia.ferrer@ejemplo.es', community: 'ANDALUCIA, MURCIA', province: 'Almería' },
+  { ref: 'A-1119', alias: 'Marcos Otero Vidal', firstName: 'Marcos', lastName: 'Otero Vidal', email: 'marcos.otero@ejemplo.es', community: 'GALICIA', province: 'Pontevedra' },
+  { ref: 'A-1156', alias: 'Nuria Aranda Gil', firstName: 'Nuria', lastName: 'Aranda Gil', email: 'nuria.aranda@ejemplo.es', community: 'MADRID', province: 'Madrid' },
+  { ref: 'A-1187', alias: 'Javier Peris Lloret', firstName: 'Javier', lastName: 'Peris Lloret', email: 'javier.peris@ejemplo.es', community: 'COMUNIDAD_VALENCIANA', province: 'Castellón' },
+  { ref: 'A-1204', alias: 'Marta Quintana Ávila', firstName: 'Marta', lastName: 'Quintana Ávila', email: 'marta.quintana@ejemplo.es', community: 'CASTILLA_Y_LEON', province: 'Valladolid' },
+  { ref: 'A-1233', alias: 'Andrés Cuadrado Pons', firstName: 'Andrés', lastName: 'Cuadrado Pons', email: 'andres.cuadrado@ejemplo.es', community: 'CATALUNA', province: 'Tarragona' },
+  { ref: 'A-1260', alias: 'Elena Vargas Nieto', firstName: 'Elena', lastName: 'Vargas Nieto', email: 'elena.vargas@ejemplo.es', community: 'ANDALUCIA', province: 'Sevilla' },
+  { ref: 'A-1291', alias: 'Pablo Iriarte Sáez', firstName: 'Pablo', lastName: 'Iriarte Sáez', email: 'pablo.iriarte@ejemplo.es', community: 'NAVARRA', province: 'Navarra' },
+  { ref: 'A-1318', alias: 'Carmen Roldán Prieto', firstName: 'Carmen', lastName: 'Roldán Prieto', email: 'carmen.roldan@ejemplo.es', community: 'MADRID, CASTILLA_LA_MANCHA', province: 'Madrid' },
+  { ref: 'A-1344', alias: 'Iván Bermejo Lara', firstName: 'Iván', lastName: 'Bermejo Lara', email: 'ivan.bermejo@ejemplo.es', community: 'ARAGON', province: 'Zaragoza' },
+  { ref: 'A-1370', alias: 'Sara Montalbán Ruiz', firstName: 'Sara', lastName: 'Montalbán Ruiz', email: 'sara.montalban@ejemplo.es', community: 'ANDALUCIA', province: 'Málaga' },
+  { ref: 'A-1402', alias: 'Hugo Calvo Estévez', firstName: 'Hugo', lastName: 'Calvo Estévez', email: 'hugo.calvo@ejemplo.es', community: 'ASTURIAS', province: 'Asturias' },
+  { ref: 'A-1435', alias: 'Alba Requena Soler', firstName: 'Alba', lastName: 'Requena Soler', email: 'alba.requena@ejemplo.es', community: 'MURCIA', province: 'Murcia' },
+  { ref: 'A-1461', alias: 'Tomás Herrán Bilbao', firstName: 'Tomás', lastName: 'Herrán Bilbao', email: 'tomas.herran@ejemplo.es', community: 'PAIS_VASCO', province: 'Bizkaia' },
 ];
 
 /**

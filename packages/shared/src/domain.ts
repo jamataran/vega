@@ -166,15 +166,160 @@ export type Activity = z.infer<typeof Activity>;
 
 // ── Entregas ────────────────────────────────────────────────────────────────
 
+// ── Alumno ──────────────────────────────────────────────────────────────────
+
+export const StudentCustomField = z.object({
+  /** Clave del campo en el LMS: `CCAA`, `PROVINCIA`, `NIF`… */
+  shortname: z.string().min(1),
+  /** Etiqueta legible que le puso el administrador del LMS. */
+  name: z.string().nullable(),
+  value: z.string(),
+});
+export type StudentCustomField = z.infer<typeof StudentCustomField>;
+
+/**
+ * Ficha del alumno, tal y como la ve el LMS.
+ *
+ * **Ojo con qué se hace con esto.** Que Vega guarde el perfil no significa que
+ * el perfil entero viaje al modelo: lo que entra en el prompt lo decide
+ * `studentContextFor()`, más abajo, con una lista explícita. La distinción es el
+ * núcleo de la protección de datos de este producto y conviene no diluirla:
+ * aquí hay nombre, correo, teléfono y —según la instalación— el NIF y la
+ * dirección postal de una persona.
+ */
+export const Student = z.object({
+  id: Id,
+  /** Identidad en el LMS (`moodle-4217`). Es lo que casa con `Submission.studentRef`. */
+  studentRef: z.string().min(1),
+  username: z.string().nullable(),
+  firstName: z.string().nullable(),
+  lastName: z.string().nullable(),
+  fullName: z.string().nullable(),
+  email: z.string().nullable(),
+  phone: z.string().nullable(),
+  /** Identificador del centro. No es el NIF: ése es un campo personalizado. */
+  idnumber: z.string().nullable(),
+  institution: z.string().nullable(),
+  department: z.string().nullable(),
+  city: z.string().nullable(),
+  country: z.string().nullable(),
+  /**
+   * Comunidad autónoma. Puede traer **varias separadas por coma**: un opositor
+   * se presenta en más de una, y así lo guarda el sistema de origen.
+   */
+  community: z.string().nullable(),
+  customFields: z.array(StudentCustomField),
+  syncedAt: IsoDate,
+});
+export type Student = z.infer<typeof Student>;
+
+/** Nombre con el que enseñar una entrega, sin quedarse nunca en blanco. */
+export function studentLabel(
+  submission: Pick<Submission, 'studentRef' | 'studentAlias'>,
+  student?: Pick<Student, 'fullName' | 'firstName' | 'lastName'> | null,
+): string {
+  const composed = [student?.firstName, student?.lastName].filter(Boolean).join(' ').trim();
+  return student?.fullName?.trim() || composed || submission.studentAlias || submission.studentRef;
+}
+
+/**
+ * Qué del alumno puede llegar al modelo de IA.
+ *
+ * **Esta lista es la frontera de protección de datos del producto y se lee
+ * entera antes de tocarla.** Vega guarda el perfil completo porque el profesor
+ * necesita saber de quién es lo que firma; el modelo recibe sólo lo que puede
+ * cambiar la corrección.
+ *
+ * Qué entra y por qué:
+ *
+ *  - **El nombre**, para que el feedback pueda dirigirse al alumno. Es una
+ *    decisión explícita del cliente, tomada sabiendo que implica mandar un dato
+ *    identificativo a un tercero en cada corrección.
+ *  - **La comunidad autónoma**, porque una oposición de matemáticas no se
+ *    corrige igual en dos comunidades: cambian el tribunal y los criterios. Es
+ *    el dato que motivó todo esto.
+ *  - **Provincia y población**, por el mismo motivo y con menos peso.
+ *
+ * Qué **nunca** entra, aunque esté guardado: correo, teléfono, nombre de
+ * usuario, identificador del centro, y los campos personalizados de identidad y
+ * domicilio (`NIF`, `DNI_VALIDO`, `DIRECCION`, `CODIGO_POSTAL`). No mejoran una
+ * corrección de matemáticas en absolutamente nada, y son justo los datos cuyo
+ * envío a un tercero habría que justificar ante quien preguntase.
+ *
+ * La lista de campos personalizados es ampliable por instalación; la de
+ * prohibidos **gana siempre**, para que ampliarla por descuido no pueda colar un
+ * DNI en un prompt.
+ */
+export const STUDENT_CUSTOM_FIELDS_FOR_MODEL = ['CCAA', 'PROVINCIA', 'POBLACION'] as const;
+
+/** Campos personalizados que no salen hacia el modelo bajo ningún ajuste. */
+export const STUDENT_CUSTOM_FIELDS_NEVER_SENT = [
+  'NIF',
+  'DNI',
+  'DNI_VALIDO',
+  'DIRECCION',
+  'CODIGO_POSTAL',
+  'IBAN',
+  'TELEFONO',
+] as const;
+
+/** Lo que de verdad viaja al modelo sobre el alumno. */
+export interface StudentContext {
+  readonly name: string | null;
+  readonly community: string | null;
+  readonly fields: readonly { readonly label: string; readonly value: string }[];
+}
+
+/**
+ * Recorta la ficha del alumno a lo que puede entrar en el prompt.
+ *
+ * Devuelve `null` cuando no queda nada que contar, para que el motor no añada
+ * una sección vacía al prompt: un encabezado «Alumno» sin contenido gasta
+ * tokens y confunde al modelo.
+ *
+ * `extraFields` permite a una instalación añadir campos personalizados suyos sin
+ * tocar el código; lo prohibido se filtra después, así que ampliarlo no puede
+ * abrir la puerta a un dato de identidad.
+ */
+export function studentContextFor(
+  student: Pick<Student, 'fullName' | 'firstName' | 'lastName' | 'community' | 'customFields'> | null,
+  extraFields: readonly string[] = [],
+): StudentContext | null {
+  if (student === null) return null;
+
+  const allowed = new Set(
+    [...STUDENT_CUSTOM_FIELDS_FOR_MODEL, ...extraFields].map((key) => key.toUpperCase()),
+  );
+  const forbidden = new Set(STUDENT_CUSTOM_FIELDS_NEVER_SENT.map((key) => key.toUpperCase()));
+
+  const composed = [student.firstName, student.lastName].filter(Boolean).join(' ').trim();
+  const name = (student.fullName?.trim() ?? '') || composed || null;
+
+  const fields = student.customFields
+    .filter((field) => {
+      const key = field.shortname.toUpperCase();
+      return allowed.has(key) && !forbidden.has(key) && field.value.trim() !== '';
+    })
+    // La comunidad se sirve aparte, en su propio campo: repetirla aquí la
+    // duplicaría en el prompt.
+    .filter((field) => field.shortname.toUpperCase() !== 'CCAA')
+    .map((field) => ({ label: field.name?.trim() || field.shortname, value: field.value.trim() }));
+
+  const community = student.community?.trim() || null;
+
+  if (name === null && community === null && fields.length === 0) return null;
+  return { name, community, fields };
+}
+
 export const Submission = z.object({
   id: Id,
   activityId: Id,
   /**
-   * Identificador interno del alumno. Nunca enviamos el nombre real a la API
-   * de IA — ver la sección de privacidad del README.
+   * Identificador interno del alumno en el LMS (`moodle-4217`), nunca su nombre.
+   * Sigue siendo la identidad con la que se deduplica y con la que se publica.
    */
   studentRef: z.string().min(1),
-  /** Alias visible sólo para el profesor dentro de Vega. */
+  /** Nombre legible, para que el profesor sepa qué está firmando. */
   studentAlias: z.string().nullable(),
   status: SubmissionStatus,
   /** Nombre del fichero entregado. `null` en actividades sin fichero (foros). */
@@ -303,6 +448,13 @@ export const Correction = z.object({
   publishedAt: IsoDate.nullable(),
   /** `true` si se publicó sin pasar por el profesor (modo autónomo). */
   publishedAutomatically: z.boolean(),
+  /**
+   * Qué no salió del todo bien al publicar, en español y para el profesor.
+   * Publicar son dos operaciones —nota y fichero de feedback— y hay conectores
+   * que no admiten la segunda: eso no es un fallo, pero hay que decirlo en vez
+   * de dejar creer que el alumno ha recibido el PDF.
+   */
+  publishNotice: z.string().nullable(),
 });
 export type Correction = z.infer<typeof Correction>;
 
@@ -392,6 +544,13 @@ export const BatchRun = z.object({
   submissionsFailed: z.number().int().min(0),
   /** Cuántas se publicaron solas por estar en modo autónomo. */
   submissionsAutoPublished: z.number().int().min(0),
+  /**
+   * Entregas nuevas traídas del LMS en este lote. Distingue «no había nada que
+   * corregir» de «no ha entrado nada», que sin este contador son el mismo cero.
+   */
+  submissionsIngested: z.number().int().min(0),
+  /** Actividades cuya ingesta falló entera: LMS caído, token o configuración. */
+  activitiesFailed: z.number().int().min(0),
   usage: UsageMetrics,
 });
 export type BatchRun = z.infer<typeof BatchRun>;

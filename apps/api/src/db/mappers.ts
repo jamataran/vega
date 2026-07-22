@@ -6,6 +6,7 @@ import type {
   CorrectionItem,
   Course,
   GradingContext,
+  Student,
   Submission,
   Transcription,
   UsageMetrics,
@@ -182,6 +183,35 @@ export function toCorrection(
     validatedAt: isoOrNull(row.validatedAt),
     publishedAt: isoOrNull(row.publishedAt),
     publishedAutomatically: row.publishedAutomatically,
+    publishNotice: row.publishNotice,
+  };
+}
+
+/**
+ * Ficha del alumno hacia el contrato.
+ *
+ * Sale entera hacia el profesor a propósito: es quien tiene que saber de quién
+ * es lo que está firmando. Lo que **no** sale entera es hacia el modelo, y de
+ * eso se encarga `studentContextFor()` en `@vega/shared`, no este mapeador.
+ */
+export function toStudent(row: Row<typeof schema.students>): Student {
+  return {
+    id: row.id,
+    studentRef: row.studentRef,
+    username: row.username,
+    firstName: row.firstName,
+    lastName: row.lastName,
+    fullName: row.fullName,
+    email: row.email,
+    phone: row.phone,
+    idnumber: row.idnumber,
+    institution: row.institution,
+    department: row.department,
+    city: row.city,
+    country: row.country,
+    community: row.community,
+    customFields: row.customFields,
+    syncedAt: iso(row.syncedAt),
   };
 }
 
@@ -206,6 +236,8 @@ export function toBatchRun(row: Row<typeof schema.batchRuns>): BatchRun {
     submissionsProcessed: row.submissionsProcessed,
     submissionsFailed: row.submissionsFailed,
     submissionsAutoPublished: row.submissionsAutoPublished,
+    submissionsIngested: row.submissionsIngested,
+    activitiesFailed: row.activitiesFailed,
     usage: toUsage(row),
   };
 }

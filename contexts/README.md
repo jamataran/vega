@@ -82,12 +82,12 @@ esta carpeta:
 Van al final, y no es capricho: son lo más concreto y lo que más cambia entre actividades, así que
 ponerlos antes acortaría el prefijo cacheable sin ganar nada.
 
-> **Ojo: el lote todavía no envía nada de eso.** `resolveContext()` sabe montarlo y
-> `GET /api/contexts/resolved/{activityId}` lo enseña, pero `apps/api/src/routes/batch.ts` construye
-> el contexto que manda al motor con **sólo los tres niveles de Markdown**. Hoy, si quieres que la
-> solución de referencia o el material adjunto pesen en la corrección, **escríbelos dentro del
-> fichero de nivel `activity`**. Es una carencia declarada, no una decisión: hasta que se cierre, la
-> pantalla de contexto efectivo enseña más de lo que el modelo lee.
+> **El lote sí envía todo eso.** `apps/api/src/routes/batch.ts:232-245` pasa `referenceSolution`,
+> `graded` y el contenido de los ficheros de texto (los que tienen `upload_complete = true`) a
+> `resolveContext()`. Lo que la pantalla de contexto efectivo enseña es lo que el modelo lee.
+>
+> Esta nota decía lo contrario hasta que se cerró la carencia, y conviene saberlo porque quien
+> leyera sólo la documentación antigua concluiría que Vega corrige sin la solución de referencia.
 
 Ver [ADR 0003](../docs/decisiones/0003-contexto-tres-niveles.md).
 

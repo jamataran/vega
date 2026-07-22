@@ -133,10 +133,28 @@ por la clave única del esquema. La ingesta **debe poder repetirse sin duplicar*
 **RN-3.** Una entrega recién ingerida nace en `pending` con `errorMessage` a `null`. Si el fichero
 no se puede procesar, nace en `error` con mensaje legible (RN-8).
 
-**RN-4.** **Nunca se guarda el nombre real del alumno en `student_ref`.** Ese campo lleva el
-identificador interno del LMS. `student_alias` es opcional, sólo para que el profesor reconozca la
-entrega dentro de Vega, y **nunca se envía a la API de IA**. Es lo que el README llama minimizar la
-exposición.
+**RN-4.** *(Enmendada por el [ADR 0013](../decisiones/0013-ficha-del-alumno-y-contexto-al-modelo.md).)*
+`student_ref` sigue llevando **el identificador interno del LMS y nunca el nombre**: es la identidad
+con la que se deduplica y con la que se publica, y por ahí no ha cambiado nada.
+
+Lo que sí ha cambiado es el resto. **Vega guarda ahora la ficha del alumno** en la tabla `students`
+—nombre, correo, teléfono, centro y los campos personalizados del LMS— y `student_alias` se rellena
+con su nombre, porque un profesor que valida notas a las once de la noche necesita saber de quién es
+lo que está firmando.
+
+Y la frase «`student_alias` nunca se envía a la API de IA» **ya no es cierta**. Al modelo viaja el
+recorte que produce `studentContextFor()` de `@vega/shared`:
+
+| | Se guarda | Va al modelo |
+|---|---|---|
+| Nombre y apellidos | Sí | **Sí** |
+| Comunidad autónoma (`CCAA`) | Sí | **Sí**, y es el motivo de todo esto: cambia el criterio de corrección |
+| Provincia, población | Sí | **Sí** |
+| Correo, teléfono, usuario, `idnumber` | Sí | No |
+| NIF, DNI validado, dirección, código postal | Sí | **Nunca** |
+
+El criterio no es «¿es sensible?» sino **«¿cambia la corrección?»**. Y la lista vive en una función
+con pruebas, no en esta regla: una regla escrita en una HU no la ejecuta nadie.
 
 **RN-5.** Un fallo en un buzón **no interrumpe la ingesta de los demás**. Cada buzón se procesa de
 forma aislada.
@@ -245,7 +263,10 @@ entrega.
    duplica. ¿Se asume, se detecta por nombre de fichero, o se exige al conector estabilidad del
    identificador como parte del contrato?
 
-6. **¿Se rellena `studentAlias`, y con qué?** RN-4 permite un alias legible sólo para el profesor,
-   pero no dice de dónde sale. Si sale del nombre real del LMS, entonces el nombre real **sí** está
-   en la base de datos de Vega, lo que tiene lectura de RGPD aunque nunca se envíe a la IA. ¿Se deja
-   vacío? ¿Iniciales? ¿Lo escribe el profesor a mano?
+6. **~~¿Se rellena `studentAlias`, y con qué?~~ Resuelto** por el
+   [ADR 0013](../decisiones/0013-ficha-del-alumno-y-contexto-al-modelo.md): lo rellena la ingesta con
+   el nombre completo del perfil de Moodle. La lectura de RGPD que anticipaba esta pregunta es real y
+   **se ha materializado**: el nombre está en la base de datos de Vega y además sale hacia el
+   proveedor de IA. Lo que queda abierto de aquí es la otra mitad, la pregunta 3: **no hay política
+   de retención ni forma de borrar un alumno desde la aplicación**, y ahora hay bastante más que
+   borrar que antes.

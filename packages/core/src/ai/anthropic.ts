@@ -12,6 +12,7 @@ import type {
   PageSource,
   TranscribeInput,
   TranscribeResult,
+  VerifyConnectionResult,
 } from './provider.js';
 
 /**
@@ -43,6 +44,8 @@ export interface AnthropicAiProviderOptions {
   readonly apiKey?: string;
   readonly transcriptionModel?: string;
   readonly gradingModel?: string;
+  /** Tope de tokens de respuesta. Lo fija el administrador en Ajustes. */
+  readonly maxTokens?: number;
   /** Inyectable para poder testear sin red. */
   readonly client?: Anthropic;
 }
@@ -137,11 +140,15 @@ export class AnthropicAiProvider implements AiProvider {
   readonly #client: Anthropic;
   readonly #transcriptionModel: string;
   readonly #gradingModel: string;
+  readonly #maxTokens: number;
 
   constructor(options: AnthropicAiProviderOptions = {}) {
     this.#client = options.client ?? new Anthropic({ apiKey: options.apiKey });
     this.#transcriptionModel = options.transcriptionModel ?? DEFAULT_TRANSCRIPTION_MODEL;
     this.#gradingModel = options.gradingModel ?? DEFAULT_GRADING_MODEL;
+    // El tope configurado manda; `MAX_TOKENS` es sólo el valor por defecto de
+    // una instalación que aún no lo ha tocado.
+    this.#maxTokens = options.maxTokens && options.maxTokens > 0 ? options.maxTokens : MAX_TOKENS;
   }
 
   async transcribe(input: TranscribeInput): Promise<TranscribeResult> {
@@ -153,7 +160,7 @@ export class AnthropicAiProvider implements AiProvider {
     const response = await this.#client.messages.create(
       buildParams({
         model: this.#transcriptionModel,
-        max_tokens: MAX_TOKENS,
+        max_tokens: this.#maxTokens,
         system: [{ type: 'text', text: TRANSCRIPTION_SYSTEM, cache_control: { type: 'ephemeral' } }],
         messages: [
           {
@@ -210,12 +217,19 @@ export class AnthropicAiProvider implements AiProvider {
       ? `Reparto de puntos (nota máxima ${input.maxScore ?? 0}):\n${allocation}`
       : 'Esta actividad NO se puntúa: no devuelvas apartados ni nota.';
 
+    // Los datos del alumno van con SU trabajo y no con el contexto de la
+    // actividad. No es una cuestión de orden: el bloque de contexto lleva
+    // `cache_control` y lo comparten todas las entregas de la actividad, así que
+    // meter aquí un dato que cambia en cada entrega invalidaría la caché en
+    // todas ellas y el ahorro desaparecería.
+    const about = renderStudent(input.student);
+
     // El orden importa para el caché: instrucciones fijas → contexto de la actividad
     // (con el punto de caché) → transcripción, que cambia en cada entrega.
     const response = await this.#client.messages.create(
       buildParams({
         model: this.#gradingModel,
-        max_tokens: MAX_TOKENS,
+        max_tokens: this.#maxTokens,
         system: [
           { type: 'text', text: GRADING_SYSTEM },
           {
@@ -228,7 +242,7 @@ export class AnthropicAiProvider implements AiProvider {
             cache_control: { type: 'ephemeral' },
           },
         ],
-        messages: [{ role: 'user', content: [{ type: 'text', text: work }] }],
+        messages: [{ role: 'user', content: [{ type: 'text', text: `${about}${work}` }] }],
       }),
     );
 
@@ -250,6 +264,35 @@ export class AnthropicAiProvider implements AiProvider {
       model: this.#gradingModel,
       usage: toUsage(this.#gradingModel, response.usage),
     };
+  }
+
+  /**
+   * Prueba mínima de conexión: un mensaje de coste ínfimo que valida clave y
+   * modelo. NO usa `buildParams` a propósito —ni thinking ni effort— porque aquí
+   * sólo se comprueba que la tubería responde, no se corrige nada. Nunca lanza:
+   * un fallo de credencial se devuelve como `ok: false` con un mensaje accionable.
+   */
+  async verifyConnection(): Promise<VerifyConnectionResult> {
+    try {
+      const response = await this.#client.messages.create({
+        model: this.#gradingModel,
+        max_tokens: 8,
+        messages: [{ role: 'user', content: 'Responde solo con: OK' }],
+      });
+      return {
+        ok: true,
+        message: `Conexión correcta con Anthropic. Modelo «${this.#gradingModel}» disponible.`,
+        model: this.#gradingModel,
+        usage: toUsage(this.#gradingModel, response.usage),
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        message: describeAnthropicError(error, this.#gradingModel),
+        model: this.#gradingModel,
+        usage: null,
+      };
+    }
   }
 }
 
@@ -325,4 +368,54 @@ function toUsage(model: string, usage: Anthropic.Usage) {
     cachedInputTokens: usage.cache_read_input_tokens ?? 0,
   };
   return { ...tokens, costCents: estimateCostCents(model, tokens) };
+}
+
+/**
+ * Traduce un fallo de la API de Anthropic a un mensaje accionable en español.
+ * Los errores del SDK son tipados: los reconocemos por su clase, no por el texto.
+ */
+function describeAnthropicError(error: unknown, model: string): string {
+  if (error instanceof Anthropic.AuthenticationError) {
+    return 'La clave de API de Anthropic no es válida. Revísala en Ajustes.';
+  }
+  if (error instanceof Anthropic.PermissionDeniedError) {
+    return `La clave no tiene permiso para usar el modelo «${model}».`;
+  }
+  if (error instanceof Anthropic.NotFoundError) {
+    return `El modelo «${model}» no existe o no está disponible para esta clave.`;
+  }
+  if (error instanceof Anthropic.RateLimitError) {
+    return 'Anthropic ha limitado las peticiones. Espera unos segundos y reinténtalo.';
+  }
+  if (error instanceof Anthropic.APIConnectionError) {
+    return 'No se ha podido contactar con la API de Anthropic. Comprueba la conexión de red.';
+  }
+  return error instanceof Error
+    ? error.message
+    : 'No se ha podido probar la conexión con Anthropic.';
+}
+
+/**
+ * La sección de alumno del mensaje, o cadena vacía si no hay nada que contar.
+ *
+ * Vacía y no un encabezado suelto: un «## Alumno» sin contenido gasta tokens y
+ * le sugiere al modelo que hay información que se le ha ocultado.
+ *
+ * Lo que llega aquí ya viene recortado por `studentContextFor()`; este código no
+ * decide qué se manda, sólo cómo se escribe.
+ */
+function renderStudent(student: GradeInput['student']): string {
+  if (student === null) return '';
+
+  const lines: string[] = [];
+  if (student.name !== null) lines.push(`Alumno: ${student.name}`);
+  if (student.community !== null) {
+    // En plural cuando son varias: un opositor se presenta en más de una
+    // comunidad y el criterio de corrección puede depender de todas.
+    const varias = student.community.includes(',');
+    lines.push(`Comunidad autónoma en la que se presenta${varias ? 'n' : ''}: ${student.community}`);
+  }
+  for (const field of student.fields) lines.push(`${field.label}: ${field.value}`);
+
+  return `${lines.join('\n')}\n\n`;
 }

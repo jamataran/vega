@@ -30,6 +30,12 @@ import type {
  * El nombre de la carpeta del alumno ES su referencia interna: quien monte el
  * directorio decide qué pone ahí, y así Vega nunca ve el nombre real.
  *
+ * De ahí que las entregas salgan siempre con `student: null`: el árbol no
+ * guarda perfiles, y lo único que hay —el nombre de la carpeta— ya viaja en
+ * `studentRef`. Deducir de ahí un nombre y unos apellidos sería inventárselos, y
+ * exigir un fichero nuevo de perfil sería cambiar la convención de directorios
+ * por un dato que este conector no necesita.
+ *
  * El tipo de actividad se declara en `<root>/<slug-actividad>/actividad.json`
  * (`{"kind":"forum","name":"…","courseName":"…"}`). Si no está, se deduce de lo
  * que hay dentro: carpetas con PDF o imagen son entregas; con .txt/.md, foros.
@@ -216,6 +222,7 @@ export class FilesystemConnector implements LmsConnector {
           sizeBytes,
           mediaType: 'text/plain',
           textContent: parts.join('\n\n').trim(),
+          student: null,
         });
         continue;
       }
@@ -236,6 +243,7 @@ export class FilesystemConnector implements LmsConnector {
           sizeBytes: fileInfo.size,
           mediaType: mediaTypeFor(filename),
           textContent: null,
+          student: null,
         });
       }
     }

@@ -118,7 +118,7 @@ async function main(): Promise<void> {
     console.log('→ limpiando datos anteriores…');
     // CASCADE se encarga de correcciones, apartados, transcripciones y ficheros.
     await sql`
-      TRUNCATE submissions, activities, activity_files, courses, grading_contexts,
+      TRUNCATE submissions, students, activities, activity_files, courses, grading_contexts,
                batch_runs, app_settings, users
       RESTART IDENTITY CASCADE
     `;
@@ -305,6 +305,40 @@ async function main(): Promise<void> {
       { key: 'moodle.connector', value: config.LMS_CONNECTOR, updatedBy: admin.id },
     ]);
 
+    // ── Alumnos ───────────────────────────────────────────────────────────
+    //
+    // Con ficha completa, incluidos los campos personalizados que trae Moodle en
+    // la instalación del cliente. El `NIF` de mentira está a propósito: sirve
+    // para comprobar en la pantalla y en las pruebas que ese dato se guarda y
+    // **no** llega al modelo.
+    console.log('→ creando alumnos…');
+    const studentRows = await db
+      .insert(schema.students)
+      .values(
+        STUDENTS.map((student) => ({
+          studentRef: student.ref,
+          username: student.email.split('@')[0] ?? student.ref,
+          firstName: student.firstName,
+          lastName: student.lastName,
+          fullName: student.alias,
+          email: student.email,
+          phone: null,
+          idnumber: student.ref,
+          institution: 'Academia Hipatia',
+          department: 'Matemáticas',
+          city: student.province,
+          country: 'ES',
+          community: student.community,
+          customFields: [
+            { shortname: 'CCAA', name: 'Comunidad autónoma', value: student.community },
+            { shortname: 'PROVINCIA', name: 'Provincia', value: student.province },
+            { shortname: 'NIF', name: 'NIF', value: '00000000T' },
+          ],
+        })),
+      )
+      .returning({ id: schema.students.id, studentRef: schema.students.studentRef });
+    const studentIds = new Map(studentRows.map((row) => [row.studentRef, row.id]));
+
     // ── Entregas ──────────────────────────────────────────────────────────
     console.log('→ creando entregas, transcripciones y correcciones…');
     const now = Date.now();
@@ -346,6 +380,7 @@ async function main(): Promise<void> {
             activityId: activity.id,
             studentRef: student.ref,
             studentAlias: student.alias,
+            studentId: studentIds.get(student.ref) ?? null,
             status: entry.status,
             // Un foro no trae fichero: ni nombre, ni páginas, sólo texto.
             originalFilename: withFile ? `${activitySeed.slug}_${student.ref}.pdf` : null,

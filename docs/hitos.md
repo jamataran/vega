@@ -136,10 +136,31 @@ Ver [ADR 0010](decisiones/0010-credencial-moodle-por-usuario.md), y
 [ADR 0009](decisiones/0009-interfaz-lms-siete-operaciones.md) para el crecimiento de la interfaz
 `LmsConnector`, que sustituye al [ADR 0006](decisiones/0006-conectores-lms-interfaz-minima.md).
 
+### Revisión de cierre de H2
+
+Antes de empezar H3 se revisó si la casa estaba montada para enchufar el motor de IA. El informe
+completo —eje por eje, con lo que se comprobó ejecutándolo— está en
+[`revision/h2-preparacion-motor-ia.md`](revision/h2-preparacion-motor-ia.md). El resumen:
+
+**Estaba montado lo que se ve; faltaba tubería en lo que no se ve.** Se cerraron en esa revisión, con
+la migración `0005` y el [ADR 0012](decisiones/0012-ingesta-almacen-y-publicacion-en-dos-fases.md):
+
+| | Trabajo | Estado |
+|---|---|---|
+| j | **Ingesta desde el LMS** | **Hecho.** `apps/api/src/ingest/`: el lote llama a `listSubmissions()` y `download()` con la credencial de `activities.imported_by`, guarda el fichero y cuenta sus páginas. Idempotente por `remote_id` |
+| k | **Almacén de las entregas** | **Hecho.** `STORAGE_ROOT` y `submissions.storage_path`. El lote deja de fabricar rutas falsas, que era el camino crítico oculto de `motor-ia.md` §14 |
+| l | **Publicación en el LMS** | **Hecho.** `publishGrade` + `publishFeedbackFile` con lo efectivo, en dos marcas para que el reintento no republique la nota. Un conector sin fichero de feedback deja de ser un error |
+| m | **Foros de Moodle** | **Hecho.** `listSubmissions()` ya no lanza: primera duda sin responder de cada debate. Sin verificar contra Moodle real |
+| n | **Orquestación** | **Hecho.** Recuperación al arrancar de lo que quedó a medias, un solo lote a la vez (`409`) y disparo manual restringido a administración |
+| o | **Ficha del alumno y contexto al modelo** | **Hecho.** Tabla `students`, migración `0006`: la ingesta trae el perfil de Moodle y la **comunidad autónoma** (`CCAA`), que es el dato que cambia el criterio de corrección y que hasta ahora el modelo no veía. Enmienda HU-08 RN-4; ver [ADR 0013](decisiones/0013-ficha-del-alumno-y-contexto-al-modelo.md) |
+| ñ | **Persistencia de prompts** | **Sigue abierto, y es lo que hay que decidir antes del motor.** Los ocho ficheros de `prompts/` no los lee nadie: no hay tabla, ni versionado, ni edición |
+
 ### Lo que H2 deja sin cerrar
 
-- **El conector `moodle3` sigue sin verificarse contra un Moodle real.** Tiene tests unitarios con
-  `fetchImpl` inyectado y nada más. Es el riesgo principal del proyecto y no ha bajado.
+- **El conector `moodle3` sigue sin verificarse contra un Moodle real, y ahora tiene más
+  superficie.** Tiene tests unitarios con `fetchImpl` inyectado y nada más. Es el riesgo principal
+  del proyecto y **ha subido**: ahora también se apoyan en él la ingesta, la descarga, la lectura de
+  foros y la publicación.
 - **`referenceSolution` y el contenido de los ficheros no llegan al modelo.** `resolveContext()` ya
   sabe montarlos —y en actividad no puntuable rotula la sección **«Material asociado»** en vez de
   «Solución de referencia», porque en un foro ese campo no es la respuesta correcta sino el material
@@ -153,11 +174,14 @@ Ver [ADR 0010](decisiones/0010-credencial-moodle-por-usuario.md), y
   mensajes. La UI ya nombra la unidad en vez de decir siempre «entregas pendientes», pero el `0` de
   las entregas sigue siendo falso. HU-19, pregunta abierta 5, sigue abierta.
 - **HU-19 preguntas abiertas 4 y 6, y HU-05 preguntas abiertas 1, 3, 4 y 5**, siguen abiertas.
-- **La ingesta y la publicación no se han tocado.** Son H3 y H5.
+- ~~**La ingesta y la publicación no se han tocado.**~~ **Cerradas** en la revisión de cierre de H2.
+  Lo que queda de H5 es verificarlas contra un Moodle real y resolver el spike de
+  `assignfeedback_file`.
 - **La subida de ficheros va troceada** (`UPLOAD_CHUNK_BYTES` = 256 KiB, tope de 4 MiB por fichero)
   porque delante hay un proxy inverso y el `bodyLimit` de Fastify está fijado a 2 MiB. Una subida a
   medias (`activity_files.upload_complete = false`) no se lista ni entra en el contexto, y se barre a
-  la hora. **Los binarios siguen sin almacén**: se registran como referencia y no se guardan bytes.
+  la hora. **Los ficheros de contexto binarios siguen sin almacén**: se registran como referencia y
+  no se guardan bytes. Las entregas de los alumnos sí, desde el ADR 0012.
 
 ---
 
@@ -172,6 +196,11 @@ el prompt caching), HU-10 (transcripción).
 **Ojo:** la máquina de estados documentada pasa **siempre** por `transcribing`. Un post de foro no
 tiene fichero y debe ir `pending → grading` directo. El código ya lo distingue con `hasStudentFile()`;
 la documentación no, y ninguna HU describe ese camino. Se arregla aquí.
+
+**Lo primero de H3 no es código, es una decisión**: dónde viven los prompts de `prompts/`. Y con la
+ingesta cerrada aparece la segunda: un PDF real llega al motor como **un documento**, no como N
+páginas, porque trocearlo exigiría rasterizar. Ver
+[`revision/h2-preparacion-motor-ia.md`](revision/h2-preparacion-motor-ia.md) §5.
 
 ---
 

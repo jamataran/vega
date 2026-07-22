@@ -87,6 +87,12 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?define ANTHROPIC_API_KEY en las variables del stack de Portainer}
       AI_MODEL_TRANSCRIPTION: ${AI_MODEL_TRANSCRIPTION:-claude-opus-4-8}
       AI_MODEL_GRADING: ${AI_MODEL_GRADING:-claude-opus-4-8}
+      # Dónde se guardan los ficheros que entregan los alumnos. Cuelga de
+      # /app/data, que ya es un volumen: sin eso, cada redespliegue borraría los
+      # exámenes descargados y las correcciones se quedarían sin original.
+      STORAGE_ROOT: /app/data/entregas-recibidas
+      # Campo personalizado de Moodle con la comunidad autónoma del alumno.
+      STUDENT_COMMUNITY_FIELD: ${STUDENT_COMMUNITY_FIELD:-CCAA}
       LMS_CONNECTOR: ${LMS_CONNECTOR:-moodle3}
       LMS_FILESYSTEM_ROOT: /app/data/entregas
       MOODLE_BASE_URL: ${MOODLE_BASE_URL:-}

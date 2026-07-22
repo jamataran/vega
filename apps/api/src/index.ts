@@ -3,6 +3,7 @@ import { loadConfig } from './config.js';
 import { createDb } from './db/client.js';
 import { bootstrap } from './db/bootstrap.js';
 import { runMigrations } from './db/migrate.js';
+import { recoverInterruptedWork } from './batch/recovery.js';
 import { buildServer } from './server.js';
 
 /**
@@ -23,6 +24,23 @@ try {
   // de corrección y un administrador con el que entrar. No siembra datos de
   // ejemplo ni pisa nada existente.
   await bootstrap(migrationDb, config, (line) => console.log(line));
+
+  // Un reinicio a mitad de lote dejaba el `batch_runs` en `running` —lo que
+  // bloquea el siguiente— y las entregas atrapadas en `transcribing`, que nadie
+  // vuelve a recoger. Con el proveedor simulado la ventana era de milisegundos;
+  // con llamadas reales es de minutos.
+  const recovered = await recoverInterruptedWork({
+    db: migrationDb,
+    sql: migrationSql,
+    config,
+    startedAt: Date.now(),
+  });
+  if (recovered.runsClosed > 0 || recovered.submissionsRequeued > 0) {
+    console.log(
+      `↺ Recuperación: ${recovered.runsClosed} proceso(s) cerrado(s) como fallidos y ` +
+        `${recovered.submissionsRequeued} entrega(s) devueltas a la cola.`,
+    );
+  }
 } catch (error) {
   console.error(`✖ No se ha podido preparar la base de datos: ${(error as Error).message}`);
   process.exit(1);

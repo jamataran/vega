@@ -9,6 +9,8 @@ export interface AiProviderConfig {
   readonly apiKey?: string;
   readonly transcriptionModel?: string;
   readonly gradingModel?: string;
+  /** Tope de tokens de respuesta del proveedor real. */
+  readonly maxTokens?: number;
   /** Sólo para el mock: retardo simulado por llamada. */
   readonly mockDelayMs?: number;
 }
@@ -46,6 +48,7 @@ export function createAiProvider(config: AiProviderConfig = {}): AiProvider {
         ? { transcriptionModel: config.transcriptionModel }
         : {}),
       ...(config.gradingModel !== undefined ? { gradingModel: config.gradingModel } : {}),
+      ...(config.maxTokens !== undefined ? { maxTokens: config.maxTokens } : {}),
     });
   }
 

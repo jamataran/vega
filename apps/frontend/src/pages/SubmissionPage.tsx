@@ -2,8 +2,8 @@ import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { ChevronLeft, Lock } from 'lucide-react';
-import { ACTIVITY_KIND_LABEL, hasStudentFile } from '@vega/shared';
+import { ChevronLeft, Info, Lock } from 'lucide-react';
+import { ACTIVITY_KIND_LABEL, hasStudentFile, studentLabel as labelOf } from '@vega/shared';
 import { api } from '@/lib/api';
 import { queryKeys } from '@/lib/queryKeys';
 import { formatScore } from '@/lib/format';
@@ -55,6 +55,59 @@ const TEXT_VIEWS: readonly { value: ViewId; label: string }[] = [
 const tabId = (value: ViewId) => `submission-tab-${value}`;
 const panelId = (value: ViewId) => `submission-panel-${value}`;
 
+/**
+ * Nombres oficiales de las comunidades, para las claves que llegan del sistema
+ * de origen (`Enum::name`, en mayúsculas y sin acentos).
+ *
+ * Existe el mapa —y no una transformación automática— porque en español los
+ * acentos y los artículos son parte del nombre: «Andalucia» y «Castilla la
+ * Mancha» están mal escritos, y esto se le enseña al profesor en la pantalla en
+ * la que decide una nota. Lo que no esté en el mapa se formatea lo mejor
+ * posible, de modo que una comunidad nueva no rompa nada.
+ */
+const COMMUNITY_LABEL: Readonly<Record<string, string>> = {
+  ANDALUCIA: 'Andalucía',
+  ARAGON: 'Aragón',
+  ASTURIAS: 'Asturias',
+  BALEARES: 'Illes Balears',
+  ILLES_BALEARS: 'Illes Balears',
+  CANARIAS: 'Canarias',
+  CANTABRIA: 'Cantabria',
+  CASTILLA_LA_MANCHA: 'Castilla-La Mancha',
+  CASTILLA_Y_LEON: 'Castilla y León',
+  CATALUNA: 'Cataluña',
+  CATALUNYA: 'Cataluña',
+  CEUTA: 'Ceuta',
+  COMUNIDAD_VALENCIANA: 'Comunitat Valenciana',
+  EXTREMADURA: 'Extremadura',
+  GALICIA: 'Galicia',
+  LA_RIOJA: 'La Rioja',
+  MADRID: 'Comunidad de Madrid',
+  MELILLA: 'Melilla',
+  MURCIA: 'Región de Murcia',
+  NAVARRA: 'Comunidad Foral de Navarra',
+  PAIS_VASCO: 'País Vasco',
+};
+
+/**
+ * Las comunidades llegan en una sola cadena y pueden ser **varias separadas por
+ * coma**: un opositor se presenta en más de una, y todas condicionan el criterio
+ * de corrección.
+ */
+function formatCommunities(raw: string): string {
+  return raw
+    .split(',')
+    .map((value) => value.trim())
+    .filter((value) => value !== '')
+    .map((value) => {
+      const known = COMMUNITY_LABEL[value.toUpperCase()];
+      if (known !== undefined) return known;
+      const soft = value.replace(/_/g, ' ').toLowerCase();
+      return soft.charAt(0).toUpperCase() + soft.slice(1);
+    })
+    .join(' · ');
+}
+
 export function SubmissionPage() {
   const { id = '' } = useParams();
   const navigate = useNavigate();
@@ -102,9 +155,7 @@ export function SubmissionPage() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [view, views]);
 
-  const studentLabel = detail
-    ? (detail.submission.studentAlias ?? detail.submission.studentRef)
-    : '';
+  const studentLabel = detail ? labelOf(detail.submission, detail.student) : '';
   const readOnly = detail?.submission.status === 'published';
   const working = save.isPending || validate.isPending || publish.isPending;
 
@@ -212,6 +263,18 @@ export function SubmissionPage() {
               {detail.activity.name}
               <span className="px-1.5 text-border-strong">·</span>
               {ACTIVITY_KIND_LABEL[detail.activity.kind]}
+              {/*
+                La comunidad se enseña porque **cambia el criterio de
+                corrección**: el tribunal no es el mismo en dos comunidades. Que
+                el profesor la vea aquí es lo que le permite juzgar si la
+                propuesta parte de la referencia correcta.
+              */}
+              {detail.student?.community ? (
+                <>
+                  <span className="px-1.5 text-border-strong">·</span>
+                  {formatCommunities(detail.student.community)}
+                </>
+              ) : null}
             </p>
           </div>
           <StatusBadge status={detail.submission.status} className="shrink-0" />
@@ -240,6 +303,18 @@ export function SubmissionPage() {
           <p className="flex items-center justify-center gap-2 border-t border-border bg-muted px-4 py-2 text-ui text-muted-foreground">
             <Lock className="size-4 shrink-0" aria-hidden="true" />
             Publicada en Moodle: esta corrección ya no se puede modificar.
+          </p>
+        ) : null}
+
+        {/*
+          Publicar son dos operaciones —la nota y el PDF de corrección— y hay
+          conectores que no admiten la segunda. No es un fallo, pero callarlo
+          dejaría creer que el alumno ha recibido un PDF que nunca salió.
+        */}
+        {detail.correction?.publishNotice ? (
+          <p className="flex items-start justify-center gap-2 border-t border-border bg-muted px-4 py-2 text-ui text-muted-foreground">
+            <Info className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+            {detail.correction.publishNotice}
           </p>
         ) : null}
       </header>

@@ -98,6 +98,93 @@ the OCR path.
 > same three levels from the app — see [`contexts/README.md`](contexts/README.md) for how files and
 > database rows relate.
 
+## The AI engine
+
+The design in [`docs/motor-ia.md`](docs/motor-ia.md) is built around one claim, and it is worth
+stating plainly because everything else follows from it:
+
+> **A language model will sometimes be wrong. The point is not to pretend otherwise — it is to make
+> being wrong *detectable*.**
+
+Vega does that by never letting the model assert something about a student without pointing at the
+evidence. Every deduction carries a **literal quote** from the student's own work, and a separate
+pass checks — *in code, not with another model* — that the quote actually exists. A fabricated
+quote stops being a plausible sentence and becomes a failed string lookup.
+
+Five stages, of which the two cheapest do the most work:
+
+| Stage | Runs on | Cost | What it does |
+|---|---|---|---|
+| **0 · Triage** (forum only) | cheap model, **blind** to the course context | cents | Sorts a question into *typo · admin · easy · hard · not a question*. Typos are parked at **zero** grading cost |
+| **1 · Transcription** | standard model, vision | — | Handwriting → LaTeX. Marks `[ILLEGIBLE]` / `[DOUBT]` rather than guessing |
+| **2 · Grading** | expert model, adaptive thinking | the bulk | Per-criterion marks and feedback, each deduction with its literal quote |
+| **3 · Mechanical check** | **your code — no model at all** | **zero** | Does every quote exist? Does the arithmetic add up? Exact, always on, not switchable off |
+| **4 · AI check** | standard model, **disjoint context** | ~€0.02 | Does the feedback agree with the mark? Are the flagged steps sound? |
+
+Stage 4 deliberately never sees the grading context. A verifier that inherits the grader's
+reasoning is not a second opinion.
+
+**What it costs.** About **€0.17** per handwritten submission, **€0.01** per easy question, **€0.07**
+per hard one, and **€0** for a typo. Roughly **€54/month** for a mid-sized academy — less than a
+couple of hours of the teaching time it gives back.
+
+**What it does not do.** Decide. The mark that reaches a student is signed by a person
+([ADR 0004](docs/decisiones/0004-validacion-humana-obligatoria.md)). If the verification failed or
+was skipped, autonomous publishing is vetoed in code, not in a comment.
+
+## Writing contexts: what actually changes the output
+
+The prompts *are* the product configuration, so this section is the closest thing Vega has to a
+manual. Full guidance lives in [`contexts/README.md`](contexts/README.md); the shape of each layer
+is in [`docs/motor-ia.md`](docs/motor-ia.md).
+
+**Write instructions, not a syllabus.** The reader is a corrector, not a student. «Deduct 0.25 for
+not stating the domain» does work; «value rigour» does not. Every rule should be one you could
+check someone followed.
+
+**Put numbers on it wherever a mark is involved.** Vagueness is where a model invents its own
+policy, and it will invent a different one each night.
+
+**Never write anything that invites the model to fill a gap.** The single most dangerous phrase in
+a grading prompt is any variant of *"if unclear, assume…"*. The rule that replaces it: say what is
+missing, lower the confidence, and let the teacher look. Nine of these prompts were rewritten after
+an adversarial review found exactly this pattern hiding in wording that read as helpful.
+
+**Don't repeat a higher layer.** Every line travels on every single call and is paid for on every
+single call. Reference it instead — «global §8 applies». Duplication is also how contradictions
+start.
+
+**Keep it short enough to read in one screen.** A per-activity context longer than that usually
+contains material that belongs one layer up.
+
+### Which layer does a rule belong to?
+
+| If the rule… | it goes in |
+|---|---|
+| defines the house standard of rigour and format for the whole installation (admin-only) | `installation` |
+| is department policy on marking — tone, carry-through errors, rounding | `global` |
+| distinguishes a graded submission from a forum reply | `activity_kind` |
+| describes a *format* shared by many activities (exam-style problem, theory essay, syllabus document) | `template` |
+| is about this one assignment's typical mistakes | `activity` |
+
+### Uploading material: `.tex`, plain text, or PDF?
+
+This trips people up, so it is worth being blunt about it.
+
+| You have… | Do this | Why |
+|---|---|---|
+| A reference solution in LaTeX | **Upload the `.tex`** | It is text: it goes into the prompt verbatim and gets cached with the rest of the context. Best possible fidelity for notation |
+| Notes, a marking matrix, expected contents | **Upload `.md` or `.txt`** | Same path. A matrix as a plain list of items is far easier for the model to work through than a formatted table image |
+| A short excerpt (a statement, one rule) | **Paste it into the activity context** | Not worth a file. It ends up in the same prompt either way |
+| Legislation, a long regulation | **Upload as text, split by article** | Article-level segmentation is what lets the engine quote *document + article + literal text* — and lets the code verify that quote exists |
+| A PDF or an image | **Convert it to text first** | ⚠️ **Vega stores no bytes for binaries.** A PDF attached as *context* is registered as a reference with `hasContent: false` and **its content never reaches the model.** The UI says so rather than pretending otherwise |
+| A student's handwritten exam | **Upload as PDF/photo — that is the point** | This is the *submission* path, not the context path. It goes through vision transcription |
+| A `.docx` | Extracted to text on upload | Only the extracted text is used |
+
+The rule of thumb: **anything you want the model to read must exist as text.** If you are unsure
+whether something actually reached the model, don't guess — open
+`GET /api/contexts/resolved/{activityId}`, which shows the exact merged context that gets sent.
+
 ## Features
 
 - **Course and activity discovery** — pick a course from Moodle, see its assignments and forums,
@@ -145,7 +232,7 @@ docs/            design docs, user stories, decision records
 ## Quick start (development)
 
 ```bash
-git clone https://github.com/<your-user>/vega && cd vega
+git clone https://github.com/jamataran/vega && cd vega
 cp .env.example .env            # at minimum, ANTHROPIC_API_KEY
 pnpm install
 pnpm setup                      # starts postgres, applies migrations
@@ -177,8 +264,8 @@ pnpm --filter @vega/core cli grade --activity tema04 --pdf exam.pdf
 
 Every push to `main` publishes two images to GHCR:
 
-- `ghcr.io/<your-user>/vega-api`
-- `ghcr.io/<your-user>/vega-frontend`
+- `ghcr.io/jamataran/vega-api`
+- `ghcr.io/jamataran/vega-frontend`
 
 Point your orchestrator (a Portainer stack, plain compose, …) at
 [`deploy/docker-compose.prod.yml`](deploy/docker-compose.prod.yml). **Schema changes travel inside

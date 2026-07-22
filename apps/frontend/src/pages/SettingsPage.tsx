@@ -3,7 +3,12 @@ import type { ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { UseQueryResult } from '@tanstack/react-query';
 import { RefreshCw } from 'lucide-react';
-import type { AppSettings, HealthResponse, UpdateSettingsRequest } from '@vega/shared';
+import type {
+  AnthropicConnectionResponse,
+  AppSettings,
+  HealthResponse,
+  UpdateSettingsRequest,
+} from '@vega/shared';
 import { api } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { queryKeys } from '@/lib/queryKeys';
@@ -25,6 +30,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
 import { ErrorState, PageHeader, Section } from '@/components/common/Feedback';
 import { Field } from '@/components/common/Field';
+import { AnthropicConnectionResult } from '@/components/settings/AnthropicConnectionResult';
 import { MoodleConnectionCard } from '@/components/settings/MoodleConnectionCard';
 import { KEEP, SecretField, secretPatch } from '@/components/settings/SecretField';
 import type { SecretState } from '@/components/settings/SecretField';
@@ -195,6 +201,7 @@ export function SettingsPage() {
 
   const settings = settingsQuery.data?.settings ?? null;
   const [form, setForm] = useState<FormState | null>(null);
+  const [anthropicTest, setAnthropicTest] = useState<AnthropicConnectionResponse | null>(null);
   const synced = useRef(false);
 
   useEffect(() => {
@@ -217,6 +224,15 @@ export function SettingsPage() {
     },
     onError: (error) => notify.error('No se han podido guardar los ajustes', error),
     onSettled: () => setSaving(null),
+  });
+
+  // Prueba la conexión con Anthropic contra la configuración ya guardada. Como
+  // en la de Moodle, una clave inválida llega con `ok: false` en el cuerpo, no
+  // como error: se enseña en el mismo sitio donde se pega la clave.
+  const testAnthropic = useMutation({
+    mutationFn: () => api.testAnthropicConnection(),
+    onSuccess: setAnthropicTest,
+    onError: (error) => notify.error('No se ha podido probar la conexión', error),
   });
 
   // Un profesor no administra nada, pero sí tiene que poder pegar su token de
@@ -269,6 +285,20 @@ export function SettingsPage() {
   const maxTokens = parseInteger(form.maxTokens, 1);
   const smtpPort = parseInteger(form.smtpPort, 0);
   const everyMinutes = parseInteger(form.everyMinutes, 1);
+
+  // La prueba usa la configuración GUARDADA. Con cambios sin aplicar probaría la
+  // anterior, así que se desactiva hasta guardar.
+  const anthropicDirty =
+    form.provider !== settings.anthropic.provider ||
+    form.transcriptionModel !== settings.anthropic.transcriptionModel ||
+    form.gradingModel !== settings.anthropic.gradingModel ||
+    maxTokens !== settings.anthropic.maxTokens ||
+    secretPatch(form.apiKey) !== undefined;
+
+  // Con el proveedor «Anthropic» y sin clave guardada, probar sólo repetiría el
+  // aviso que ya da el propio campo de la clave. El simulado sí se puede probar.
+  const anthropicNeedsKey =
+    settings.anthropic.provider === 'anthropic' && !settings.anthropic.apiKeyConfigured;
 
   const health = healthQuery.data;
 
@@ -362,7 +392,21 @@ export function SettingsPage() {
               autoComplete="new-password"
             />
 
-            <div className="flex justify-end">
+            {anthropicTest ? <AnthropicConnectionResult result={anthropicTest} /> : null}
+
+            <div className="flex flex-wrap justify-end gap-2">
+              <Button
+                variant="outline"
+                size="lg"
+                // Con cambios sin guardar, probar la configuración anterior
+                // daría un resultado que no habla de lo que hay en pantalla; sin
+                // clave con proveedor Anthropic, no hay nada que probar todavía.
+                disabled={anthropicDirty || anthropicNeedsKey}
+                loading={testAnthropic.isPending}
+                onClick={() => testAnthropic.mutate()}
+              >
+                Probar conexión
+              </Button>
               <Button
                 variant="default"
                 size="lg"
@@ -370,6 +414,8 @@ export function SettingsPage() {
                 loading={saving === 'anthropic'}
                 onClick={() => {
                   if (maxTokens === null) return;
+                  // Lo guardado invalida cualquier prueba anterior.
+                  setAnthropicTest(null);
                   save('anthropic', {
                     anthropic: {
                       provider: form.provider,

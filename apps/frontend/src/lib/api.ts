@@ -19,6 +19,7 @@ import {
   ImportActivitiesResponse,
   LoginResponse,
   MeResponse,
+  AnthropicConnectionResponse,
   MoodleConnectionResponse,
   OverviewResponse,
   QueueCounts,
@@ -439,6 +440,12 @@ export const api = {
 
   updateSettings: (body: UpdateSettingsRequest) =>
     request(routes.settings, { schema: SettingsResponse, method: 'PATCH', body }),
+
+  testAnthropicConnection: () =>
+    request(routes.testAnthropicConnection, {
+      schema: AnthropicConnectionResponse,
+      method: 'POST',
+    }),
 
   // ── Panel y procesos ──────────────────────────────────────────────────────
 

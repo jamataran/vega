@@ -16,6 +16,8 @@ diseño de producto y de ingeniería.
 | [`glosario.md`](glosario.md) | Vocabulario del dominio: actividad, entrega, foro, contexto, apartado… |
 | [`hu/`](hu/) | Historias de usuario. **Es el documento vivo del producto** |
 | [`decisiones/`](decisiones/) | ADRs: decisiones de arquitectura con su contexto y sus consecuencias |
+| [`motor-ia.md`](motor-ia.md) · [`diseno-motor-ia.md`](diseno-motor-ia.md) | Diseño del motor de IA antes de implementarlo: alcance del hito, pipeline, anti-alucinación y coste |
+| [`revision/`](revision/) | Revisiones de cierre de hito: qué se comprobó ejecutándolo y qué quedó abierto |
 | [`tareas-claude-code.md`](tareas-claude-code.md) | **Obsoleto.** Backlog previo al giro a TypeScript: describe un backend Python/FastAPI que ya no existe. Se conserva sólo como rastro; no lo uses como referencia |
 
 ## Fuentes de verdad
