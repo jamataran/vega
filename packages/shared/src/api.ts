@@ -88,6 +88,12 @@ export const HealthResponse = z.object({
   status: z.enum(['ok', 'degraded']),
   version: z.string(),
   database: z.enum(['up', 'down']),
+  /**
+   * Si se puede escribir en el almacén de entregas. Sin esto, un volumen mal
+   * montado no se nota hasta que hay un centenar de entregas registradas sin
+   * fichero: la ingesta las apunta y el motor revienta después sobre ellas.
+   */
+  storage: z.enum(['up', 'down']),
   aiProvider: z.string(),
   aiTransport: AiTransport,
   readingModel: z.string(),

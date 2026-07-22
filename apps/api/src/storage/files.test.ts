@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { chmod, mkdtemp, readdir, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { FileStore, safeFilename } from './files.js';
 
@@ -42,4 +45,42 @@ test('una ruta guardada no puede salirse del almacén', () => {
 
   assert.throws(() => store.absolutePathOf('../../etc/passwd'), /se sale del almacén/);
   assert.throws(() => store.absolutePathOf('/etc/passwd'), /es absoluta/);
+});
+
+// ── Que el almacén sea escribible se comprueba escribiendo ──────────────────
+//
+// Un despliegue con el volumen montado con otro dueño registró un centenar de
+// entregas y no guardó ni un PDF. Mirar permisos no lo habría detectado: hay
+// que intentar la escritura con el usuario que corre el proceso.
+
+test('un almacén escribible se declara escribible y no deja rastro', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'vega-almacen-'));
+  try {
+    const resultado = await new FileStore(root).checkWritable();
+
+    assert.deepEqual(resultado, { writable: true });
+    // La sonda se borra: el almacén queda como estaba.
+    assert.deepEqual(await readdir(root), []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('un almacén sin permiso de escritura lo dice, con el motivo', async () => {
+  const padre = await mkdtemp(join(tmpdir(), 'vega-almacen-'));
+  const root = join(padre, 'entregas-recibidas');
+  try {
+    // Un directorio de sólo lectura reproduce el volumen montado como root: el
+    // proceso no puede crear nada dentro.
+    await chmod(padre, 0o500);
+    const resultado = await new FileStore(root).checkWritable();
+
+    assert.equal(resultado.writable, false);
+    // El motivo viaja hasta el log y la pantalla de estado; sin él, «no se
+    // puede escribir» no le dice a nadie qué arreglar.
+    assert.ok('reason' in resultado && resultado.reason.length > 0);
+  } finally {
+    await chmod(padre, 0o700);
+    await rm(padre, { recursive: true, force: true });
+  }
 });
