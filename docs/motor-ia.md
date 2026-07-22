@@ -181,7 +181,7 @@ Configurables en Ajustes (combo por rol, sesión §3); los ids nunca se escriben
 | Rol (clave en `app_settings`) | Modelo por defecto | Parámetros | Se usa en |
 |---|---|---|---|
 | `anthropic.readingModel` | `claude-opus-4-8` | thinking adaptive, effort `high`, **max_tokens ≥ 32k por lectura** | Lecturas A y B |
-| `anthropic.gradingModel` | `claude-opus-4-8` | thinking adaptive, effort `xhigh`, max_tokens ≥ 64k (**lo exige `xhigh`**; con timeout explícito para que el SDK no rechace la llamada no-streaming) | Corrección y respuesta experta de foro |
+| `anthropic.gradingModel` | `claude-opus-4-8` | thinking adaptive, effort `xhigh`, max_tokens ≥ 64k (**lo exige `xhigh`**) | Corrección y respuesta experta de foro |
 | `anthropic.verifyModel` | `claude-sonnet-5` | thinking adaptive, effort `high`, max_tokens 8k | `verify()` y respuesta sencilla de foro |
 | `anthropic.triageModel` | `claude-haiku-4-5` | sin thinking, max_tokens 1k | Triaje de dudas |
 
@@ -214,6 +214,13 @@ Hechos de la API que condicionan esto (verificados contra la referencia actual d
   igual que `max_tokens` y se amplía el presupuesto. Medido en el piloto: con 16k, un examen de
   seis páginas agota el tope a mitad del JSON, porque el razonamiento adaptativo gasta del mismo
   presupuesto que el texto.
+- **Todas las llamadas van por streaming** (`messages.stream(...).finalMessage()`), aunque el motor
+  no enseñe nada incremental. El SDK **rechaza en local** una petición sin streaming cuyo
+  `max_tokens` estime más de 10 minutos de generación (con el suelo de 32k de la lectura, todas), y
+  el timeout por petición no suprime esa comprobación —sólo el del cliente—. Medido en el piloto:
+  un lote entero de 25 entregas murió con «Streaming is required…» sin que ninguna llamada llegara a
+  la red. Con `output_config.format`, el mensaje final del stream llega igualmente parseado en
+  `parsed_output`, y una respuesta cortada rechaza con el mismo error de parseo de arriba.
 - **La transcripción recibe bloques, no páginas.** `input.pages` son los trozos en que la ingesta
   parte el PDF (`ai.pagesPerChunk`), y el prompt debe anunciar los **números de página del
   original**. Anunciar el número de bloques hacía que el modelo devolviera una entrada por bloque

@@ -21,15 +21,11 @@ import type {
 } from './provider.js';
 
 /**
- * Proveedor real contra la API de Anthropic.
+ * Proveedor real contra la API de Anthropic. Rodado contra la API real en el
+ * piloto; lo que queda por comprobar conserva su
+ * `// TODO(vega): sin verificar contra la API real`.
  *
- * ⚠️ ENTREGA 1: implementación mínima. La interfaz y la estructura de los
- * prompts son las definitivas, pero NADA de este fichero se ha ejecutado
- * contra la API real: no hay clave en el entorno de desarrollo y el proveedor
- * por defecto es el mock. Los puntos concretos que quedan sin comprobar están
- * marcados con `// TODO(vega): sin verificar contra la API real`.
- *
- * Decisiones de diseño que sí son deliberadas:
+ * Decisiones de diseño deliberadas:
  *  - Modelo por defecto `claude-opus-4-8` (visión + razonamiento). Los ids de
  *    modelo salen de la configuración, nunca escritos a mano en el código.
  *  - El bloque de contexto de corrección lleva `cache_control` porque es
@@ -37,6 +33,14 @@ import type {
  *    es de donde sale el ahorro del lote nocturno.
  *  - El contexto va DESPUÉS de las instrucciones fijas y ANTES de la
  *    transcripción del alumno. El caché es un prefijo: lo estable primero.
+ *  - **Todas las llamadas van por streaming** (`messages.stream`), aunque no
+ *    se enseñe nada incremental. No es cosmético: el SDK rechaza en local una
+ *    petición sin streaming cuyo `max_tokens` estime más de 10 minutos de
+ *    generación —con el suelo de 32k de la transcripción, todas—, y el timeout
+ *    por petición NO suprime esa comprobación (sólo el del cliente). En el
+ *    piloto esto tumbó las 50 lecturas de un lote antes de salir a la red.
+ *    Con `output_config.format`, el mensaje final del stream llega igualmente
+ *    parseado en `parsed_output`.
  */
 
 export const DEFAULT_TRANSCRIPTION_MODEL = 'claude-opus-4-8';
@@ -44,7 +48,7 @@ export const DEFAULT_GRADING_MODEL = 'claude-opus-4-8';
 export const DEFAULT_TRIAGE_MODEL = 'claude-haiku-4-5';
 export const DEFAULT_VERIFY_MODEL = 'claude-sonnet-5';
 
-/** Sin streaming el SDK corta por timeout mucho antes de 128k. */
+/** Tope de salida por defecto si el administrador no ha fijado otro. */
 const MAX_TOKENS = 16_000;
 
 /**
@@ -56,10 +60,9 @@ const TRANSCRIPTION_MIN_TOKENS = 32_000;
 
 /**
  * Timeout explícito para las llamadas largas (transcripción y corrección).
- * Sin él, el SDK **rechaza** una petición no-streaming cuyo `max_tokens`
- * implique más de ~10 minutos de generación; con un timeout explícito acepta
- * y espera. Una corrección con razonamiento extendido puede tardar varios
- * minutos con toda normalidad.
+ * Con streaming el SDK no impone el límite de 10 minutos, pero su timeout por
+ * defecto sigue siendo corto para una lectura con razonamiento extendido que
+ * tarda lo que tarda: se le da margen de sobra y que decida la API.
  */
 const LONG_CALL_TIMEOUT_MS = 60 * 60 * 1_000;
 
@@ -292,7 +295,7 @@ export class AnthropicAiProvider implements AiProvider {
     // 300 ppp puede pasarse y habrá que trocearlo.
     const response = await withStopRetry(
       (maxTokens) =>
-        this.#client.messages.parse({
+        this.#client.messages.stream({
         model,
         max_tokens: maxTokens,
         ...(supportsExtendedReasoning(model) ? { thinking: { type: 'adaptive' as const } } : {}),
@@ -319,7 +322,7 @@ export class AnthropicAiProvider implements AiProvider {
             ],
           },
         ],
-        }, { timeout: LONG_CALL_TIMEOUT_MS }),
+        }, { timeout: LONG_CALL_TIMEOUT_MS }).finalMessage(),
       // Un examen entero de manuscrito pasado a LaTeX no cabe en topes
       // pequeños, y el razonamiento adaptativo consume del mismo presupuesto:
       // con 16k, seis páginas cortaban el JSON a mitad de una cadena. Se
@@ -408,7 +411,7 @@ export class AnthropicAiProvider implements AiProvider {
     const effort = clampEffort(model, 'xhigh');
     const response = await withStopRetry(
       (maxTokens) =>
-        this.#client.messages.parse({
+        this.#client.messages.stream({
         model,
         max_tokens: maxTokens,
         ...(supportsExtendedReasoning(model) ? { thinking: { type: 'adaptive' as const } } : {}),
@@ -418,7 +421,7 @@ export class AnthropicAiProvider implements AiProvider {
         },
         system,
         messages: [{ role: 'user', content: [...originals, { type: 'text', text: `${about}AI_TEACHER_NOTES=${input.explanations === false ? 'false' : 'true'}\n\n${work}` }] }],
-        }, { timeout: LONG_CALL_TIMEOUT_MS }),
+        }, { timeout: LONG_CALL_TIMEOUT_MS }).finalMessage(),
       Math.max(this.#maxTokens, 32_000, minTokensFor(effort)),
       maxOutputFor(model),
     );
@@ -455,7 +458,7 @@ export class AnthropicAiProvider implements AiProvider {
     // Sin `thinking` ni `effort` a propósito: el modelo de triaje por defecto
     // es Haiku 4.5, de una generación que responde 400 a ambos parámetros.
     const response = await withStopRetry(
-      (maxTokens) => this.#client.messages.parse({
+      (maxTokens) => this.#client.messages.stream({
         model: this.#triageModel,
         max_tokens: maxTokens,
         output_config: { format: zodOutputFormat(TriageAnswer) },
@@ -464,7 +467,7 @@ export class AnthropicAiProvider implements AiProvider {
           role: 'user',
           content: `Hilo previo:\n${input.thread.join('\n---\n') || '(vacío)'}\n\nMensaje nuevo:\n${input.message}`,
         }],
-      }),
+      }).finalMessage(),
       1_000,
       maxOutputFor(this.#triageModel),
     );
@@ -484,7 +487,7 @@ export class AnthropicAiProvider implements AiProvider {
       .join('\n\n') ?? '(sin transcripción; intervención de foro)';
     const model = this.#verifyModel;
     const response = await withStopRetry(
-      (maxTokens) => this.#client.messages.parse({
+      (maxTokens) => this.#client.messages.stream({
         model,
         max_tokens: maxTokens,
         ...(supportsExtendedReasoning(model) ? { thinking: { type: 'adaptive' as const } } : {}),
@@ -497,7 +500,7 @@ export class AnthropicAiProvider implements AiProvider {
           role: 'user',
           content: `Trabajo:\n${transcript}\n\nApartados propuestos:\n${JSON.stringify(input.items)}\n\nResumen:\n${input.aiSummary}\n\nDocumento de corrección:\n${input.aiLatex}`,
         }],
-      }),
+      }).finalMessage(),
       Math.min(this.#maxTokens, 8_000),
       maxOutputFor(model),
     );
@@ -602,7 +605,8 @@ async function withStopRetry<T extends Anthropic.Message>(
     }
     throw new AiResponseError(
       'max_tokens',
-      'El modelo ha agotado el límite de salida después de un reintento controlado.',
+      'La respuesta del modelo se ha cortado por el límite de salida, incluso tras ampliarlo. ' +
+        'Suele pasar con entregas muy largas: baja «Páginas por bloque» en Ajustes para partirlas más.',
     );
   }
   throw new AiResponseError('invalid_output', 'La llamada no ha producido una respuesta.');

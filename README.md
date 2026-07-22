@@ -374,8 +374,8 @@ Settings checks every one of them and names the ones that are missing.
 | `mod_assign_get_assignments` | The assignments of the selected course | Yes |
 | `mod_forum_get_forums_by_courses` | The forums of the selected course | Yes |
 | `mod_assign_get_submissions` | Pull submitted attempts and the URLs of the attached files | Yes |
-| `mod_forum_get_forum_discussions_paginated` | Read forum discussions | Yes, for forums |
-| `mod_forum_get_forum_discussion_posts` | Read the replies in a discussion, which is the only way to tell whether a question is still unanswered. Deprecated in Moodle 3.8 in favour of `mod_forum_get_discussion_posts` | Yes, for forums |
+| `mod_forum_get_forum_discussions` | Read forum discussions (Moodle 3.7+). Sites older than 3.7 can declare `mod_forum_get_forum_discussions_paginated` instead — Vega picks whichever pair the token's catalogue offers | Yes, for forums |
+| `mod_forum_get_discussion_posts` | Read the replies in a discussion, which is the only way to tell whether a question is still unanswered (Moodle 3.7+). The pre-3.7 equivalent is `mod_forum_get_forum_discussion_posts` | Yes, for forums |
 | `core_user_get_users_by_field` | Student names and profile fields — including the autonomous community, which changes how the work is marked (ADR 0013). **Optional**: without it Vega still grades, the queue just shows `moodle-1234` instead of a name | No |
 
 **Writing — this is what the student actually sees**
@@ -395,8 +395,9 @@ at all when you create an external service, and the two halves fail at different
 `mod_assign_get_assignments` alone you can import an activity and still ingest nothing, because
 pulling the submissions needs `mod_assign_get_submissions`. The same trap applies to forums —
 listing them needs `mod_forum_get_forums_by_courses`, but reading what students asked needs
-`mod_forum_get_forum_discussions_paginated` and `mod_forum_get_forum_discussion_posts`. «Test
-connection» in Settings now exercises all of them, so a green report means ingestion will work.
+`mod_forum_get_forum_discussions` and `mod_forum_get_discussion_posts` (their pre-3.7 equivalents
+were dropped from the function picker in modern Moodle, which is why they cannot be added there).
+«Test connection» in Settings now exercises all of them, so a green report means ingestion will work.
 
 Downloading a submission is not a web service call: files come from `pluginfile.php` signed with the
 same token, so no extra function is involved. `core_course_get_contents` appears in the connector's

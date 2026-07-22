@@ -25,40 +25,50 @@ interface Llamada {
 /**
  * Un cliente de Anthropic de mentira: apunta cada llamada y devuelve lo que se
  * le diga, incluida la posibilidad de fallar las primeras veces.
+ *
+ * Implementa `messages.stream(...).finalMessage()`, que es el único contrato
+ * que usa el proveedor: todas las llamadas van por streaming porque el SDK
+ * rechaza en local las peticiones sin streaming con `max_tokens` altos.
  */
 function clienteFalso(
-  respuestas: Array<{ error?: Error; pages?: Array<{ page: number; latex: string }> }>,
+  respuestas: Array<{
+    error?: Error;
+    pages?: Array<{ page: number; latex: string }>;
+    stopReason?: string;
+  }>,
 ): { client: Anthropic; llamadas: Llamada[] } {
   const llamadas: Llamada[] = [];
   let indice = 0;
 
-  const parse = async (body: Record<string, unknown>): Promise<unknown> => {
-    const contenido = (body['messages'] as Array<{ content: unknown[] }>)[0]?.content ?? [];
-    const texto = contenido
-      .filter((bloque): bloque is { type: 'text'; text: string } =>
-        typeof bloque === 'object' && bloque !== null && (bloque as { type?: string }).type === 'text',
-      )
-      .map((bloque) => bloque.text)
-      .join('\n');
-    llamadas.push({ maxTokens: body['max_tokens'] as number, texto });
+  const stream = (body: Record<string, unknown>): { finalMessage: () => Promise<unknown> } => ({
+    finalMessage: async (): Promise<unknown> => {
+      const contenido = (body['messages'] as Array<{ content: unknown[] }>)[0]?.content ?? [];
+      const texto = contenido
+        .filter((bloque): bloque is { type: 'text'; text: string } =>
+          typeof bloque === 'object' && bloque !== null && (bloque as { type?: string }).type === 'text',
+        )
+        .map((bloque) => bloque.text)
+        .join('\n');
+      llamadas.push({ maxTokens: body['max_tokens'] as number, texto });
 
-    const respuesta = respuestas[Math.min(indice, respuestas.length - 1)];
-    indice += 1;
-    if (respuesta?.error) throw respuesta.error;
+      const respuesta = respuestas[Math.min(indice, respuestas.length - 1)];
+      indice += 1;
+      if (respuesta?.error) throw respuesta.error;
 
-    return {
-      model: body['model'] as string,
-      stop_reason: 'end_turn',
-      usage: { input_tokens: 10, output_tokens: 10 },
-      parsed_output: {
-        pages: respuesta?.pages ?? [{ page: 1, latex: 'x' }],
-        flags: [],
-        confidence: 0.9,
-      },
-    };
-  };
+      return {
+        model: body['model'] as string,
+        stop_reason: respuesta?.stopReason ?? 'end_turn',
+        usage: { input_tokens: 10, output_tokens: 10 },
+        parsed_output: {
+          pages: respuesta?.pages ?? [{ page: 1, latex: 'x' }],
+          flags: [],
+          confidence: 0.9,
+        },
+      };
+    },
+  });
 
-  return { client: { messages: { parse } } as unknown as Anthropic, llamadas };
+  return { client: { messages: { stream } } as unknown as Anthropic, llamadas };
 }
 
 function proveedor(client: Anthropic, model = 'claude-opus-4-8'): AnthropicAiProvider {
@@ -125,6 +135,39 @@ test('el reintento respeta el techo de salida del modelo', async () => {
   for (const llamada of llamadas) {
     assert.ok(llamada.maxTokens <= 64_000, `max_tokens ${llamada.maxTokens} supera el techo de Haiku`);
   }
+});
+
+test('un stop_reason max_tokens con JSON válido también se reintenta con más presupuesto', async () => {
+  // Con salida estructurada lo normal es que el corte reviente el parseo, pero
+  // si el JSON queda casualmente completo la señal es el stop_reason. Ambos
+  // caminos deben acabar en el mismo reintento.
+  const { client, llamadas } = clienteFalso([{ stopReason: 'max_tokens' }, {}]);
+
+  await proveedor(client).transcribe({
+    submissionId: SUBMISSION,
+    studentRef: 'alumno-0007',
+    activityKind: 'assignment',
+    pages: SEIS_PAGINAS,
+  });
+
+  assert.equal(llamadas.length, 2);
+  assert.ok(llamadas[1]!.maxTokens > llamadas[0]!.maxTokens);
+});
+
+test('un refusal no se reintenta jamás', async () => {
+  const { client, llamadas } = clienteFalso([{ stopReason: 'refusal' }]);
+
+  await assert.rejects(
+    () =>
+      proveedor(client).transcribe({
+        submissionId: SUBMISSION,
+        studentRef: 'alumno-0007',
+        activityKind: 'assignment',
+        pages: SEIS_PAGINAS,
+      }),
+    /rechazado/,
+  );
+  assert.equal(llamadas.length, 1, 'repetir una petición rechazada va contra la guía de la API');
 });
 
 test('si sigue cortada tras ampliar, el error explica qué hacer', async () => {

@@ -31,24 +31,79 @@ function mensaje(overrides: Record<string, unknown>): Record<string, unknown> {
 }
 
 /**
- * Moodle de laboratorio: enruta por `wsfunction` igual que el servidor real,
- * que distingue las llamadas por ese parámetro y no por la URL.
+ * Con qué pareja de funciones contesta el Moodle de laboratorio. El dialecto
+ * moderno es el de Moodle 3.7+; el antiguo, el de los sitios que sólo declaran
+ * las funciones `…_paginated` y `…_forum_discussion_posts`.
  */
-function moodleCon(paginas: readonly (readonly Debate[])[]): {
+type Dialecto = 'moderno' | 'antiguo';
+
+const CATALOGO: Record<Dialecto, readonly string[]> = {
+  moderno: ['mod_forum_get_forum_discussions', 'mod_forum_get_discussion_posts'],
+  antiguo: ['mod_forum_get_forum_discussions_paginated', 'mod_forum_get_forum_discussion_posts'],
+};
+
+/**
+ * El mismo mensaje del fixture, con la forma del exporter de Moodle 3.7+:
+ * autor anidado (`author.id`, que puede ser null si el sitio lo oculta),
+ * `hasparent`/`parentid` en vez de `parent` y `timecreated` en vez de `created`.
+ */
+function comoMensajeModerno(post: Record<string, unknown>): Record<string, unknown> {
+  const parent = Number(post['parent'] ?? 0);
+  return {
+    id: post['id'],
+    subject: post['subject'],
+    message: post['message'],
+    author: { id: post['userid'] ?? null },
+    discussionid: post['discussion'],
+    hasparent: parent !== 0,
+    parentid: parent === 0 ? null : parent,
+    timecreated: post['created'],
+    isdeleted: post['isdeleted'] ?? false,
+  };
+}
+
+/**
+ * Moodle de laboratorio: enruta por `wsfunction` igual que el servidor real,
+ * que distingue las llamadas por ese parámetro y no por la URL. Sólo contesta
+ * a las funciones de su catálogo; al resto responde con el `accessexception`
+ * que devolvería un Moodle de verdad, para que llamar al dialecto equivocado
+ * falle aquí igual de fuerte que en un aula.
+ */
+function moodleCon(
+  paginas: readonly (readonly Debate[])[],
+  dialecto: Dialecto = 'moderno',
+): {
   connector: Moodle3Connector;
   llamadas: URLSearchParams[];
 } {
   const llamadas: URLSearchParams[] = [];
   const debates = paginas.flat();
+  const permitidas = new Set(CATALOGO[dialecto]);
 
   const fetchImpl: typeof fetch = (_url, init) => {
     const params = new URLSearchParams(String(init?.body));
     llamadas.push(params);
 
-    const wsfunction = params.get('wsfunction');
+    const wsfunction = params.get('wsfunction') ?? '';
     let payload: unknown;
 
-    if (wsfunction === 'mod_forum_get_forum_discussions_paginated') {
+    if (wsfunction === 'core_webservice_get_site_info') {
+      payload = {
+        sitename: 'Academia Hipatia',
+        username: 'profesora',
+        userid: 3,
+        functions: CATALOGO[dialecto].map((name) => ({ name })),
+      };
+    } else if (wsfunction.startsWith('mod_forum_') && !permitidas.has(wsfunction)) {
+      payload = {
+        exception: 'webservice_access_exception',
+        errorcode: 'accessexception',
+        message: 'Access control exception',
+      };
+    } else if (
+      wsfunction === 'mod_forum_get_forum_discussions' ||
+      wsfunction === 'mod_forum_get_forum_discussions_paginated'
+    ) {
       const page = Number(params.get('page') ?? '0');
       payload = {
         discussions: (paginas[page] ?? []).map((debate) => ({
@@ -61,6 +116,10 @@ function moodleCon(paginas: readonly (readonly Debate[])[]): {
       const discussionid = Number(params.get('discussionid') ?? '0');
       const debate = debates.find((candidato) => candidato.id === discussionid);
       payload = { posts: debate?.posts ?? [] };
+    } else if (wsfunction === 'mod_forum_get_discussion_posts') {
+      const discussionid = Number(params.get('discussionid') ?? '0');
+      const debate = debates.find((candidato) => candidato.id === discussionid);
+      payload = { posts: (debate?.posts ?? []).map(comoMensajeModerno) };
     } else {
       payload = {};
     }
@@ -229,7 +288,7 @@ test('los debates se recorren hasta agotar las páginas', async () => {
   assert.equal(entregas.length, 51);
 
   const paginas = llamadas
-    .filter((params) => params.get('wsfunction') === 'mod_forum_get_forum_discussions_paginated')
+    .filter((params) => params.get('wsfunction') === 'mod_forum_get_forum_discussions')
     .map((params) => params.get('page'));
   assert.deepEqual(paginas, ['0', '1']);
 });
@@ -239,13 +298,90 @@ test('la última página incompleta corta el recorrido', async () => {
   await connector.listSubmissions(FORO);
 
   const paginas = llamadas.filter(
-    (params) => params.get('wsfunction') === 'mod_forum_get_forum_discussions_paginated',
+    (params) => params.get('wsfunction') === 'mod_forum_get_forum_discussions',
   );
   assert.equal(paginas.length, 1);
   assert.equal(paginas[0]?.get('forumid'), '42');
   assert.equal(paginas[0]?.get('perpage'), '50');
-  assert.equal(paginas[0]?.get('sortby'), 'timemodified');
-  assert.equal(paginas[0]?.get('sortdirection'), 'ASC');
+  // 4 = por fecha de creación, ascendente: el único orden que no baila entre
+  // páginas cuando alguien escribe a mitad del recorrido.
+  assert.equal(paginas[0]?.get('sortorder'), '4');
+});
+
+// ── Los dos dialectos de Moodle ─────────────────────────────────────────────
+
+test('un catálogo sin las funciones modernas manda al dialecto anterior a 3.7', async () => {
+  const { connector, llamadas } = moodleCon(
+    [[{ id: 900, posts: [mensaje({ id: 9000, userid: 6, discussion: 900 })] }]],
+    'antiguo',
+  );
+
+  const entregas = await connector.listSubmissions(FORO);
+
+  assert.equal(entregas.length, 1);
+  assert.equal(entregas[0]?.ref.remoteId, '42:900:9000');
+  const debates = llamadas.find(
+    (params) => params.get('wsfunction') === 'mod_forum_get_forum_discussions_paginated',
+  );
+  assert.ok(debates !== undefined, 'debe leer los debates con la función antigua');
+  assert.equal(debates?.get('sortby'), 'timemodified');
+  assert.equal(
+    llamadas.find((params) => params.get('wsfunction') === 'mod_forum_get_forum_discussions'),
+    undefined,
+    'a un Moodle sin la función moderna no hay que llamarla: contesta accessexception',
+  );
+});
+
+test('una respuesta borrada no cuenta como respuesta', async () => {
+  // Moodle 3.7+ no quita el mensaje borrado de la lista: lo devuelve con
+  // `isdeleted` y un texto de relleno. Contarlo dejaría la duda sin atender
+  // porque «alguien contestó», cuando esa respuesta ya no existe.
+  const { connector } = moodleCon([
+    [
+      {
+        id: 950,
+        posts: [
+          mensaje({ id: 9500, userid: 7, discussion: 950 }),
+          mensaje({ id: 9501, userid: 9, parent: 9500, discussion: 950, isdeleted: true }),
+        ],
+      },
+    ],
+  ]);
+
+  const entregas = await connector.listSubmissions(FORO);
+
+  assert.equal(entregas.length, 1, 'la respuesta retirada dejó el debate sin atender');
+  assert.equal(entregas[0]?.ref.remoteId, '42:950:9500');
+});
+
+test('una respuesta de autor oculto sí cuenta como respuesta', async () => {
+  // No se puede saber quién contestó, pero alguien lo hizo: meter a Vega en
+  // ese debate duplicaría o contradeciría en público una respuesta ya dada.
+  const { connector } = moodleCon([
+    [
+      {
+        id: 960,
+        posts: [
+          mensaje({ id: 9600, userid: 7, discussion: 960 }),
+          mensaje({ id: 9601, userid: null, parent: 9600, discussion: 960 }),
+        ],
+      },
+    ],
+  ]);
+
+  const entregas = await connector.listSubmissions(FORO);
+  assert.equal(entregas.length, 0);
+});
+
+test('una pregunta de autor oculto se deja en paz', async () => {
+  // Sin autor legible no hay a quién atribuir la pregunta ni forma de saber si
+  // el propio autor se contestó: mejor no meterse.
+  const { connector } = moodleCon([
+    [{ id: 970, posts: [mensaje({ id: 9700, userid: null, discussion: 970 })] }],
+  ]);
+
+  const entregas = await connector.listSubmissions(FORO);
+  assert.equal(entregas.length, 0);
 });
 
 test('un lmsRef que apunta a una tarea se rechaza con un mensaje que lo explica', async () => {

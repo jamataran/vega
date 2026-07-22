@@ -37,14 +37,32 @@ export const WS_FUNCTIONS = {
   getSubmissions: 'mod_assign_get_submissions',
   /** Foros de un curso, para poder reaccionar también a los debates. */
   getForums: 'mod_forum_get_forums_by_courses',
-  /** Debates de un foro; de ahí cuelgan los mensajes de cada alumno. */
-  getForumDiscussions: 'mod_forum_get_forum_discussions_paginated',
+  /**
+   * Debates de un foro; de ahí cuelgan los mensajes de cada alumno.
+   *
+   * Es la función de Moodle 3.7+. La anterior,
+   * `mod_forum_get_forum_discussions_paginated`, quedó obsoleta en 3.7 y los
+   * sitios modernos **ya ni la ofrecen** en el selector de funciones del
+   * servicio web: en el piloto (Moodle 3.11) era imposible añadirla y los foros
+   * fallaban enteros con `accessexception`. Devuelve la misma estructura de
+   * debate; sólo cambian los parámetros (`sortorder` numérico en lugar de
+   * `sortby`/`sortdirection`).
+   */
+  getForumDiscussions: 'mod_forum_get_forum_discussions',
+  /** Debates, en la función anterior a Moodle 3.7. Ver `getForumDiscussions`. */
+  getForumDiscussionsLegacy: 'mod_forum_get_forum_discussions_paginated',
   /**
    * Mensajes de un debate. El listado de debates trae el primer mensaje, pero
    * no las respuestas, y sin ellas no se puede saber si la pregunta que abre el
    * debate sigue sin contestar, que es lo único a lo que Vega responde.
+   *
+   * Función de Moodle 3.7+: devuelve los mensajes con otra forma (autor
+   * anidado, `parentid` en vez de `parent`, `timecreated` en vez de `created`);
+   * `normalizeModernPost` los traduce a la forma que entiende el conector.
    */
-  getDiscussionPosts: 'mod_forum_get_forum_discussion_posts',
+  getDiscussionPosts: 'mod_forum_get_discussion_posts',
+  /** Mensajes de un debate, en la función anterior a Moodle 3.7. */
+  getDiscussionPostsLegacy: 'mod_forum_get_forum_discussion_posts',
   /**
    * Perfil de los alumnos a partir de sus ids. Es opcional para Vega: sin ella
    * la corrección funciona igual, sólo que la cola enseña `moodle-1234` en lugar
@@ -204,16 +222,22 @@ export const GetForumsResponse = z.array(
 export type GetForumsResponse = z.infer<typeof GetForumsResponse>;
 
 /**
- * Un debate tal y como lo devuelve
- * `mod_forum_get_forum_discussions_paginated`. Moodle no entrega aquí el
- * debate «pelado»: entrega el primer mensaje con los datos del debate pegados
- * encima, de ahí que convivan `id` (el del mensaje) y `discussion` (el del
- * debate). Sólo se declaran los campos que Vega mira; el resto lo descarta Zod.
- *
- * TODO(vega): sin verificar contra Moodle real — falta confirmar que `id` es el
- * identificador del primer mensaje y `discussion` el del debate, y no al revés.
- * Si en alguna versión `discussion` no llegara, el conector usa `id` como
- * identificador del debate y pediría los mensajes del debate equivocado.
+ * Orden «por fecha de creación, ascendente» de `mod_forum_get_forum_discussions`.
+ * Es el valor de `discussion_list::SORTORDER_CREATED_ASC` en Moodle 3.7+, y se
+ * elige porque es el único orden estable para paginar: la fecha de creación no
+ * cambia nunca, mientras que con el orden por defecto —último mensaje primero—
+ * una respuesta escrita a mitad del recorrido reordena la lista y hace que un
+ * debate salga dos veces o ninguna.
+ */
+export const SORTORDER_CREATED_ASC = 4;
+
+/**
+ * Un debate tal y como lo devuelven tanto `mod_forum_get_forum_discussions`
+ * (3.7+) como su antecesora `_paginated`: las dos entregan el primer mensaje
+ * con los datos del debate pegados encima, de ahí que convivan `id` (el del
+ * mensaje) y `discussion` (el del debate). Sólo se declaran los campos que Vega
+ * mira; el resto lo descarta Zod. La equivalencia de formas está comprobada
+ * contra el código de Moodle 3.11 (`get_forum_discussions_returns()`).
  */
 export const MoodleForumDiscussion = z.object({
   id: z.number(),
@@ -263,18 +287,69 @@ export const MoodleForumPost = z.object({
 });
 export type MoodleForumPost = z.infer<typeof MoodleForumPost>;
 
-/**
- * TODO(vega): sin verificar contra Moodle real — `mod_forum_get_forum_discussion_posts`
- * quedó obsoleta en Moodle 3.8 en favor de `mod_forum_get_discussion_posts`, que
- * devuelve los mensajes con otra forma (autor anidado y el texto en `message`
- * dentro de otro objeto). Hay que comprobar contra qué versión se despliega y,
- * si hace falta, elegir una u otra función según `core_webservice_get_site_info`.
- */
+/** La respuesta de la función **anterior a 3.7** (`…_forum_discussion_posts`). */
 export const GetDiscussionPostsResponse = z.object({
   posts: z.array(MoodleForumPost),
   warnings: z.array(z.object({ item: z.string().optional(), message: z.string() })).optional(),
 });
 export type GetDiscussionPostsResponse = z.infer<typeof GetDiscussionPostsResponse>;
+
+/**
+ * Un mensaje como lo devuelve `mod_forum_get_discussion_posts` (Moodle 3.7+),
+ * que exporta cada mensaje con el autor anidado. Formas comprobadas contra el
+ * exporter de Moodle 3.11 (`mod_forum\local\exporters\post`):
+ *
+ *  - `author.id` puede llegar `null` cuando el sitio oculta al autor (foros
+ *    anónimos o de preguntas y respuestas antes de contestar);
+ *  - `parentid` sólo llega en las respuestas; el mensaje raíz trae
+ *    `hasparent: false` y `parentid: null`;
+ *  - un mensaje borrado llega con `isdeleted: true` y un texto de relleno
+ *    («este mensaje ha sido eliminado»), no desaparece de la lista.
+ */
+export const ModernForumPost = z.object({
+  id: z.number(),
+  subject: z.string().nullish(),
+  message: z.string().nullish(),
+  author: z.object({ id: z.number().nullish() }).nullish(),
+  discussionid: z.number().nullish(),
+  hasparent: z.boolean().nullish(),
+  parentid: z.number().nullish(),
+  timecreated: z.number().nullish(),
+  isdeleted: z.boolean().nullish(),
+});
+export type ModernForumPost = z.infer<typeof ModernForumPost>;
+
+export const GetModernDiscussionPostsResponse = z.object({
+  posts: z.array(ModernForumPost),
+  warnings: z.array(z.object({ item: z.string().optional(), message: z.string() })).optional(),
+});
+export type GetModernDiscussionPostsResponse = z.infer<typeof GetModernDiscussionPostsResponse>;
+
+/**
+ * Traduce un mensaje de la forma 3.7+ a la que entiende el conector, que es la
+ * antigua: así la regla de producto del foro (contestar sólo la primera
+ * pregunta sin responder) vive en un único sitio y no en dos dialectos.
+ *
+ *  - Un mensaje borrado se descarta (`null`): su contenido ya no existe y una
+ *    respuesta retirada no debería contar como «alguien ya ha contestado».
+ *  - Un autor oculto se conserva como `userid: -1`: la respuesta de un autor
+ *    que no se puede leer sigue significando que el debate está atendido, y
+ *    quien construya entregas debe descartar las preguntas sin autor real.
+ */
+export function normalizeModernPost(post: ModernForumPost): MoodleForumPost | null {
+  if (post.isdeleted === true) return null;
+  return {
+    id: post.id,
+    userid: post.author?.id ?? -1,
+    created: post.timecreated ?? 0,
+    discussion: post.discussionid ?? undefined,
+    // `-1` cuando dice tener padre pero no cuál: lo único que importa aguas
+    // arriba es que no es el mensaje raíz (`parent === 0`).
+    parent: post.hasparent === true ? (post.parentid ?? -1) : 0,
+    subject: post.subject ?? undefined,
+    message: post.message ?? undefined,
+  };
+}
 
 /**
  * Un campo de perfil propio de la instalación. `shortname` es la única clave

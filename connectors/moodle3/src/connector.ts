@@ -20,12 +20,15 @@ import {
   GetDiscussionPostsResponse,
   GetForumDiscussionsResponse,
   GetForumsResponse,
+  GetModernDiscussionPostsResponse,
   GetSiteInfoResponse,
   GetSubmissionsResponse,
   GetUserCoursesResponse,
   GetUsersByFieldResponse,
   MoodleClient,
+  SORTORDER_CREATED_ASC,
   WS_FUNCTIONS,
+  normalizeModernPost,
 } from './api.js';
 import type {
   MoodleForumDiscussion,
@@ -37,9 +40,10 @@ import type {
 /**
  * Conector para Moodle 3.x vía web services REST.
  *
- * ⚠️ SIN VERIFICAR CONTRA UN MOODLE REAL. Cada método lleva su `TODO(vega)`
- * con lo concreto que falta por comprobar. El conector por defecto en
- * desarrollo sigue siendo el mock (`LMS_CONNECTOR=mock`).
+ * Verificado contra el Moodle 3.11 del piloto: identificación, cursos, tareas,
+ * envíos y descarga de ficheros. Los métodos donde queda algo por comprobar
+ * conservan su `TODO(vega)` con lo concreto que falta. El conector por defecto
+ * en desarrollo sigue siendo el mock (`LMS_CONNECTOR=mock`).
  */
 
 export const Moodle3Config = z.object({
@@ -114,6 +118,7 @@ export class Moodle3Connector implements LmsConnector {
   /** Cache por sesión: `remoteId` → URL del fichero, para no re-listar al descargar. */
   readonly #fileUrls = new Map<string, string>();
   #siteInfo: Promise<GetSiteInfoResponse> | undefined;
+  #forumDialect: 'modern' | 'legacy' | undefined;
 
   /**
    * `fetchImpl` sólo lo usan las pruebas. Sin él no habría forma de ejercitar
@@ -340,30 +345,37 @@ export class Moodle3Connector implements LmsConnector {
     // poder leer sus debates ni sus mensajes. Con un foro (o un debate) a la
     // vista se hace la llamada de verdad; sin ninguno no hay llamada inocua
     // posible y se mira el catálogo del token, que es donde suele estar el fallo.
+    //
+    // Se ensaya el **mismo dialecto que usará la ingesta** (Moodle 3.7+ o el
+    // anterior, según el catálogo del token): dar el verde con una pareja de
+    // funciones y leer luego con otra es justo la clase de mentira que este
+    // parte existe para evitar.
+    const dialect = await this.#resolveForumDialect();
+    const discussionsFn =
+      dialect === 'legacy' ? WS_FUNCTIONS.getForumDiscussionsLegacy : WS_FUNCTIONS.getForumDiscussions;
+    const postsFn =
+      dialect === 'legacy' ? WS_FUNCTIONS.getDiscussionPostsLegacy : WS_FUNCTIONS.getDiscussionPosts;
+
     const forumId = forums?.[0]?.id;
     let discussions: GetForumDiscussionsResponse | undefined;
     checks.push(
       forumId === undefined
         ? this.#declared(
             siteInfo,
-            WS_FUNCTIONS.getForumDiscussions,
+            discussionsFn,
             'Leer los debates del foro',
             'Sin ella Vega ve el foro pero no puede leer qué se pregunta en él.',
             READ_NOT_REHEARSED,
           )
         : await this.#probe(
-            WS_FUNCTIONS.getForumDiscussions,
+            discussionsFn,
             'Leer los debates del foro',
             async () => {
               discussions = await this.#client.call(
-                WS_FUNCTIONS.getForumDiscussions,
-                {
-                  forumid: forumId,
-                  page: 0,
-                  perpage: 1,
-                  sortby: 'timemodified',
-                  sortdirection: 'ASC',
-                },
+                discussionsFn,
+                dialect === 'legacy'
+                  ? { forumid: forumId, page: 0, perpage: 1, sortby: 'timemodified', sortdirection: 'ASC' }
+                  : { forumid: forumId, page: 0, perpage: 1, sortorder: SORTORDER_CREATED_ASC },
                 GetForumDiscussionsResponse,
               );
               return discussions;
@@ -382,22 +394,20 @@ export class Moodle3Connector implements LmsConnector {
       discussionId === undefined
         ? this.#declared(
             siteInfo,
-            WS_FUNCTIONS.getDiscussionPosts,
+            postsFn,
             'Leer los mensajes de un debate',
             'Sin ella no se sabe si la pregunta que abre un debate sigue sin responder, que es a lo único que Vega contesta.',
             READ_NOT_REHEARSED,
           )
         : await this.#probe(
-            WS_FUNCTIONS.getDiscussionPosts,
+            postsFn,
             'Leer los mensajes de un debate',
-            () =>
-              this.#client.call(
-                WS_FUNCTIONS.getDiscussionPosts,
-                { discussionid: discussionId },
-                GetDiscussionPostsResponse,
-              ),
-            (result) =>
-              `${result.posts.length} ${result.posts.length === 1 ? 'mensaje' : 'mensajes'} en el primer debate`,
+            async () => {
+              const posts = await this.#discussionPosts(discussionId);
+              return posts;
+            },
+            (posts) =>
+              `${posts.length} ${posts.length === 1 ? 'mensaje' : 'mensajes'} en el primer debate`,
           ),
     );
 
@@ -532,6 +542,38 @@ export class Moodle3Connector implements LmsConnector {
   }
 
   /**
+   * Con qué pareja de funciones se leen los foros de este Moodle.
+   *
+   * Las funciones de foro cambiaron en Moodle 3.7, y los sitios posteriores ya
+   * no ofrecen las antiguas en el selector de funciones del servicio web —fue
+   * exactamente el fallo del piloto: un Moodle 3.11 donde era imposible añadir
+   * `mod_forum_get_forum_discussions_paginated` y los foros caían enteros con
+   * `accessexception`—. Se decide con el catálogo de funciones del token:
+   * moderno salvo que el sitio sólo declare las antiguas. Sin catálogo se asume
+   * moderno, que es lo que existe desde 3.7; si ni siquiera hay identificación,
+   * la llamada de verdad ya dirá qué falla, y con el nombre de la función buena.
+   */
+  async #resolveForumDialect(): Promise<'modern' | 'legacy'> {
+    if (this.#forumDialect !== undefined) return this.#forumDialect;
+
+    let declared: readonly { name: string }[] | undefined;
+    try {
+      declared = (await this.#requireSiteInfo()).functions;
+    } catch {
+      return 'modern';
+    }
+    if (declared === undefined) return 'modern';
+
+    const names = new Set(declared.map((entry) => entry.name));
+    this.#forumDialect =
+      !names.has(WS_FUNCTIONS.getForumDiscussions) &&
+      names.has(WS_FUNCTIONS.getForumDiscussionsLegacy)
+        ? 'legacy'
+        : 'modern';
+    return this.#forumDialect;
+  }
+
+  /**
    * Los datos del token: quién es y contra qué sitio habla. Se resuelven una
    * sola vez por instancia porque el token no cambia durante su vida; si la
    * llamada falla no se cachea el fallo, para que reintentar tras arreglar el
@@ -566,7 +608,7 @@ export class Moodle3Connector implements LmsConnector {
    *  - que `numdiscussions` de un foro es el número de debates y NO el de
    *    mensajes, con lo que el recuento de un foro no es comparable al de una
    *    entrega y probablemente haya que ajustarlo con
-   *    `mod_forum_get_forum_discussions_paginated`;
+   *    `mod_forum_get_forum_discussions`;
    *  - el nombre de curso que se enseña: aquí se usa `fullname`, pero en
    *    instalaciones con nombres muy largos puede convenir `shortname`.
    */
@@ -792,14 +834,14 @@ export class Moodle3Connector implements LmsConnector {
     // Moodle cincuenta peticiones simultáneas.
     for (const discussion of discussions) {
       const discussionId = discussion.discussion ?? discussion.id;
-      const { posts } = await this.#client.call(
-        WS_FUNCTIONS.getDiscussionPosts,
-        { discussionid: discussionId },
-        GetDiscussionPostsResponse,
-      );
+      const posts = await this.#discussionPosts(discussionId);
 
       const question = pendingQuestionOf(posts);
       if (question === null) continue;
+      // Sin autor legible no hay a quién atribuir la pregunta ni forma de
+      // saber si una respuesta posterior es suya o de un tercero: mejor no
+      // meterse en ese debate que contestarle a un fantasma.
+      if (question.userid < 0) continue;
 
       userIds.push(question.userid);
       submissions.push(forumSubmission(activityRef, forumId, discussionId, question));
@@ -812,33 +854,40 @@ export class Moodle3Connector implements LmsConnector {
   /**
    * Todos los debates de un foro, página a página.
    *
-   * Se ordena por `timemodified` ascendente para que la paginación sea estable:
+   * Se ordena por fecha de creación (o `timemodified` en el dialecto antiguo,
+   * que no ofrece otra estable) ascendente para que la paginación no baile:
    * con el orden por defecto —el debate tocado más recientemente primero— un
    * mensaje nuevo escrito a mitad del recorrido reordena la lista y hace que un
    * debate salga dos veces o ninguna.
-   *
-   * TODO(vega): sin verificar contra Moodle real — falta comprobar que `page`
-   * empieza en 0 y que Moodle respeta `perpage`; si devolviera siempre el
-   * tamaño de página por defecto del sitio, el corte de «página incompleta»
-   * nunca se cumpliría y el recorrido pararía en el tope de páginas. Falta
-   * también ver qué hace con los debates fijados arriba, que algunas versiones
-   * repiten en todas las páginas.
    */
   async #listDiscussions(forumId: number): Promise<MoodleForumDiscussion[]> {
+    const dialect = await this.#resolveForumDialect();
     const all: MoodleForumDiscussion[] = [];
 
     for (let page = 0; page < MAX_DISCUSSION_PAGES; page += 1) {
-      const { discussions } = await this.#client.call(
-        WS_FUNCTIONS.getForumDiscussions,
-        {
-          forumid: forumId,
-          page,
-          perpage: DISCUSSIONS_PER_PAGE,
-          sortby: 'timemodified',
-          sortdirection: 'ASC',
-        },
-        GetForumDiscussionsResponse,
-      );
+      const { discussions } =
+        dialect === 'legacy'
+          ? await this.#client.call(
+              WS_FUNCTIONS.getForumDiscussionsLegacy,
+              {
+                forumid: forumId,
+                page,
+                perpage: DISCUSSIONS_PER_PAGE,
+                sortby: 'timemodified',
+                sortdirection: 'ASC',
+              },
+              GetForumDiscussionsResponse,
+            )
+          : await this.#client.call(
+              WS_FUNCTIONS.getForumDiscussions,
+              {
+                forumid: forumId,
+                page,
+                perpage: DISCUSSIONS_PER_PAGE,
+                sortorder: SORTORDER_CREATED_ASC,
+              },
+              GetForumDiscussionsResponse,
+            );
 
       all.push(...discussions);
       // Una página incompleta es la última: Moodle no dice cuántos debates hay
@@ -847,6 +896,30 @@ export class Moodle3Connector implements LmsConnector {
     }
 
     return all;
+  }
+
+  /**
+   * Los mensajes de un debate, ya en la forma clásica sea cual sea el dialecto:
+   * la regla de producto del foro se decide siempre sobre la misma forma.
+   */
+  async #discussionPosts(discussionId: number): Promise<MoodleForumPost[]> {
+    if ((await this.#resolveForumDialect()) === 'legacy') {
+      const { posts } = await this.#client.call(
+        WS_FUNCTIONS.getDiscussionPostsLegacy,
+        { discussionid: discussionId },
+        GetDiscussionPostsResponse,
+      );
+      return [...posts];
+    }
+
+    const { posts } = await this.#client.call(
+      WS_FUNCTIONS.getDiscussionPosts,
+      { discussionid: discussionId },
+      GetModernDiscussionPostsResponse,
+    );
+    return posts
+      .map(normalizeModernPost)
+      .filter((post): post is MoodleForumPost => post !== null);
   }
 
   /**

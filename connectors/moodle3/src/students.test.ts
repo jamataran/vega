@@ -99,7 +99,20 @@ function moodleCon(opciones: Opciones): MoodleDeLaboratorio {
     const wsfunction = params.get('wsfunction');
     let payload: unknown;
 
-    if (wsfunction === 'mod_assign_get_submissions') {
+    if (wsfunction === 'core_webservice_get_site_info') {
+      // Catálogo con las funciones de foro anteriores a 3.7: lo que este
+      // fichero prueba es el pegado de perfiles, no el dialecto, y así el
+      // resto del laboratorio sigue sirviendo las funciones que ya servía.
+      payload = {
+        sitename: 'Academia Hipatia',
+        username: 'profesora',
+        userid: 3,
+        functions: [
+          { name: 'mod_forum_get_forum_discussions_paginated' },
+          { name: 'mod_forum_get_forum_discussion_posts' },
+        ],
+      };
+    } else if (wsfunction === 'mod_assign_get_submissions') {
       payload = {
         assignments: [{ assignmentid: 42, submissions: userIds.map(entregaDe) }],
       };

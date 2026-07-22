@@ -240,3 +240,24 @@ test('sin foros a la vista, los debates y mensajes se comprueban contra el catá
   assert.equal(llamadaA(llamadas, 'mod_forum_get_forum_discussions_paginated'), undefined);
   assert.equal(llamadaA(llamadas, 'mod_forum_get_forum_discussion_posts'), undefined);
 });
+
+test('el parte de foros ensaya el dialecto que usará la ingesta', async () => {
+  // Un Moodle 3.7+ declara las funciones modernas y ya no ofrece las
+  // anteriores: el parte tiene que hablar de las que la ingesta va a llamar de
+  // verdad. Fue el fallo del piloto: se comprobaba una pareja y se leía con
+  // otra, y el profesor no tenía forma de saber qué función añadir.
+  const { connector } = moodleCon([
+    'core_webservice_get_site_info',
+    'mod_forum_get_forum_discussions',
+  ]);
+
+  const info = await connector.verifyConnection();
+  const debates = info.checks.find((check) => check.name === 'mod_forum_get_forum_discussions');
+  const mensajes = info.checks.find((check) => check.name === 'mod_forum_get_discussion_posts');
+  const antiguos = info.checks.filter((check) => check.name.includes('paginated'));
+
+  assert.equal(debates?.status, 'ok');
+  assert.equal(mensajes?.status, 'failed', 'la moderna de mensajes no está declarada');
+  assert.match(mensajes?.detail ?? '', /Servicios externos/);
+  assert.equal(antiguos.length, 0, 'las funciones anteriores a 3.7 no pintan nada en un parte moderno');
+});

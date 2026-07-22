@@ -694,6 +694,17 @@ export type BatchRunListResponse = z.infer<typeof BatchRunListResponse>;
 export const TriggerBatchResponse = z.object({ run: BatchRun });
 export type TriggerBatchResponse = z.infer<typeof TriggerBatchResponse>;
 
+/**
+ * Acotar un proceso forzado a unos tipos de actividad. Sin cuerpo se barre
+ * todo, que es lo que siempre hizo el botón; con `kinds: ['forum']` se puede
+ * pasar sólo por los foros —baratos, son texto— sin arrastrar un lote de
+ * entregas en PDF, que es donde está el gasto de verdad.
+ */
+export const TriggerBatchRequest = z.object({
+  kinds: z.array(ActivityKind).nonempty().optional(),
+});
+export type TriggerBatchRequest = z.infer<typeof TriggerBatchRequest>;
+
 // ── Ledger de IA (sólo administrador) ─────────────────────────────────────
 
 export const AiCallQuery = z.object({

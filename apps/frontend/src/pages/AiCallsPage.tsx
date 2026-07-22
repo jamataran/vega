@@ -40,12 +40,23 @@ export function AiCallsPage() {
       {query.isPending ? <p role="status" className="mb-3 text-ui text-muted-foreground">Cargando llamadas…</p> : null}
       {query.isError ? <ErrorState error={query.error} onRetry={() => void query.refetch()} /> : null}
       {!query.isPending && query.data?.items.length === 0 ? <EmptyState title="Sin llamadas" description="No hay intentos que coincidan con estos filtros." /> : null}
+      {/* El detalle se abre pegado a la tarjeta pulsada, no al final de la
+          lista: con cincuenta llamadas por página quedaba fuera de pantalla y
+          parecía que el registro no guardaba nada más que el resumen. */}
       <div className="flex flex-col gap-2">
         {query.data?.items.map((call) => (
-          <Card key={call.id} asChild><button type="button" className="w-full p-3 text-left" aria-expanded={selected?.id === call.id} aria-controls="ai-call-detail" onClick={() => setSelected(call)}>
-            <div className="flex flex-wrap items-center gap-2"><Badge variant={call.error ? 'destructive' : 'outline'}>{AI_OPERATION_LABEL[call.operation]}</Badge><span className="font-mono text-ui">{call.modelReturned ?? call.modelRequested}</span><span className="ml-auto text-ui text-muted-foreground">{formatDateTime(call.createdAt)}</span></div>
-            <p className="mt-1 truncate text-ui text-muted-foreground">{call.error ?? `${call.inputTokens} entrada · ${call.outputTokens} salida${call.simulated ? ' · simulado' : ''}`}</p>
-          </button></Card>
+          <div key={call.id} className="flex flex-col gap-2">
+            <Card asChild><button type="button" className="w-full p-3 text-left" aria-expanded={selected?.id === call.id} aria-controls={`ai-call-detail-${call.id}`} onClick={() => setSelected((current) => (current?.id === call.id ? null : call))}>
+              <div className="flex flex-wrap items-center gap-2"><Badge variant={call.error ? 'destructive' : 'outline'}>{AI_OPERATION_LABEL[call.operation]}</Badge><span className="font-mono text-ui">{call.modelReturned ?? call.modelRequested}</span><span className="ml-auto text-ui text-muted-foreground">{formatDateTime(call.createdAt)}</span></div>
+              <p className="mt-1 truncate text-ui text-muted-foreground">{call.error ?? `${call.inputTokens} entrada · ${call.outputTokens} salida${call.simulated ? ' · simulado' : ''}`}</p>
+            </button></Card>
+            {selected?.id === call.id ? (
+              <Card id={`ai-call-detail-${call.id}`} className="p-4">
+                <div className="mb-2 flex items-center justify-between"><h2 className="font-display font-semibold">Detalle reproducible</h2><Button size="sm" onClick={() => void copy(selected)}>Copiar JSON</Button></div>
+                <pre className="max-h-[32rem] overflow-auto whitespace-pre-wrap break-all rounded-md bg-muted p-3 font-mono text-micro">{JSON.stringify(selected, null, 2)}</pre>
+              </Card>
+            ) : null}
+          </div>
         ))}
       </div>
       {query.data && query.data.meta.totalPages > 1 ? (
@@ -55,7 +66,6 @@ export function AiCallsPage() {
           <Button variant="outline" size="sm" disabled={page >= query.data.meta.totalPages || query.isFetching} onClick={() => { setPage((value) => value + 1); setSelected(null); }}>Siguiente</Button>
         </nav>
       ) : null}
-      {selected ? <Card id="ai-call-detail" className="mt-4 p-4"><div className="mb-2 flex items-center justify-between"><h2 className="font-display font-semibold">Detalle reproducible</h2><Button size="sm" onClick={() => void copy(selected)}>Copiar JSON</Button></div><pre className="max-h-[32rem] overflow-auto whitespace-pre-wrap break-all rounded-md bg-muted p-3 font-mono text-micro">{JSON.stringify(selected, null, 2)}</pre></Card> : null}
     </div>
   );
 }

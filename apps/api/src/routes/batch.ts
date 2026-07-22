@@ -1,6 +1,7 @@
 import { and, asc, desc, eq, inArray } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import {
+  TriggerBatchRequest,
   hasStudentFile,
   routes,
   studentContextFor,
@@ -19,7 +20,7 @@ import { aiProviderForInstall } from '../ai/factory.js';
 import { withAiLedger } from '../ai/ledger.js';
 import { schema } from '../db/client.js';
 import { toBatchRun } from '../db/mappers.js';
-import { conflict } from '../http/errors.js';
+import { conflict, parseOrThrow } from '../http/errors.js';
 import { ingestAll, type IngestReport } from '../ingest/run.js';
 import { FileStore } from '../storage/files.js';
 import { getSettings } from '../settings/service.js';
@@ -79,8 +80,10 @@ export async function batchRoutes(app: FastifyInstance, ctx: AppContext): Promis
     async (request, reply): Promise<TriggerBatchResponse> => {
       // Queda registrado quién lo fuerza; el planificador deja `null`.
       const session = currentUser(request);
-      const run = await prepareBatchRun(ctx, session.sub);
-      void runBatch(ctx, session.sub, app.log, run).catch((error) => {
+      const body = parseOrThrow(TriggerBatchRequest, request.body ?? {}, 'El disparo del proceso');
+      const kinds = body.kinds ?? ALL_KINDS;
+      const run = await prepareBatchRun(ctx, session.sub, kinds);
+      void runBatch(ctx, session.sub, app.log, run, kinds).catch((error) => {
         app.log.error({ err: error, batchRunId: run.id }, 'El lote en segundo plano ha fallado');
       });
       reply.code(202);
@@ -182,7 +185,12 @@ export async function runBatch(
 
     // Sólo actividades activas de los tipos que barre este proceso, y
     // agrupadas por actividad para aprovechar la caché del prompt.
-    const pending = await db
+    //
+    // El filtro de `enabled` va en la consulta, no después: aplicado sobre el
+    // resultado ya recortado a MAX_PER_RUN, las entregas de una actividad
+    // desactivada acaparaban el lote y un proceso con trabajo real pendiente
+    // podía terminar sin procesar nada.
+    const enabled = await db
       .select({ submission: schema.submissions, activity: schema.activities })
       .from(schema.submissions)
       .innerJoin(schema.activities, eq(schema.activities.id, schema.submissions.activityId))
@@ -190,12 +198,11 @@ export async function runBatch(
         and(
           inArray(schema.submissions.status, ['pending', 'grading']),
           inArray(schema.activities.kind, [...kinds]),
+          eq(schema.activities.enabled, true),
         ),
       )
       .orderBy(asc(schema.submissions.activityId), asc(schema.submissions.submittedAt))
       .limit(MAX_PER_RUN);
-
-    const enabled = pending.filter((row) => row.activity.enabled);
 
     let processed = 0;
     let failed = 0;
