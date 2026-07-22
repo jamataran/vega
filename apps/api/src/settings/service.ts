@@ -36,6 +36,13 @@ const int = (map: SettingsMap, key: string, fallback: number): number => {
   return Number.isFinite(parsed) ? parsed : fallback;
 };
 
+const decimal = (map: SettingsMap, key: string, fallback: number): number => {
+  const raw = map.get(key)?.value;
+  if (raw === undefined || raw === '') return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
 const bool = (map: SettingsMap, key: string, fallback: boolean): boolean => {
   const raw = map.get(key)?.value;
   return raw === undefined || raw === '' ? fallback : raw === 'true';
@@ -51,15 +58,32 @@ export async function getSettings(ctx: AppContext): Promise<AppSettings> {
   const lastRunRaw = str(map, 'schedule.lastRunAt', '');
   const lastRunAt = lastRunRaw === '' ? null : lastRunRaw;
   const enabled = bool(map, 'schedule.enabled', false);
+  const legacyReadingModel = str(
+    map,
+    'anthropic.transcriptionModel',
+    config.AI_MODEL_TRANSCRIPTION,
+  );
+  const readingModel = str(map, 'anthropic.readingModel', legacyReadingModel);
 
   return {
     anthropic: {
       // El `.env` cuenta como configurado: es lo que usa una instalación nueva.
       apiKeyConfigured: configured(map, 'anthropic.apiKey') || Boolean(config.ANTHROPIC_API_KEY),
-      transcriptionModel: str(map, 'anthropic.transcriptionModel', config.AI_MODEL_TRANSCRIPTION),
+      transcriptionModel: readingModel,
+      readingModel,
       gradingModel: str(map, 'anthropic.gradingModel', config.AI_MODEL_GRADING),
+      verifyModel: str(map, 'anthropic.verifyModel', 'claude-sonnet-5'),
+      triageModel: str(map, 'anthropic.triageModel', 'claude-haiku-4-5'),
       maxTokens: int(map, 'anthropic.maxTokens', 8192),
       provider: str(map, 'anthropic.provider', config.AI_PROVIDER) as 'mock' | 'anthropic',
+    },
+    ai: {
+      transport: str(map, 'ai.transport', 'sync') as 'batch' | 'sync',
+      verify: bool(map, 'ai.verify', true),
+      explanations: bool(map, 'ai.explanations', true),
+      lowConfidenceThreshold: decimal(map, 'ai.lowConfidenceThreshold', 0.75),
+      pagesPerChunk: int(map, 'ai.pagesPerChunk', 4),
+      logRetentionDays: int(map, 'ai.logRetentionDays', 180),
     },
     moodle: {
       baseUrl: str(map, 'moodle.baseUrl', config.MOODLE_BASE_URL ?? ''),

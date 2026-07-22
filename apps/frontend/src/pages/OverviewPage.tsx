@@ -91,6 +91,28 @@ export function OverviewPage() {
           </div>
         </Section>
 
+        <Section
+          title="Fiabilidad"
+          description="Señales calculadas sobre citas, lecturas, verificación y cambios docentes."
+          actions={
+            <Badge variant={data.aiMode === 'real' ? 'success' : data.aiMode === 'none' ? 'outline' : 'warning'}>
+              {data.aiMode === 'real' ? 'IA real' : data.aiMode === 'simulated' ? 'Modo simulado' : data.aiMode === 'mixed' ? 'Datos mixtos' : 'Sin llamadas'}
+            </Badge>
+          }
+        >
+          <div className="grid grid-cols-2 gap-x-4 gap-y-5">
+            <Figure label="Índice compuesto" value={formatPercent(data.reliability.score)} />
+            <Figure label="Citas presentes" value={formatPercent(data.reliability.citationsVerified)} />
+            <Figure label="Lecturas coincidentes" value={formatPercent(data.reliability.readingsWithoutDiscrepancy)} />
+            <Figure label="Sin avisos al verificar" value={formatPercent(data.reliability.verificationsWithoutIssues)} />
+          </div>
+          {data.unpricedCalls > 0 ? (
+            <p role="alert" className="mt-4 text-ui text-warning-ink">
+              {data.unpricedCalls} {data.unpricedCalls === 1 ? 'llamada no tiene' : 'llamadas no tienen'} una tarifa conocida. No se muestran como coste cero.
+            </p>
+          ) : null}
+        </Section>
+
         <CostBreakdown />
 
         <Section title="Cola por estado">

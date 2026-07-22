@@ -12,10 +12,16 @@ import {
   uuid,
 } from 'drizzle-orm/pg-core';
 import type {
+  AiOperation,
+  AiTransport,
+  ContextLevel,
+  CorrectionVerification,
   PointsAllocation,
   StudentCustomField,
+  TranscriptionDiscrepancy,
   TranscriptionFlag,
   TranscriptionPage,
+  TriageLabel,
 } from '@vega/shared';
 
 /**
@@ -85,6 +91,7 @@ export const activities = pgTable('activities', {
   /** `null` cuando la actividad no se puntúa. */
   maxScore: numeric('max_score', { precision: 6, scale: 2 }),
   referenceSolution: text('reference_solution'),
+  templateKey: text('template_key'),
   pointsAllocation: jsonb('points_allocation').$type<PointsAllocation[]>().notNull().default([]),
   autonomy: text('autonomy')
     .$type<'review_all' | 'review_low_confidence' | 'autonomous'>()
@@ -165,12 +172,18 @@ export const submissions = pgTable(
         | 'transcribed'
         | 'grading'
         | 'graded'
+        | 'parked'
         | 'validated'
         | 'published'
         | 'error'
       >()
       .notNull()
       .default('pending'),
+    batchRunId: uuid('batch_run_id').references(() => batchRuns.id, { onDelete: 'set null' }),
+    parkedReason: text('parked_reason'),
+    parkedBy: uuid('parked_by').references(() => users.id, { onDelete: 'set null' }),
+    triageLabel: text('triage_label').$type<TriageLabel>(),
+    triageConfidence: numeric('triage_confidence', { precision: 4, scale: 3 }),
     /** `null` en actividades sin fichero (foros). */
     originalFilename: text('original_filename'),
     pageCount: integer('page_count').notNull().default(0),
@@ -212,6 +225,8 @@ export const transcriptions = pgTable('transcriptions', {
     .references(() => submissions.id, { onDelete: 'cascade' }),
   pages: jsonb('pages').$type<TranscriptionPage[]>().notNull().default([]),
   flags: jsonb('flags').$type<TranscriptionFlag[]>().notNull().default([]),
+  discrepancies: jsonb('discrepancies').$type<TranscriptionDiscrepancy[]>().notNull().default([]),
+  passCount: integer('pass_count').notNull().default(1),
   confidence: numeric('confidence', { precision: 4, scale: 3 }).notNull().default('0'),
   model: text('model').notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
@@ -229,6 +244,9 @@ export const corrections = pgTable('corrections', {
   teacherLatex: text('teacher_latex'),
   aiSummary: text('ai_summary').notNull().default(''),
   teacherSummary: text('teacher_summary'),
+  verification: jsonb('verification').$type<CorrectionVerification>(),
+  teacherNotes: text('teacher_notes'),
+  simulated: boolean('simulated').notNull().default(false),
   confidence: numeric('confidence', { precision: 4, scale: 3 }).notNull().default('0'),
   model: text('model').notNull(),
   inputTokens: integer('input_tokens').notNull().default(0),
@@ -262,6 +280,8 @@ export const correctionItems = pgTable('correction_items', {
   maxPoints: numeric('max_points', { precision: 6, scale: 2 }).notNull(),
   aiPoints: numeric('ai_points', { precision: 6, scale: 2 }).notNull().default('0'),
   aiFeedback: text('ai_feedback').notNull().default(''),
+  aiQuote: text('ai_quote'),
+  aiQuotePage: integer('ai_quote_page'),
   teacherPoints: numeric('teacher_points', { precision: 6, scale: 2 }),
   teacherFeedback: text('teacher_feedback'),
   confidence: numeric('confidence', { precision: 4, scale: 3 }).notNull().default('0'),
@@ -273,11 +293,9 @@ export const gradingContexts = pgTable(
   'grading_contexts',
   {
     id: uuid('id').primaryKey().defaultRandom(),
-    level: text('level').$type<'global' | 'activity_kind' | 'activity'>().notNull(),
+    level: text('level').$type<ContextLevel>().notNull(),
     key: text('key').notNull(),
-    content: text('content').notNull().default(''),
-    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-    updatedBy: uuid('updated_by').references(() => users.id, { onDelete: 'set null' }),
+    activeVersion: integer('active_version').notNull().default(1),
   },
   (table) => [uniqueIndex('grading_contexts_level_key').on(table.level, table.key)],
 );
@@ -300,6 +318,95 @@ export const batchRuns = pgTable('batch_runs', {
   outputTokens: integer('output_tokens').notNull().default(0),
   cachedInputTokens: integer('cached_input_tokens').notNull().default(0),
   costCents: numeric('cost_cents', { precision: 10, scale: 4 }).notNull().default('0'),
+});
+
+export const gradingContextVersions = pgTable(
+  'grading_context_versions',
+  {
+    contextId: uuid('context_id')
+      .notNull()
+      .references(() => gradingContexts.id, { onDelete: 'cascade' }),
+    version: integer('version').notNull(),
+    content: text('content').notNull().default(''),
+    contentHash: text('content_hash').notNull(),
+    source: text('source').$type<'seed' | 'migration' | 'edit' | 'restore'>().notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+  },
+  (table) => [primaryKey({ columns: [table.contextId, table.version] })],
+);
+
+export const prompts = pgTable(
+  'prompts',
+  {
+    key: text('key').notNull(),
+    version: integer('version').notNull(),
+    content: text('content').notNull(),
+    active: boolean('active').notNull().default(false),
+    updatedBy: uuid('updated_by').references(() => users.id, { onDelete: 'set null' }),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.key, table.version] }),
+    uniqueIndex('prompts_one_active_per_key').on(table.key).where(sql`active`),
+  ],
+);
+
+export const aiBatches = pgTable('ai_batches', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  batchRunId: uuid('batch_run_id')
+    .notNull()
+    .references(() => batchRuns.id, { onDelete: 'cascade' }),
+  providerBatchId: text('provider_batch_id'),
+  phase: text('phase').$type<'reading' | 'grading' | 'verify'>().notNull(),
+  status: text('status')
+    .$type<'pending' | 'in_progress' | 'ended' | 'failed' | 'canceled'>()
+    .notNull()
+    .default('pending'),
+  requestCount: integer('request_count').notNull().default(0),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  endedAt: timestamp('ended_at', { withTimezone: true }),
+});
+
+export const aiCalls = pgTable('ai_calls', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  batchRunId: uuid('batch_run_id').references(() => batchRuns.id, { onDelete: 'set null' }),
+  aiBatchId: uuid('ai_batch_id').references(() => aiBatches.id, { onDelete: 'set null' }),
+  submissionId: uuid('submission_id').references(() => submissions.id, { onDelete: 'set null' }),
+  operation: text('operation').$type<AiOperation>().notNull(),
+  transport: text('transport').$type<AiTransport>().notNull(),
+  provider: text('provider').notNull(),
+  modelRequested: text('model_requested').notNull(),
+  modelReturned: text('model_returned'),
+  promptKey: text('prompt_key'),
+  promptVersion: integer('prompt_version'),
+  contextHash: text('context_hash'),
+  contextVersions: jsonb('context_versions')
+    .$type<
+      {
+        level: ContextLevel;
+        key: string;
+        contextId: string;
+        version: number;
+        contentHash: string;
+      }[]
+    >()
+    .notNull()
+    .default([]),
+  requestParams: jsonb('request_params').$type<Record<string, unknown>>().notNull().default({}),
+  responseRaw: jsonb('response_raw').$type<unknown>(),
+  parsedOk: boolean('parsed_ok').notNull().default(false),
+  stopReason: text('stop_reason'),
+  error: text('error'),
+  latencyMs: integer('latency_ms'),
+  inputTokens: integer('input_tokens').notNull().default(0),
+  outputTokens: integer('output_tokens').notNull().default(0),
+  cacheReadTokens: integer('cache_read_tokens').notNull().default(0),
+  cacheCreationTokens: integer('cache_creation_tokens').notNull().default(0),
+  costCents: numeric('cost_cents', { precision: 12, scale: 6 }),
+  unpriced: boolean('unpriced').notNull().default(false),
+  simulated: boolean('simulated').notNull().default(false),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
 /**

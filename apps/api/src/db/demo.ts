@@ -7,6 +7,7 @@ import '../env.js';
 import { loadConfig } from '../config.js';
 import { hashPassword } from '../auth/password.js';
 import { createDb, schema } from './client.js';
+import { contextContentHash } from '../contexts/service.js';
 import {
   ACTIVITIES,
   AI_LATEX,
@@ -250,7 +251,12 @@ async function main(): Promise<void> {
 
     // ── Contextos de corrección ───────────────────────────────────────────
     console.log('→ creando contextos de corrección…');
-    const contextValues: (typeof schema.gradingContexts.$inferInsert)[] = [
+    const contextValues: {
+      level: 'global' | 'activity_kind' | 'activity';
+      key: string;
+      content: string;
+      updatedBy: string;
+    }[] = [
       {
         level: 'global',
         key: 'global',
@@ -284,7 +290,23 @@ async function main(): Promise<void> {
         updatedBy: teacher.id,
       });
     }
-    await db.insert(schema.gradingContexts).values(contextValues);
+    for (const value of contextValues) {
+      await db.transaction(async (tx) => {
+        const [context] = await tx
+          .insert(schema.gradingContexts)
+          .values({ level: value.level, key: value.key, activeVersion: 1 })
+          .returning({ id: schema.gradingContexts.id });
+        if (!context) return;
+        await tx.insert(schema.gradingContextVersions).values({
+          contextId: context.id,
+          version: 1,
+          content: value.content,
+          contentHash: contextContentHash(value.content),
+          source: 'seed',
+          createdBy: value.updatedBy,
+        });
+      });
+    }
 
     // ── Ajustes ───────────────────────────────────────────────────────────
     // El planificador arranca desactivado: en desarrollo no queremos que se
@@ -406,7 +428,7 @@ async function main(): Promise<void> {
           const transcriptionPages: TranscriptionPage[] = pages.map((latex, page) => ({
             page: page + 1,
             latex,
-            imageUrl: `/api/scans/${submission.id}/${page + 1}.svg`,
+            imageUrl: mockPageImageUrl(page + 1, latex),
           }));
 
           await db.insert(schema.transcriptions).values({
@@ -548,6 +570,12 @@ async function main(): Promise<void> {
   } finally {
     await sql.end();
   }
+}
+
+function mockPageImageUrl(page: number, latex: string): string {
+  const excerpt = latex.replace(/<[^>]*>/g, '').replace(/[<>&]/g, '').slice(0, 180);
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 1100"><rect width="800" height="1100" fill="#fff"/><text x="64" y="88" font-family="sans-serif" font-size="24" fill="#334155">Original simulado · página ${page}</text><foreignObject x="64" y="130" width="672" height="850"><div xmlns="http://www.w3.org/1999/xhtml" style="font:22px monospace;white-space:pre-wrap;color:#1e293b">${excerpt}</div></foreignObject></svg>`;
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
 }
 
 await main();

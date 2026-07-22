@@ -1,4 +1,4 @@
-import { and, asc, desc, eq } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import {
   hasStudentFile,
@@ -10,17 +10,21 @@ import {
   type TriggerBatchResponse,
   type UsageMetrics,
 } from '@vega/shared';
-import { gradeSubmission } from '@vega/core';
+import { gradeSubmission, sumUsage } from '@vega/core';
 import type { AiProvider, PageSource, ResolveContextInput, StudentContext } from '@vega/core';
 import { currentUser } from '../auth/plugin.js';
 import { aiProviderForInstall } from '../ai/factory.js';
+import { withAiLedger } from '../ai/ledger.js';
 import { schema } from '../db/client.js';
 import { toBatchRun } from '../db/mappers.js';
 import { conflict } from '../http/errors.js';
 import { ingestAll, type IngestReport } from '../ingest/run.js';
 import { FileStore } from '../storage/files.js';
-import { readContextLevel } from './contexts.js';
+import { getSettings } from '../settings/service.js';
+import { readActiveContext } from '../contexts/service.js';
 import type { AppContext } from '../context.js';
+import { PDFDocument } from 'pdf-lib';
+import { listActivePrompts } from '../prompts/service.js';
 
 /**
  * Proceso de corrección por lotes.
@@ -70,11 +74,15 @@ export async function batchRoutes(app: FastifyInstance, ctx: AppContext): Promis
   app.post(
     routes.triggerBatch,
     { preHandler: app.requireRole('admin') },
-    async (request): Promise<TriggerBatchResponse> => {
+    async (request, reply): Promise<TriggerBatchResponse> => {
       // Queda registrado quién lo fuerza; el planificador deja `null`.
       const session = currentUser(request);
-      const result = await runBatch(ctx, session.sub, app.log);
-      return { run: result.run, queued: result.queued };
+      const run = await prepareBatchRun(ctx, session.sub);
+      void runBatch(ctx, session.sub, app.log, run).catch((error) => {
+        app.log.error({ err: error, batchRunId: run.id }, 'El lote en segundo plano ha fallado');
+      });
+      reply.code(202);
+      return { run: toBatchRun(run), queued: 0 };
     },
   );
 }
@@ -108,6 +116,7 @@ export async function runBatch(
   ctx: AppContext,
   triggeredBy: string | null,
   log: Logger = SILENT,
+  preparedRun?: typeof schema.batchRuns.$inferSelect,
 ): Promise<RunBatchResult> {
   const { db } = ctx;
 
@@ -115,20 +124,7 @@ export async function runBatch(
   // planificador y una persona a la vez— corrigen las mismas entregas dos veces
   // y **pagan el doble**. Se comprueba antes de crear la fila para que el
   // conflicto no deje un `batch_runs` fantasma.
-  const [alreadyRunning] = await db
-    .select({ id: schema.batchRuns.id })
-    .from(schema.batchRuns)
-    .where(eq(schema.batchRuns.status, 'running'))
-    .limit(1);
-  if (alreadyRunning) {
-    throw conflict('Ya hay un proceso de corrección en marcha. Espera a que termine.');
-  }
-
-  const [run] = await db
-    .insert(schema.batchRuns)
-    .values({ status: 'running', triggeredBy })
-    .returning();
-  if (!run) throw new Error('No se ha podido registrar el lote.');
+  const run = preparedRun ?? await prepareBatchRun(ctx, triggeredBy);
 
   // A partir de aquí la fila existe y está en `running`. Todo lo que pueda
   // lanzar va dentro del `try` de abajo, porque un lote que muere sin cerrarla
@@ -163,7 +159,7 @@ export async function runBatch(
       .select({ submission: schema.submissions, activity: schema.activities })
       .from(schema.submissions)
       .innerJoin(schema.activities, eq(schema.activities.id, schema.submissions.activityId))
-      .where(eq(schema.submissions.status, 'pending'))
+      .where(inArray(schema.submissions.status, ['pending', 'grading']))
       .orderBy(asc(schema.submissions.activityId), asc(schema.submissions.submittedAt))
       .limit(MAX_PER_RUN);
 
@@ -186,11 +182,37 @@ export async function runBatch(
     // prompt de Anthropic sirva de una entrega a la siguiente. Se construye desde
     // `app_settings` (con el `.env` de respaldo), así que respeta el proveedor, los
     // modelos y la clave que el administrador configura en la web.
-    const provider = await aiProviderForInstall(ctx);
+    const baseProvider = await aiProviderForInstall(ctx);
+    const settings = await getSettings(ctx);
+    const prompts = await listActivePrompts(ctx);
+    const provider = withAiLedger(ctx, baseProvider, {
+      batchRunId: run.id,
+      // Este ejecutor usa Messages síncrono. No etiquetamos ni descontamos como
+      // batch hasta que la orquestación durable por fases esté conectada.
+      transport: 'sync',
+      models: {
+        reading_a: settings.anthropic.readingModel,
+        reading_b: settings.anthropic.readingModel,
+        grade: settings.anthropic.gradingModel,
+        triage: settings.anthropic.triageModel,
+        verify: settings.anthropic.verifyModel,
+        forum_answer: settings.anthropic.gradingModel,
+        connection_test: settings.anthropic.gradingModel,
+      },
+      prompts: Object.fromEntries(prompts.map((prompt) => [prompt.key, prompt.version])),
+    });
 
     for (const { submission, activity } of enabled) {
       try {
-        const outcome = await processOne(ctx, submission, activity, usage, contextCache, provider);
+        const outcome = await processOne(
+          ctx,
+          submission,
+          activity,
+          usage,
+          contextCache,
+          provider,
+          settings.ai.pagesPerChunk,
+        );
         processed += 1;
         if (outcome.autoPublished) autoPublished += 1;
       } catch (error) {
@@ -256,6 +278,21 @@ export async function runBatch(
   }
 }
 
+async function prepareBatchRun(ctx: AppContext, triggeredBy: string | null) {
+  const [alreadyRunning] = await ctx.db
+    .select({ id: schema.batchRuns.id })
+    .from(schema.batchRuns)
+    .where(eq(schema.batchRuns.status, 'running'))
+    .limit(1);
+  if (alreadyRunning) throw conflict('Ya hay un proceso de corrección en marcha. Espera a que termine.');
+  const [run] = await ctx.db
+    .insert(schema.batchRuns)
+    .values({ status: 'running', triggeredBy })
+    .returning();
+  if (!run) throw new Error('No se ha podido registrar el lote.');
+  return run;
+}
+
 // ── Una entrega ─────────────────────────────────────────────────────────────
 
 type SubmissionRow = typeof schema.submissions.$inferSelect;
@@ -268,6 +305,7 @@ async function processOne(
   usageAccumulator: UsageMetrics,
   contextCache: Map<string, ResolveContextInput>,
   provider: AiProvider,
+  pagesPerChunk: number,
 ): Promise<{ autoPublished: boolean }> {
   const { db } = ctx;
   const withFile = hasStudentFile(activity.kind);
@@ -297,10 +335,30 @@ async function processOne(
       )
       .orderBy(asc(schema.activityFiles.uploadedAt));
 
+    const activeContexts = await Promise.all([
+      readActiveContext(ctx, 'global', 'global'),
+      readActiveContext(ctx, 'activity_kind', activity.kind),
+      activity.templateKey ? readActiveContext(ctx, 'template', activity.templateKey) : Promise.resolve(null),
+      activity.courseId ? readActiveContext(ctx, 'course', activity.courseId) : Promise.resolve(null),
+      readActiveContext(ctx, 'activity', activity.slug),
+    ]);
+    const [globalContext, kindContext, templateContext, courseContext, activityContext] = activeContexts;
     context = {
-      global: await readContextLevel(ctx, 'global', 'global'),
-      activityKind: await readContextLevel(ctx, 'activity_kind', activity.kind),
-      activity: await readContextLevel(ctx, 'activity', activity.slug),
+      global: globalContext?.content,
+      activityKind: kindContext?.content,
+      template: templateContext?.content,
+      course: courseContext?.content,
+      activity: activityContext?.content,
+      segments: activeContexts
+        .filter((item): item is NonNullable<typeof item> => item !== null)
+        .map((item) => ({
+          level: item.level,
+          key: item.key,
+          contextId: item.id,
+          version: item.activeVersion,
+          contentHash: item.contentHash,
+          content: item.content,
+        })),
       // Hasta ahora la solución de referencia y los ficheros se guardaban, se
       // enseñaban en «contexto efectivo»… y no llegaban al modelo: la pantalla
       // prometía más de lo que el lote hacía. Con esto, lo que el profesor ve
@@ -324,7 +382,16 @@ async function processOne(
     throw new Error('La intervención del alumno está vacía: no hay nada que corregir.');
   }
 
-  const pages: PageSource[] = withFile ? pagesOf(ctx, submission) : [];
+  const pages: PageSource[] = withFile
+    ? await pagesOf(ctx, submission, pagesPerChunk, provider.name === 'mock')
+    : [];
+  const [persistedTranscription] = submission.status === 'grading'
+    ? await db
+        .select()
+        .from(schema.transcriptions)
+        .where(eq(schema.transcriptions.submissionId, submission.id))
+        .limit(1)
+    : [];
 
   // Lo que el modelo va a saber del alumno, ya recortado: nombre y comunidad
   // autónoma, nunca su correo, su teléfono ni su NIF. El recorte lo hace
@@ -332,20 +399,77 @@ async function processOne(
   // fallan si un dato de identidad se cuela.
   const student = await studentContextOf(ctx, submission.studentId);
 
-  const graded = await gradeSubmission({
+  let triageUsage: UsageMetrics | null = null;
+  let forumRoute: 'standard' | 'expert' | undefined;
+  if (activity.kind === 'forum') {
+    const triage = await provider.triage({
+      submissionId: submission.id,
+      message: submission.textContent ?? '',
+      thread: [],
+    });
+    triageUsage = triage.usage;
+    await db
+      .update(schema.submissions)
+      .set({ triageLabel: triage.label, triageConfidence: triage.confidence.toFixed(3) })
+      .where(eq(schema.submissions.id, submission.id));
+    if (['errata', 'administrativa', 'no_es_duda'].includes(triage.label) && triage.confidence >= 0.9) {
+      await db
+        .update(schema.submissions)
+        .set({
+          status: 'parked',
+          parkedReason: `Triaje automático: ${triage.reason}`,
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.submissions.id, submission.id));
+      addUsage(usageAccumulator, triage.usage);
+      return { autoPublished: false };
+    }
+    forumRoute = triage.label === 'dificil' || triage.confidence < 0.7 ? 'expert' : 'standard';
+  }
+
+  const settings = await getSettings(ctx);
+  const gradeInput = {
     provider,
     submissionId: submission.id,
     studentRef: submission.studentRef,
     student,
     activityKind: activity.kind,
     pages,
+    existingTranscription: persistedTranscription
+      ? {
+          pages: persistedTranscription.pages,
+          flags: persistedTranscription.flags,
+          discrepancies: persistedTranscription.discrepancies,
+          passCount: persistedTranscription.passCount,
+          confidence: Number(persistedTranscription.confidence),
+          model: persistedTranscription.model,
+        }
+      : null,
     textContent: submission.textContent,
     context,
     pointsAllocation: activity.pointsAllocation ?? [],
     graded: activity.graded,
     maxScore,
     autonomy: activity.autonomy,
-  });
+    verifyWithAi: forumRoute === 'standard' ? false : settings.ai.verify,
+    lowConfidenceThreshold: settings.ai.lowConfidenceThreshold,
+    explanations: settings.ai.explanations,
+    forumRoute,
+  } as const;
+  let graded = await gradeSubmission(gradeInput);
+  let discardedUsage: UsageMetrics | null = null;
+  if (graded.correction.noEsDuda) {
+    await db
+      .update(schema.submissions)
+      .set({ status: 'parked', parkedReason: 'La respuesta con contexto confirma que no es una duda.', updatedAt: new Date() })
+      .where(eq(schema.submissions.id, submission.id));
+    addUsage(usageAccumulator, triageUsage ? sumUsage(triageUsage, graded.usage) : graded.usage);
+    return { autoPublished: false };
+  }
+  if (forumRoute === 'standard' && graded.correction.escalate) {
+    discardedUsage = graded.usage;
+    graded = await gradeSubmission({ ...gradeInput, forumRoute: 'expert', verifyWithAi: settings.ai.verify });
+  }
 
   // Aplanamos el resultado del motor a la forma que persistimos.
   const result = {
@@ -353,16 +477,14 @@ async function processOne(
     items: graded.correction.items,
     aiLatex: graded.correction.aiLatex,
     aiSummary: graded.correction.aiSummary,
+    teacherNotes: graded.correction.teacherNotes,
     confidence: graded.correction.confidence,
     model: graded.correction.model,
-    usage: graded.usage,
+    usage: [triageUsage, discardedUsage].filter((value): value is UsageMetrics => value !== null)
+      .reduce((total, value) => sumUsage(total, value), graded.usage),
+    verification: graded.correction.verification,
   };
 
-  const decision = autonomyDecision(
-    activity.autonomy,
-    result.confidence,
-    result.transcription?.flags.length ?? 0,
-  );
   const now = new Date();
 
   await db.transaction(async (tx) => {
@@ -378,6 +500,8 @@ async function processOne(
         // El motor devuelve arrays de sólo lectura; Drizzle los quiere mutables.
         pages: [...result.transcription.pages],
         flags: [...result.transcription.flags],
+        discrepancies: [...result.transcription.discrepancies],
+        passCount: result.transcription.passCount,
         confidence: result.transcription.confidence.toFixed(3),
         model: result.transcription.model,
       });
@@ -392,8 +516,11 @@ async function processOne(
         aiLatex: result.aiLatex,
         teacherLatex: null,
         aiSummary: result.aiSummary,
+        teacherNotes: result.teacherNotes,
         confidence: result.confidence.toFixed(3),
         model: result.model,
+        verification: result.verification,
+        simulated: provider.name === 'mock',
         inputTokens: result.usage.inputTokens,
         outputTokens: result.usage.outputTokens,
         cachedInputTokens: result.usage.cachedInputTokens,
@@ -401,8 +528,8 @@ async function processOne(
         // El PDF se genera al vuelo al descargarlo; en actividades sin fichero
         // el contrato pide `null`.
         annotatedFileUrl: withFile ? routes.feedbackFile(submission.id) : null,
-        publishedAutomatically: decision === 'publish',
-        publishedAt: decision === 'publish' ? now : null,
+        publishedAutomatically: false,
+        publishedAt: null,
       })
       .returning();
     if (!correction) throw new Error('No se ha podido guardar la corrección.');
@@ -417,6 +544,8 @@ async function processOne(
           maxPoints: String(item.maxPoints),
           aiPoints: String(item.aiPoints),
           aiFeedback: item.aiFeedback,
+          aiQuote: item.aiQuote,
+          aiQuotePage: item.aiQuotePage,
           confidence: item.confidence.toFixed(3),
           alternativeMethod: item.alternativeMethod,
           position: item.position,
@@ -427,20 +556,24 @@ async function processOne(
     await tx
       .update(schema.submissions)
       .set({
-        status: decision === 'publish' ? 'published' : 'graded',
+        status: 'graded',
         errorMessage: null,
         updatedAt: now,
       })
       .where(eq(schema.submissions.id, submission.id));
   });
 
-  usageAccumulator.inputTokens += result.usage.inputTokens;
-  usageAccumulator.outputTokens += result.usage.outputTokens;
-  usageAccumulator.cachedInputTokens += result.usage.cachedInputTokens;
-  usageAccumulator.costCents =
-    Math.round((usageAccumulator.costCents + result.usage.costCents) * 10_000) / 10_000;
+  addUsage(usageAccumulator, result.usage);
 
-  return { autoPublished: decision === 'publish' };
+  return { autoPublished: false };
+}
+
+function addUsage(target: UsageMetrics, value: UsageMetrics): void {
+  target.inputTokens += value.inputTokens;
+  target.outputTokens += value.outputTokens;
+  target.cachedInputTokens += value.cachedInputTokens;
+  target.cacheCreationTokens = (target.cacheCreationTokens ?? 0) + (value.cacheCreationTokens ?? 0);
+  target.costCents = Math.round((target.costCents + value.costCents) * 10_000) / 10_000;
 }
 
 /**
@@ -492,27 +625,67 @@ async function studentContextOf(
  * de una página, aunque el PDF tenga cuatro. No es un fallo de la ingesta; es
  * que el troceado por página es una decisión del motor y aún no está tomada.
  */
-function pagesOf(ctx: AppContext, submission: SubmissionRow): PageSource[] {
+export async function pagesOf(
+  ctx: AppContext,
+  submission: SubmissionRow,
+  pagesPerChunk = 4,
+  allowSynthetic = false,
+): Promise<PageSource[]> {
   if (submission.storagePath !== null) {
     const store = new FileStore(ctx.config.STORAGE_ROOT);
-    return [
-      {
-        page: 1,
-        mediaType: pageMediaType(submission.mediaType),
-        path: store.absolutePathOf(submission.storagePath),
-      },
-    ];
+    const mediaType = pageMediaType(submission.mediaType);
+    const path = store.absolutePathOf(submission.storagePath);
+    if (mediaType !== 'application/pdf') return [{ page: 1, pageNumbers: [1], mediaType, path }];
+    return splitPdfIntoPageSources(await store.read(submission.storagePath), pagesPerChunk);
   }
 
   // Entregas sembradas por `pnpm db:demo`: no hay fichero en ninguna parte y la
   // ruta es sólo un identificador con el que el mock siembra su generador. Con
   // un proveedor real esto no llega a ejecutarse, porque una entrega sin fichero
   // descargado no debería salir de la ingesta.
+  if (!allowSynthetic) {
+    throw new Error('La entrega no tiene un fichero real almacenado; se rechaza para el proveedor activo.');
+  }
   return Array.from({ length: Math.max(1, submission.pageCount) }, (_unused, index) => ({
     page: index + 1,
     mediaType: 'application/pdf' as const,
     path: `${submission.originalFilename ?? submission.id}#${index + 1}`,
   }));
+}
+
+/** Parte un PDF sin rasterizar y conserva un manifiesto exacto de páginas. */
+export async function splitPdfIntoPageSources(
+  bytes: Uint8Array,
+  pagesPerChunk = 4,
+): Promise<PageSource[]> {
+  if (!Number.isInteger(pagesPerChunk) || pagesPerChunk <= 0) {
+    throw new Error('ai.pagesPerChunk debe ser un entero positivo.');
+  }
+  const source = await PDFDocument.load(bytes);
+  const total = source.getPageCount();
+  if (total === 0) throw new Error('El PDF no contiene páginas.');
+  const chunks: PageSource[] = [];
+  for (let start = 0; start < total; start += pagesPerChunk) {
+    const pageNumbers = Array.from(
+      { length: Math.min(pagesPerChunk, total - start) },
+      (_unused, offset) => start + offset + 1,
+    );
+    const chunk = await PDFDocument.create();
+    const copied = await chunk.copyPages(source, pageNumbers.map((page) => page - 1));
+    for (const page of copied) chunk.addPage(page);
+    chunks.push({
+      page: pageNumbers[0]!,
+      pageNumbers,
+      mediaType: 'application/pdf',
+      bytes: new Uint8Array(await chunk.save()),
+    });
+  }
+  const assembled = chunks.flatMap((chunk) => chunk.pageNumbers ?? []);
+  const expected = Array.from({ length: total }, (_unused, index) => index + 1);
+  if (assembled.length !== expected.length || assembled.some((page, index) => page !== expected[index])) {
+    throw new Error('El manifiesto del PDF contiene páginas ausentes o duplicadas.');
+  }
+  return chunks;
 }
 
 /** El motor sólo admite los tipos que la API de visión sabe leer. */

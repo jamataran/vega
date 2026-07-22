@@ -113,7 +113,10 @@ export function ActivityDetailPage() {
 
   const contextMutation = useMutation({
     mutationFn: () =>
-      api.updateContext('activity', activity?.slug ?? '', { content: contextValue }),
+      api.updateContext('activity', activity?.slug ?? '', {
+        content: contextValue,
+        expectedVersion: storedContext?.activeVersion ?? 1,
+      }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.contexts });
       setContextDraft(null);

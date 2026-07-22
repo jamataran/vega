@@ -36,6 +36,7 @@ const DIMENSION_LABEL: Record<CostDimension, string> = {
   activity_kind: 'Tipo',
   course: 'Curso',
   activity: 'Actividad',
+  operation: 'Operación',
 };
 
 const PERIODS = Object.keys(PERIOD_LABEL) as CostPeriod[];

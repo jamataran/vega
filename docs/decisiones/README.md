@@ -17,7 +17,7 @@ tomó, **la decisión** y **las consecuencias** — incluidas las malas.
 |---|---|---|
 | [0001](0001-monorepo-typescript.md) | Monorepo TypeScript de punta a punta | Aceptado |
 | [0002](0002-migraciones-sql-planas.md) | Migraciones SQL planas aplicadas al arrancar | Aceptado |
-| [0003](0003-contexto-tres-niveles.md) | Contexto de corrección en tres niveles | Aceptado |
+| [0003](0003-contexto-tres-niveles.md) | Contexto de corrección en tres niveles | Sustituido por ADR 0015 |
 | [0004](0004-validacion-humana-obligatoria.md) | El profesor siempre valida antes de publicar | Aceptado |
 | [0005](0005-proveedor-ia-intercambiable.md) | Proveedor de IA intercambiable, mock por defecto | Aceptado |
 | [0006](0006-conectores-lms-interfaz-minima.md) | Conectores LMS tras una interfaz mínima | Sustituido por ADR 0009 |
@@ -28,3 +28,5 @@ tomó, **la decisión** y **las consecuencias** — incluidas las malas.
 | [0011](0011-cuatro-operaciones-y-verificacion-mecanica.md) | `AiProvider` crece a cuatro operaciones; la verificación mecánica no es una de ellas | Aceptado |
 | [0012](0012-ingesta-almacen-y-publicacion-en-dos-fases.md) | Ingesta idempotente por `remoteId`, almacén en ficheros y publicación en dos fases | Aceptado |
 | [0013](0013-ficha-del-alumno-y-contexto-al-modelo.md) | Vega guarda la ficha del alumno, y el modelo ve sólo una parte | Aceptado |
+| [0014](0014-original-doble-lectura-y-lotes.md) | El original manda, la lectura es doble y el transporte admite lotes | Aceptado |
+| [0015](0015-contextos-versionados-y-prompts.md) | Contextos en cinco niveles y prompts versionados en PostgreSQL | Aceptado |

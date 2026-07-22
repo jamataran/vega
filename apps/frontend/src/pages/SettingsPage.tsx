@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react';
-import type { ReactNode } from 'react';
+import type { ComponentPropsWithoutRef, ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { UseQueryResult } from '@tanstack/react-query';
 import { RefreshCw } from 'lucide-react';
@@ -37,7 +37,7 @@ import type { SecretState } from '@/components/settings/SecretField';
 
 type Provider = AppSettings['anthropic']['provider'];
 type Connector = AppSettings['moodle']['connector'];
-type SectionId = 'anthropic' | 'moodle' | 'smtp' | 'schedule';
+type SectionId = 'anthropic' | 'ai' | 'moodle' | 'smtp' | 'schedule';
 
 const PROVIDER_LABEL: Record<Provider, string> = {
   mock: 'Simulado — no consume tokens',
@@ -50,12 +50,33 @@ const CONNECTOR_LABEL: Record<Connector, string> = {
   moodle3: 'Moodle 3',
 };
 
+const EXPERT_MODELS = ['claude-opus-4-8', 'claude-fable-5'] as const;
+const VERIFY_MODELS = ['claude-sonnet-5', 'claude-opus-4-8'] as const;
+const TRIAGE_MODELS = ['claude-haiku-4-5'] as const;
+
+function ModelSelect({ value, options, onChange, triggerProps }: { value: string; options: readonly string[]; onChange: (value: string) => void; triggerProps: ComponentPropsWithoutRef<typeof SelectTrigger> }) {
+  return (
+    <Select value={value} onValueChange={onChange}>
+      <SelectTrigger {...triggerProps} className="font-mono text-ui"><SelectValue /></SelectTrigger>
+      <SelectContent>{options.map((model) => <SelectItem key={model} value={model}>{model}</SelectItem>)}</SelectContent>
+    </Select>
+  );
+}
+
 interface FormState {
   provider: Provider;
   transcriptionModel: string;
   gradingModel: string;
+  verifyModel: string;
+  triageModel: string;
   maxTokens: string;
   apiKey: SecretState;
+  aiTransport: AppSettings['ai']['transport'];
+  aiVerify: boolean;
+  aiExplanations: boolean;
+  lowConfidenceThreshold: string;
+  pagesPerChunk: string;
+  logRetentionDays: string;
 
   moodleBaseUrl: string;
   moodleConnector: Connector;
@@ -75,8 +96,16 @@ function fromSettings(settings: AppSettings): FormState {
     provider: settings.anthropic.provider,
     transcriptionModel: settings.anthropic.transcriptionModel,
     gradingModel: settings.anthropic.gradingModel,
+    verifyModel: settings.anthropic.verifyModel,
+    triageModel: settings.anthropic.triageModel,
     maxTokens: String(settings.anthropic.maxTokens),
     apiKey: KEEP,
+    aiTransport: settings.ai.transport,
+    aiVerify: settings.ai.verify,
+    aiExplanations: settings.ai.explanations,
+    lowConfidenceThreshold: String(settings.ai.lowConfidenceThreshold),
+    pagesPerChunk: String(settings.ai.pagesPerChunk),
+    logRetentionDays: String(settings.ai.logRetentionDays),
 
     moodleBaseUrl: settings.moodle.baseUrl,
     moodleConnector: settings.moodle.connector,
@@ -162,6 +191,9 @@ function SystemStatus({
               label="Proveedor de IA"
               value={<span className="font-mono text-ui">{health.aiProvider}</span>}
             />
+            <Row label="Transporte de IA" value={health.aiTransport === 'batch' ? 'Lotes' : 'Síncrono'} />
+            <Row label="Modelo de lectura" value={<span className="font-mono text-ui">{health.readingModel}</span>} />
+            <Row label="Modelo de corrección" value={<span className="font-mono text-ui">{health.gradingModel}</span>} />
             <Row
               label="Conector LMS"
               value={<span className="font-mono text-ui">{health.lmsConnector}</span>}
@@ -181,6 +213,8 @@ function SystemStatus({
 export function SettingsPage() {
   const queryClient = useQueryClient();
   const scheduleId = useId();
+  const verifyId = useId();
+  const explanationsId = useId();
   const [saving, setSaving] = useState<SectionId | null>(null);
   const { user } = useAuth();
   const isAdmin = user?.role === 'admin';
@@ -220,6 +254,7 @@ export function SettingsPage() {
         current ? { ...current, apiKey: KEEP, smtpPassword: KEEP } : current,
       );
       void queryClient.invalidateQueries({ queryKey: queryKeys.health });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.queueRoot });
       notify.success('Ajustes guardados');
     },
     onError: (error) => notify.error('No se han podido guardar los ajustes', error),
@@ -285,6 +320,10 @@ export function SettingsPage() {
   const maxTokens = parseInteger(form.maxTokens, 1);
   const smtpPort = parseInteger(form.smtpPort, 0);
   const everyMinutes = parseInteger(form.everyMinutes, 1);
+  const pagesPerChunk = parseInteger(form.pagesPerChunk, 1);
+  const logRetentionDays = parseInteger(form.logRetentionDays, 1);
+  const lowConfidenceThreshold = Number(form.lowConfidenceThreshold);
+  const validLowConfidenceThreshold = form.lowConfidenceThreshold.trim() !== '' && Number.isFinite(lowConfidenceThreshold) && lowConfidenceThreshold >= 0 && lowConfidenceThreshold <= 1;
 
   // La prueba usa la configuración GUARDADA. Con cambios sin aplicar probaría la
   // anterior, así que se desactiva hasta guardar.
@@ -292,6 +331,8 @@ export function SettingsPage() {
     form.provider !== settings.anthropic.provider ||
     form.transcriptionModel !== settings.anthropic.transcriptionModel ||
     form.gradingModel !== settings.anthropic.gradingModel ||
+    form.verifyModel !== settings.anthropic.verifyModel ||
+    form.triageModel !== settings.anthropic.triageModel ||
     maxTokens !== settings.anthropic.maxTokens ||
     secretPatch(form.apiKey) !== undefined;
 
@@ -344,24 +385,16 @@ export function SettingsPage() {
 
             <div className="grid gap-4 sm:grid-cols-2">
               <Field label="Modelo de transcripción">
-                {(field) => (
-                  <Input
-                    {...field}
-                    value={form.transcriptionModel}
-                    className="font-mono text-ui"
-                    onChange={(event) => update('transcriptionModel', event.target.value)}
-                  />
-                )}
+                {(field) => <ModelSelect triggerProps={field} value={form.transcriptionModel} options={EXPERT_MODELS} onChange={(value) => update('transcriptionModel', value)} />}
               </Field>
               <Field label="Modelo de corrección">
-                {(field) => (
-                  <Input
-                    {...field}
-                    value={form.gradingModel}
-                    className="font-mono text-ui"
-                    onChange={(event) => update('gradingModel', event.target.value)}
-                  />
-                )}
+                {(field) => <ModelSelect triggerProps={field} value={form.gradingModel} options={EXPERT_MODELS} onChange={(value) => update('gradingModel', value)} />}
+              </Field>
+              <Field label="Modelo de verificación">
+                {(field) => <ModelSelect triggerProps={field} value={form.verifyModel} options={VERIFY_MODELS} onChange={(value) => update('verifyModel', value)} />}
+              </Field>
+              <Field label="Modelo de triaje">
+                {(field) => <ModelSelect triggerProps={field} value={form.triageModel} options={TRIAGE_MODELS} onChange={(value) => update('triageModel', value)} />}
               </Field>
             </div>
 
@@ -421,6 +454,9 @@ export function SettingsPage() {
                       provider: form.provider,
                       transcriptionModel: form.transcriptionModel,
                       gradingModel: form.gradingModel,
+                      readingModel: form.transcriptionModel,
+                      verifyModel: form.verifyModel,
+                      triageModel: form.triageModel,
                       maxTokens,
                       apiKey: secretPatch(form.apiKey),
                     },
@@ -429,6 +465,50 @@ export function SettingsPage() {
               >
                 Guardar Anthropic
               </Button>
+            </div>
+          </div>
+        </Section>
+
+        <Section title="Motor de IA" description="Transporte, verificación y conservación del registro técnico.">
+          <div className="flex flex-col gap-4">
+            <Field label="Transporte">
+              {({ id, ...aria }) => (
+                <Select value={form.aiTransport} onValueChange={(value) => update('aiTransport', value === 'sync' ? 'sync' : 'batch')}>
+                  <SelectTrigger id={id} {...aria}><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="batch" disabled>Lotes — pendiente de orquestación durable</SelectItem>
+                    <SelectItem value="sync">Síncrono — reprocesos inmediatos</SelectItem>
+                  </SelectContent>
+                </Select>
+              )}
+            </Field>
+            <div className="flex items-start justify-between gap-4">
+              <div><Label htmlFor={verifyId}>Verificación con IA</Label><p className="text-ui text-muted-foreground">La comprobación mecánica de citas nunca se desactiva.</p></div>
+              <Switch id={verifyId} checked={form.aiVerify} onCheckedChange={(value) => update('aiVerify', value)} />
+            </div>
+            <div className="flex items-start justify-between gap-4">
+              <div><Label htmlFor={explanationsId}>Resúmenes de razonamiento</Label><p className="text-ui text-muted-foreground">Añade contexto técnico para el profesorado; consume tokens.</p></div>
+              <Switch id={explanationsId} checked={form.aiExplanations} onCheckedChange={(value) => update('aiExplanations', value)} />
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field label="Umbral de confianza" hint="De 0 a 1. Por debajo, la entrega requiere revisión." error={validLowConfidenceThreshold ? undefined : 'Escribe un valor entre 0 y 1.'}>
+                {(field) => <Input {...field} type="number" min={0} max={1} step={0.05} value={form.lowConfidenceThreshold} onChange={(event) => update('lowConfidenceThreshold', event.target.value)} />}
+              </Field>
+              <Field label="Páginas por bloque" error={pagesPerChunk === null ? 'Escribe un entero positivo.' : undefined}>
+                {(field) => <Input {...field} type="number" min={1} value={form.pagesPerChunk} onChange={(event) => update('pagesPerChunk', event.target.value)} />}
+              </Field>
+              <Field label="Días de registro" error={logRetentionDays === null ? 'Escribe un entero positivo.' : undefined}>
+                {(field) => <Input {...field} type="number" min={1} value={form.logRetentionDays} onChange={(event) => update('logRetentionDays', event.target.value)} />}
+              </Field>
+            </div>
+            {form.transcriptionModel === 'claude-fable-5' || form.gradingModel === 'claude-fable-5' ? (
+              <p role="status" className="text-ui text-muted-foreground">Has seleccionado Claude Fable 5 para el piloto. Revisa su política de retención de datos antes de usar entregas reales.</p>
+            ) : null}
+            <div className="flex justify-end">
+              <Button size="lg" disabled={pagesPerChunk === null || logRetentionDays === null || !validLowConfidenceThreshold} loading={saving === 'ai'} onClick={() => {
+                if (pagesPerChunk === null || logRetentionDays === null || !validLowConfidenceThreshold) return;
+                save('ai', { ai: { transport: form.aiTransport, verify: form.aiVerify, explanations: form.aiExplanations, lowConfidenceThreshold, pagesPerChunk, logRetentionDays } });
+              }}>Guardar motor de IA</Button>
             </div>
           </div>
         </Section>

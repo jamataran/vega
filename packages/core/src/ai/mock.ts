@@ -11,8 +11,12 @@ import type {
   GradedItem,
   GradeInput,
   GradeResult,
+  TriageInput,
+  TriageResult,
   TranscribeInput,
   TranscribeResult,
+  VerifyInput,
+  VerifyResult,
   VerifyConnectionResult,
 } from './provider.js';
 
@@ -448,6 +452,8 @@ export interface MockAiProviderOptions {
    * coste con la tarifa del modelo real (ver `cost/pricing.ts`).
    */
   readonly model?: string;
+  /** Hace visible en el mock que cambiar el prompt activo cambia la siguiente salida. */
+  readonly promptSalt?: string;
 }
 
 const DEFAULT_MODEL = 'mock-claude-opus-4-8';
@@ -524,24 +530,36 @@ export class MockAiProvider implements AiProvider {
 
   readonly #delayMs: number;
   readonly #model: string;
+  readonly #promptSalt: string;
 
   constructor(options: MockAiProviderOptions = {}) {
     this.#delayMs = options.delayMs ?? 0;
     this.#model = options.model ?? DEFAULT_MODEL;
+    this.#promptSalt = options.promptSalt ?? '';
   }
 
   async transcribe(input: TranscribeInput): Promise<TranscribeResult> {
     await sleep(this.#delayMs);
 
-    const rng = makeRng(`${input.submissionId}:transcripcion`);
-    const exercises = selectExercises(input.submissionId, input.pages.length);
+    const rng = makeRng(`${input.submissionId}:transcripcion:${input.reading ?? 'single'}:${this.#promptSalt}`);
+    const pageManifest = input.pages.flatMap((source) =>
+      (source.pageNumbers ?? [source.page]).map((page) => ({ ...source, page })),
+    );
+    const exercises = selectExercises(input.submissionId, pageManifest.length);
 
     const pages: TranscriptionPage[] = [];
     const flags: TranscriptionFlag[] = [];
 
-    input.pages.forEach((source, index) => {
+    pageManifest.forEach((source, index) => {
       const exercise = exercises[index] ?? EXERCISES[0]!;
       const lines = [...exercise.lines];
+
+      // La segunda lectura trae de forma determinista algunas diferencias
+      // materiales para que el pipeline de revisión se ejercite también en dev.
+      if (input.reading === 'b' && rng.chance(0.35)) {
+        const lineIndex = rng.int(0, lines.length - 1);
+        lines[lineIndex] = `${lines[lineIndex] ?? ''}\\;[lectura\ alternativa]`;
+      }
 
       // Una de cada cinco páginas trae algo que el OCR no ve claro. La marca va
       // FUERA de la fórmula: dentro, KaTeX la interpretaría como matemáticas.
@@ -572,7 +590,7 @@ export class MockAiProvider implements AiProvider {
       pages.push({
         page: source.page,
         latex: `**Ejercicio ${index + 1}. ${exercise.statement}**\n\n${body}`,
-        imageUrl: `/api/scans/${input.submissionId}/${source.page}.svg`,
+        imageUrl: mockPageImageUrl(source.page, `Ejercicio ${index + 1}: ${exercise.statement}`),
       });
     });
 
@@ -581,8 +599,8 @@ export class MockAiProvider implements AiProvider {
     const base = 0.82 + rng.next() * 0.16;
     const confidence = clamp01(base - flags.length * 0.06);
 
-    const inputTokens = 1_400 + input.pages.length * 1_150 + rng.int(0, 220);
-    const outputTokens = 260 + input.pages.length * 190 + rng.int(0, 120);
+    const inputTokens = 1_400 + pageManifest.length * 1_150 + rng.int(0, 220);
+    const outputTokens = 260 + pageManifest.length * 190 + rng.int(0, 120);
     const cachedInputTokens = rng.chance(0.65) ? 1_024 + rng.int(0, 512) : 0;
 
     return {
@@ -602,7 +620,7 @@ export class MockAiProvider implements AiProvider {
   async grade(input: GradeInput): Promise<GradeResult> {
     await sleep(this.#delayMs);
 
-    const rng = makeRng(`${input.submissionId}:correccion`);
+    const rng = makeRng(`${input.submissionId}:correccion:${this.#promptSalt}`);
 
     // En un foro no hay fichero ni transcripción: lo que se corrige es lo que
     // el alumno ha escrito. Si el LMS no manda el texto, el mock se inventa una
@@ -647,12 +665,13 @@ export class MockAiProvider implements AiProvider {
         : clamp01(0.72 + Math.min((studentText?.length ?? 0) / 4_000, 0.2) + rng.next() * 0.06);
 
     const textTokens = Math.round((studentText?.length ?? 0) / 4);
+    const contextLength = input.context.reduce((sum, segment) => sum + segment.content.length, 0);
     const inputTokens =
-      2_100 + input.context.length / 4 + textTokens + items.length * 320 + rng.int(0, 260);
+      2_100 + contextLength / 4 + textTokens + items.length * 320 + rng.int(0, 260);
     const outputTokens = 420 + items.length * 210 + aiLatex.length / 5 + rng.int(0, 180);
     // El contexto de la actividad es lo que se repite entre entregas: en
     // producción se sirve casi siempre desde caché, y el mock lo refleja.
-    const cachedInputTokens = rng.chance(0.8) ? Math.round(input.context.length / 4) : 0;
+    const cachedInputTokens = rng.chance(0.8) ? Math.round(contextLength / 4) : 0;
     const usageTokens = {
       inputTokens: Math.round(inputTokens),
       outputTokens: Math.round(outputTokens),
@@ -663,12 +682,17 @@ export class MockAiProvider implements AiProvider {
       items,
       aiLatex,
       aiSummary,
+      teacherNotes: input.explanations !== false
+        ? 'Contrasta las marcas de lectura y las citas antes de validar la propuesta.'
+        : null,
       confidence: round2(meanConfidence),
       model: this.#model,
       usage: {
         ...usageTokens,
         costCents: estimateCostCents(this.#model, usageTokens),
       },
+      escalate: input.route === 'standard' && rng.chance(0.12),
+      noEsDuda: forumTopic !== undefined && /gracias|entendido|de acuerdo/i.test(studentText ?? ''),
     };
   }
 
@@ -748,10 +772,74 @@ export class MockAiProvider implements AiProvider {
         maxPoints: entry.maxPoints,
         aiPoints: round2(Math.max(0, entry.maxPoints - deduction)),
         aiFeedback: feedbackParts.join(' '),
+        aiQuote:
+          deduction > 0
+            ? (input.transcription?.pages[index]?.latex.slice(0, 160) ??
+              input.textContent?.slice(0, 160) ??
+              null)
+            : null,
+        aiQuotePage:
+          deduction > 0 && input.transcription !== null
+            ? (input.transcription.pages[index]?.page ?? index + 1)
+            : null,
         confidence: round2(confidence),
         alternativeMethod,
       };
     });
+  }
+
+  async triage(input: TriageInput): Promise<TriageResult> {
+    await sleep(this.#delayMs);
+    const normalized = input.message.toLowerCase();
+    const rng = makeRng(`${input.submissionId}:triage:${this.#promptSalt}`);
+    const label = /errata|typo|corregid/.test(normalized)
+      ? 'errata'
+      : /fecha|plazo|entrega|horario/.test(normalized)
+        ? 'administrativa'
+        : /gracias|de acuerdo|entendido/.test(normalized)
+          ? 'no_es_duda'
+          : rng.chance(0.45)
+            ? 'sencilla'
+            : 'dificil';
+    const confidence = label === 'dificil' && rng.chance(0.3) ? 0.64 : 0.92;
+    return {
+      label,
+      confidence,
+      reason: `Clasificación simulada y determinista: ${label}.`,
+      model: this.#model,
+      usage: {
+        inputTokens: 120,
+        outputTokens: 24,
+        cachedInputTokens: 0,
+        costCents: 0,
+      },
+    };
+  }
+
+  async verify(input: VerifyInput): Promise<VerifyResult> {
+    await sleep(this.#delayMs);
+    const rng = makeRng(`${input.submissionId}:verify:${this.#promptSalt}`);
+    const severe = rng.chance(0.25);
+    return {
+      coherent: !severe,
+      issues: severe
+        ? [
+            {
+              kind: 'score_feedback_mismatch',
+              itemLabel: input.items[0]?.label ?? null,
+              detail: 'El feedback describe un descuento mayor que el reflejado en la puntuación.',
+            },
+          ]
+        : [],
+      confidence: severe ? 0.91 : 0.94,
+      model: this.#model,
+      usage: {
+        inputTokens: 360,
+        outputTokens: severe ? 70 : 28,
+        cachedInputTokens: 0,
+        costCents: 0,
+      },
+    };
   }
 
   async verifyConnection(): Promise<VerifyConnectionResult> {
@@ -764,6 +852,12 @@ export class MockAiProvider implements AiProvider {
       usage: null,
     };
   }
+}
+
+function mockPageImageUrl(page: number, text: string): string {
+  const safe = text.replace(/[<>&]/g, '').slice(0, 180);
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 1100"><rect width="800" height="1100" fill="#fff"/><text x="64" y="88" font-family="sans-serif" font-size="24" fill="#334155">Original simulado · página ${page}</text><foreignObject x="64" y="130" width="672" height="850"><div xmlns="http://www.w3.org/1999/xhtml" style="font:22px monospace;white-space:pre-wrap;color:#1e293b">${safe}</div></foreignObject></svg>`;
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
 }
 
 interface SummaryOptions {

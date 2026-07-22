@@ -402,6 +402,7 @@ export async function activityRoutes(app: FastifyInstance, ctx: AppContext): Pro
         ...(body.referenceSolution !== undefined
           ? { referenceSolution: body.referenceSolution }
           : {}),
+        ...(body.templateKey !== undefined ? { templateKey: body.templateKey } : {}),
         ...(body.autonomy !== undefined ? { autonomy: body.autonomy } : {}),
       };
 

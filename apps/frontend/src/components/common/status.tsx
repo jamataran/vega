@@ -1,4 +1,9 @@
-import { ACTIVITY_KIND_LABEL, AUTONOMY_MODE_LABEL, SUBMISSION_STATUS_LABEL } from '@vega/shared';
+import {
+  ACTIVITY_KIND_LABEL,
+  AUTONOMY_MODE_LABEL,
+  LOW_CONFIDENCE_THRESHOLD,
+  SUBMISSION_STATUS_LABEL,
+} from '@vega/shared';
 import type { ActivityKind, AutonomyMode, SubmissionStatus } from '@vega/shared';
 import { Badge } from '@/components/ui/badge';
 import type { BadgeProps } from '@/components/ui/badge';
@@ -16,6 +21,7 @@ export const STATUS_VARIANT: Record<SubmissionStatus, StatusVariant> = {
   transcribed: 'default',
   grading: 'default',
   graded: 'primary',
+  parked: 'warning',
   validated: 'success',
   published: 'quiet',
   error: 'destructive',
@@ -56,7 +62,7 @@ export function AutonomyBadge({ mode }: { mode: AutonomyMode }) {
 }
 
 /** Umbral del contrato: por debajo de 0,75 la transcripción o la corrección se señala. */
-export const LOW_CONFIDENCE = 0.75;
+export const LOW_CONFIDENCE = LOW_CONFIDENCE_THRESHOLD;
 
 /**
  * La confianza no se comunica sólo con color: la etiqueta lleva siempre el

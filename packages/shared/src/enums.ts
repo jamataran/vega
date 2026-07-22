@@ -21,6 +21,7 @@ export const SubmissionStatus = z.enum([
   'transcribed', // hay transcripción, falta corregir
   'grading', // corrección IA en curso
   'graded', // la IA propone corrección — esperando al profesor
+  'parked', // apartada por triaje o por el profesor; sigue visible en la cola
   'validated', // el profesor ha validado; pendiente de publicar
   'published', // feedback (y nota, si la hay) ya en Moodle
   'error', // algo falló; requiere intervención
@@ -28,19 +29,47 @@ export const SubmissionStatus = z.enum([
 export type SubmissionStatus = z.infer<typeof SubmissionStatus>;
 
 /** Estados en los que la entrega espera acción del profesor. */
-export const REVIEWABLE_STATUSES: SubmissionStatus[] = ['graded', 'validated', 'error'];
+export const REVIEWABLE_STATUSES: SubmissionStatus[] = ['graded', 'parked', 'validated', 'error'];
+
+/** Umbral compartido; el ajuste `ai.lowConfidenceThreshold` puede sustituirlo en ejecución. */
+export const LOW_CONFIDENCE_THRESHOLD = 0.75;
 
 /**
  * Los tres niveles de contexto de corrección, de más general a más específico.
  * El nivel intermedio es el tipo de actividad: lo que vale para toda entrega
  * no vale para un foro.
  */
-export const ContextLevel = z.enum(['global', 'activity_kind', 'activity']);
+export const ContextLevel = z.enum(['global', 'activity_kind', 'template', 'course', 'activity']);
 export type ContextLevel = z.infer<typeof ContextLevel>;
 
 /** Marcas que el OCR deja sobre fragmentos problemáticos del manuscrito. */
-export const TranscriptionFlagKind = z.enum(['ILEGIBLE', 'DUDA']);
+export const TranscriptionFlagKind = z.enum(['ILEGIBLE', 'DUDA', 'DISCREPANCIA']);
 export type TranscriptionFlagKind = z.infer<typeof TranscriptionFlagKind>;
+
+/** Etiqueta del triaje ciego de mensajes de foro. */
+export const TriageLabel = z.enum([
+  'errata',
+  'administrativa',
+  'no_es_duda',
+  'sencilla',
+  'dificil',
+]);
+export type TriageLabel = z.infer<typeof TriageLabel>;
+
+/** Operaciones que pueden dejar una entrada en el ledger de IA. */
+export const AiOperation = z.enum([
+  'reading_a',
+  'reading_b',
+  'grade',
+  'triage',
+  'verify',
+  'forum_answer',
+  'connection_test',
+]);
+export type AiOperation = z.infer<typeof AiOperation>;
+
+export const AiTransport = z.enum(['batch', 'sync']);
+export type AiTransport = z.infer<typeof AiTransport>;
 
 /** Origen de la puntuación de un apartado, para medir la desviación IA vs profesor. */
 export const ScoreSource = z.enum(['ai', 'teacher']);
@@ -67,6 +96,7 @@ export const SUBMISSION_STATUS_LABEL: Record<SubmissionStatus, string> = {
   transcribed: 'Transcrita',
   grading: 'Corrigiendo',
   graded: 'Por revisar',
+  parked: 'Aparcada',
   validated: 'Validada',
   published: 'Publicada',
   error: 'Error',
@@ -85,7 +115,19 @@ export const USER_ROLE_LABEL: Record<UserRole, string> = {
 export const CONTEXT_LEVEL_LABEL: Record<ContextLevel, string> = {
   global: 'Contexto global',
   activity_kind: 'Tipo de actividad',
+  template: 'Plantilla',
+  course: 'Curso',
   activity: 'Actividad',
+};
+
+export const AI_OPERATION_LABEL: Record<AiOperation, string> = {
+  reading_a: 'Lectura A',
+  reading_b: 'Lectura B',
+  grade: 'Corrección',
+  triage: 'Triaje',
+  verify: 'Verificación',
+  forum_answer: 'Respuesta de foro',
+  connection_test: 'Prueba de conexión',
 };
 
 export const AUTONOMY_MODE_LABEL: Record<AutonomyMode, string> = {

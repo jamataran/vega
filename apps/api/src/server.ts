@@ -5,12 +5,13 @@ import { startScheduler } from './batch/scheduler.js';
 import { createDb } from './db/client.js';
 import { registerErrorHandler } from './http/errors.js';
 import { activityRoutes } from './routes/activities.js';
+import { aiCallRoutes } from './routes/ai-calls.js';
 import { authRoutes } from './routes/auth.js';
 import { batchRoutes, runBatch } from './routes/batch.js';
 import { contextRoutes } from './routes/contexts.js';
 import { healthRoutes } from './routes/health.js';
-import { scanRoutes } from './routes/scans.js';
 import { settingsRoutes } from './routes/settings.js';
+import { promptRoutes } from './routes/prompts.js';
 import { statsRoutes } from './routes/stats.js';
 import { submissionRoutes } from './routes/submissions.js';
 import { userRoutes } from './routes/users.js';
@@ -76,11 +77,12 @@ export async function buildServer(config: Config): Promise<BuiltServer> {
   await submissionRoutes(app, ctx);
   await activityRoutes(app, ctx);
   await contextRoutes(app, ctx);
+  await promptRoutes(app, ctx);
+  await aiCallRoutes(app, ctx);
   await userRoutes(app, ctx);
   await settingsRoutes(app, ctx);
   await statsRoutes(app, ctx);
   await batchRoutes(app, ctx);
-  await scanRoutes(app, ctx);
 
   // Planificador del proceso de corrección. Corre dentro del propio API porque
   // el despliegue es de una instancia por entorno; el cerrojo de Postgres lo

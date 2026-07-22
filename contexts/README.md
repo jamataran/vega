@@ -1,8 +1,8 @@
 # Contextos de corrección
 
-Aquí vive lo que la IA lee antes de corregir. Son ficheros Markdown, versionados con git, y son
-**el juego por defecto que carga la aplicación**: `pnpm db:demo` los vuelca en la tabla
-`grading_contexts`.
+Aquí vive el juego de instrucciones predeterminado. En una instalación nueva estos Markdown
+crean la versión 1; desde entonces PostgreSQL conserva la versión activa y el historial inmutable.
+Desplegar de nuevo no compara ni sobrescribe un contexto existente.
 
 No son documentación. Son instrucciones ejecutables: lo que se escribe aquí determina las notas de
 los alumnos. Se revisan con el mismo cuidado que el código.
@@ -13,13 +13,15 @@ matemáticas, de lengua o de física está en estos ficheros, y los edita el pro
 propia aplicación —`PUT /api/contexts/{level}/{key}`—, sin desplegar nada y sin pasar por un
 desarrollador. Personalizar Vega es escribir prompts.
 
-## Los tres niveles
+## Los cinco niveles
 
 ```mermaid
 graph TD
   G["global<br/>contexts/global.md<br/><i>política del departamento</i>"] --> K
-  K["activity_kind<br/>contexts/activity-kinds/&lt;kind&gt;.md<br/><i>entrega o foro</i>"] --> A
-  A["activity<br/>contexts/activities/&lt;slug&gt;.md<br/><i>esta actividad concreta</i>"] --> R
+  K["activity_kind<br/>contexts/activity-kinds/&lt;kind&gt;.md<br/><i>entrega o foro</i>"] --> T
+  T["template<br/><i>formato compartido</i>"] --> C
+  C["course<br/><i>particularidades del aula</i>"] --> A
+  A["activity<br/><i>esta actividad concreta</i>"] --> R
   R["merged<br/><i>lo que lee el modelo</i>"]
 ```
 
@@ -27,6 +29,8 @@ graph TD
 |---|---|---|---|---|
 | `global` | `global` | `global.md` | Una o dos veces al año | Tono del feedback, arrastre, justificación, decimales, redondeo |
 | `activity_kind` | el `ActivityKind` | `activity-kinds/assignment.md`, `activity-kinds/forum.md` | Rara | Qué se valora en una entrega y qué en un foro |
+| `template` | slug de plantilla | `activity-kinds/assignment*.md` como semilla | Ocasional | Formato compartido por varias actividades |
+| `course` | id del curso | Se crea desde la aplicación | Por aula | Criterios propios del curso |
 | `activity` | el `slug` de la actividad | `activities/tema04.md`, `activities/problema12.md`… | Cada actividad | Errores típicos de este tema, exigencias concretas, qué aceptar y qué no |
 
 La correspondencia fichero ↔ fila de `grading_contexts` es exacta: el nivel es el directorio, la
@@ -35,11 +39,8 @@ La correspondencia fichero ↔ fila de `grading_contexts` es exacta: el nivel es
 Los `ActivityKind` son exactamente dos, `assignment` y `forum`, así que el nivel intermedio no puede
 tener más de dos ficheros. Cualquier otro nombre en `activity-kinds/` no lo lee nadie.
 
-> **Estado real de esta carpeta.** Falta `activity-kinds/forum.md`: mientras no exista, la siembra
-> usa un texto de reserva escrito en `apps/api/src/db/demo.ts`. Y `activity-kinds/assignment-tema.md`
-> es un resto del enum viejo (`simulacro_tema`) que ya no corresponde a ningún `ActivityKind` y que
-> no se carga nunca. Tampoco hay fichero de nivel `activity` para las actividades de foro del juego
-> de datos (`foro-didactica`, `foro-dudas-analisis`).
+`activity-kinds/assignment-tema.md` se siembra como la plantilla `simulacro-tema`; no es un
+`ActivityKind`. Los niveles `course` y `activity` nacen al configurarlos para una instalación.
 
 ## Cómo se combinan
 
@@ -55,7 +56,7 @@ El orden no es estético. Es el de especificidad, y además es el que aprovecha 
 que menos cambia va primero, de modo que el prefijo compartido por todas las entregas de una misma
 actividad sea lo más largo posible.
 
-Además del texto de los tres niveles, el motor recibe ya estructurado desde la tabla `activities`:
+Además del texto de los cinco niveles, el motor recibe ya estructurado desde la tabla `activities`:
 
 - `pointsAllocation` — los apartados con sus puntos máximos. Manda sobre lo que devuelva la IA.
 - `graded` y `maxScore` — si la actividad se puntúa y sobre cuánto. En un foro son `false` y `null`,
@@ -64,7 +65,7 @@ Además del texto de los tres niveles, el motor recibe ya estructurado desde la 
   que escribió el alumno.
 
 El resultado se puede ver tal cual, sin gastar tokens, en `GET /api/contexts/resolved/{activityId}`
-(`ResolvedContextResponse`), que devuelve los tres niveles por separado y el `merged` final. Si una
+(`ResolvedContextResponse`), que devuelve los niveles por separado y el `merged` final. Si una
 corrección sale rara, **el primer sitio donde mirar es ahí**.
 
 Además de los tres niveles, `resolveContext()` añade al final dos cosas que **no** son Markdown de
@@ -89,24 +90,17 @@ ponerlos antes acortaría el prefijo cacheable sin ganar nada.
 > Esta nota decía lo contrario hasta que se cerró la carencia, y conviene saberlo porque quien
 > leyera sólo la documentación antigua concluiría que Vega corrige sin la solución de referencia.
 
-Ver [ADR 0003](../docs/decisiones/0003-contexto-tres-niveles.md).
+Ver [ADR 0015](../docs/decisiones/0015-contextos-versionados-y-prompts.md).
 
 ## Ficheros y base de datos
 
-Los contextos existen en dos sitios: estos ficheros y la tabla `grading_contexts`. La regla
-provisional es **el fichero siembra, la base de datos manda**:
+Los contextos tienen una semilla en estos ficheros y su estado vivo en PostgreSQL. La regla cerrada
+es **el fichero siembra una vez; la base de datos manda**:
 
-1. `pnpm db:demo` lee estos ficheros y crea las filas. Es un script de desarrollo: vacía las tablas
-   antes de escribir.
-2. En ejecución, la aplicación lee **siempre** la fila (`readContextLevel()` consulta
-   `grading_contexts` y nada más). El fichero se ignora.
-3. Editar desde la aplicación (`PUT /api/contexts/{level}/{key}`) escribe **sólo** en la base de
-   datos, y crea la fila si no existía.
-
-Consecuencia incómoda y conocida: tras la primera edición desde el móvil, el fichero del
-repositorio queda desactualizado y nadie avisa. Si esto debe resolverse con commit automático desde
-la UI, con un botón de exportar, o eliminando uno de los dos almacenes, es una **pregunta abierta**
-— ver `docs/hu/HU-06-editor-contextos-tres-niveles.md`.
+1. `bootstrap()` crea sólo los contextos inexistentes con versión 1 y `source = 'seed'`.
+2. En ejecución se lee exclusivamente la versión activa de PostgreSQL.
+3. Cada edición crea una versión `N + 1` inmutable y mueve el puntero activo en la misma transacción.
+4. No se escribe en Git ni se sincroniza el repositorio durante la ejecución.
 
 La única excepción es la CLI del motor, que lee estos ficheros directamente y no toca la base de
 datos. Es lo que permite ajustar un prompt y ver el efecto sin levantar nada:

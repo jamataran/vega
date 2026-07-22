@@ -17,6 +17,8 @@ import { ProcessesPage } from '@/pages/ProcessesPage';
 import { OverviewPage } from '@/pages/OverviewPage';
 import { UsersPage } from '@/pages/UsersPage';
 import { SettingsPage } from '@/pages/SettingsPage';
+import { PromptsPage } from '@/pages/PromptsPage';
+import { AiCallsPage } from '@/pages/AiCallsPage';
 import { NotFoundPage } from '@/pages/NotFoundPage';
 
 const queryClient = new QueryClient({
@@ -69,6 +71,8 @@ export function App() {
 
                     <Route element={<RequireAdmin />}>
                       <Route path="/usuarios" element={<UsersPage />} />
+                      <Route path="/prompts" element={<PromptsPage />} />
+                      <Route path="/registro-ia" element={<AiCallsPage />} />
                     </Route>
 
                     <Route path="*" element={<NotFoundPage />} />

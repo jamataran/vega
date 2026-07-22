@@ -202,6 +202,10 @@ ingesta cerrada aparece la segunda: un PDF real llega al motor como **un documen
 páginas, porque trocearlo exigiría rasterizar. Ver
 [`revision/h2-preparacion-motor-ia.md`](revision/h2-preparacion-motor-ia.md) §5.
 
+**Implementado en el motor IA**: doble lectura, troceado PDF con manifiesto, cuatro operaciones,
+contextos y prompts versionados, triaje de foros, verificación mecánica/IA y ledger. La validación
+T14 contra corpus y clave reales es la puerta de salida antes de considerar H4 cerrado.
+
 ---
 
 ## H4 — Llamadas reales y precorrección visible

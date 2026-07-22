@@ -1,6 +1,7 @@
 import type { FastifyBaseLogger } from 'fastify';
 import { getSettings, markScheduleRun } from '../settings/service.js';
 import type { AppContext } from '../context.js';
+import { purgeAiCalls } from '../ai/ledger.js';
 
 /**
  * Planificador de los procesos de corrección.
@@ -28,6 +29,7 @@ export function startScheduler(
   log: FastifyBaseLogger,
 ): Scheduler {
   let running = false;
+  let lastPurgeAt = 0;
 
   const tick = async (): Promise<void> => {
     // Una ejecución larga no debe solaparse con la siguiente.
@@ -39,6 +41,13 @@ export function startScheduler(
     } catch (error) {
       log.error({ err: error }, 'El planificador no ha podido leer los ajustes');
       return;
+    }
+
+    if (Date.now() - lastPurgeAt >= 86_400_000) {
+      lastPurgeAt = Date.now();
+      void purgeAiCalls(ctx, settings.ai.logRetentionDays).catch((error) =>
+        log.error({ err: error }, 'No se ha podido purgar el registro de IA'),
+      );
     }
 
     if (!settings.schedule.enabled) return;

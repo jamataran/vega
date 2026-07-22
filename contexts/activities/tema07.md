@@ -2,7 +2,7 @@
 
 - **Tipo de tarea**: `simulacro_tema`
 - **Nota máxima**: 10
-- Aplica sobre `global.md` y `task-types/simulacro_tema.md`.
+- Aplica sobre el contexto global y la plantilla `simulacro-tema` resueltos por Vega.
 
 Es el tema donde el rigor pesa más de todo el temario: casi todo son definiciones con
 cuantificadores y demostraciones cortas. Sé especialmente estricto con la precisión formal.

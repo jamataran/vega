@@ -13,6 +13,7 @@ import { ScoreStepper } from './ScoreStepper';
 interface CorrectionItemCardProps {
   item: CorrectionItem;
   readOnly: boolean;
+  onQuoteOpen: (page: number) => void;
   onPointsChange: (points: number) => void;
   onFeedbackChange: (feedback: string | null) => void;
   onRestore: () => void;
@@ -21,6 +22,7 @@ interface CorrectionItemCardProps {
 export function CorrectionItemCard({
   item,
   readOnly,
+  onQuoteOpen,
   onPointsChange,
   onFeedbackChange,
   onRestore,
@@ -103,6 +105,18 @@ export function CorrectionItemCard({
               ? 'Se enviará el feedback de la IA. Escribe aquí para sustituirlo.'
               : 'Has reescrito el feedback de este apartado.'}
           </p>
+
+          {item.aiQuote ? (
+            <blockquote className="mt-3 rounded-md border border-border bg-muted px-3 py-2 text-ui text-muted-foreground">
+              <p className="eyebrow mb-1">Cita usada para el descuento</p>
+              <MathText>{item.aiQuote}</MathText>
+              {item.aiQuotePage ? (
+                <button type="button" className="mt-2 block text-primary underline underline-offset-2" onClick={() => onQuoteOpen(item.aiQuotePage!)}>
+                  Abrir la página {item.aiQuotePage} del original
+                </button>
+              ) : null}
+            </blockquote>
+          ) : null}
 
           {item.teacherFeedback !== null && item.aiFeedback ? (
             <details className="mt-2">

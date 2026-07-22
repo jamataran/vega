@@ -1,5 +1,10 @@
 import { CONTEXT_LEVEL_LABEL } from '@vega/shared';
-import type { ActivityFile, ContextLevel, ResolvedContextResponse } from '@vega/shared';
+import type {
+  ActivityFile,
+  ContextLevel,
+  ContextSegment,
+  ResolvedContextResponse,
+} from '@vega/shared';
 
 /**
  * Resolución del contexto de corrección a tres niveles.
@@ -15,6 +20,10 @@ export interface ResolveContextInput {
   readonly global?: string | null;
   /** Instrucciones del tipo de actividad: no se corrige igual una entrega que un foro. */
   readonly activityKind?: string | null;
+  /** Criterios del formato compartido (problema, tema…). */
+  readonly template?: string | null;
+  /** Particularidades del aula o curso. */
+  readonly course?: string | null;
   /** Solución de referencia e indicaciones de la actividad concreta. */
   readonly activity?: string | null;
   /** Ficheros que acompañan al contexto de la actividad. Puede llegar vacío. */
@@ -34,6 +43,8 @@ export interface ResolveContextInput {
    * son la referencia contra la que Vega juzga lo que escribe el alumno.
    */
   readonly fileContents?: readonly { readonly filename: string; readonly content: string }[];
+  /** Versiones activas fijadas al comenzar la ejecución. */
+  readonly segments?: readonly ContextSegment[];
 }
 
 /** Separador entre niveles: dos saltos para que el Markdown respire. */
@@ -55,11 +66,15 @@ function section(level: ContextLevel, body: string): string {
 export function resolveContext(input: ResolveContextInput): ResolvedContextResponse {
   const global = clean(input.global);
   const activityKind = clean(input.activityKind);
+  const template = clean(input.template);
+  const course = clean(input.course);
   const activity = clean(input.activity);
 
   const parts: string[] = [];
   if (global !== '') parts.push(section('global', global));
   if (activityKind !== '') parts.push(section('activity_kind', activityKind));
+  if (template !== '') parts.push(section('template', template));
+  if (course !== '') parts.push(section('course', course));
   if (activity !== '') parts.push(section('activity', activity));
 
   // En una actividad no puntuable no hay solución que contrastar: lo que el
@@ -78,11 +93,44 @@ export function resolveContext(input: ResolveContextInput): ResolvedContextRespo
     parts.push(`## Material adjunto · ${file.filename}${SEPARATOR}${body}`);
   }
 
+  const inlineSegments: ContextSegment[] = (
+    [
+      ['global', 'global', global],
+      ['activity_kind', 'inline', activityKind],
+      ['template', 'inline', template],
+      ['course', 'inline', course],
+      ['activity', 'inline', activity],
+    ] as const
+  ).flatMap(([level, key, content], index) =>
+    content === ''
+      ? []
+      : [{
+          level,
+          key,
+          contextId: `00000000-0000-4000-8000-00000000000${index}`,
+          version: 1,
+          contentHash: inlineHash(content),
+          content,
+        }],
+  );
+
   return {
     global,
     activityKind,
+    template,
+    course,
     activity,
+    segments: input.segments && input.segments.length > 0 ? [...input.segments] : inlineSegments,
     merged: parts.join(SEPARATOR),
     files: [...(input.files ?? [])],
   };
+}
+
+function inlineHash(content: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < content.length; index += 1) {
+    hash ^= content.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `fnv1a-${(hash >>> 0).toString(16).padStart(8, '0')}`;
 }

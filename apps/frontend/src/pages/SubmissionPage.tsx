@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
-import { ChevronLeft, Info, Lock } from 'lucide-react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { ChevronLeft, Info, Lock, RefreshCw, SkipForward } from 'lucide-react';
 import { ACTIVITY_KIND_LABEL, hasStudentFile, studentLabel as labelOf } from '@vega/shared';
 import { api } from '@/lib/api';
 import { queryKeys } from '@/lib/queryKeys';
 import { formatScore } from '@/lib/format';
+import { notify } from '@/lib/notify';
 import { useCorrectionDraft } from '@/hooks/useCorrectionDraft';
 import { useCorrectionMutations } from '@/hooks/useCorrectionMutations';
 import { useNextInQueue } from '@/hooks/useNextInQueue';
@@ -21,6 +22,7 @@ import {
   SheetTitle,
 } from '@/components/ui/sheet';
 import { Skeleton } from '@/components/ui/skeleton';
+import { AutoTextarea } from '@/components/ui/textarea';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ErrorState } from '@/components/common/Feedback';
 import { StatusBadge } from '@/components/common/status';
@@ -30,6 +32,7 @@ import { StudentTextView } from '@/components/submission/StudentTextView';
 import { TranscriptionView } from '@/components/submission/TranscriptionView';
 import { CorrectionView } from '@/components/submission/CorrectionView';
 import { ActionBar } from '@/components/submission/ActionBar';
+import { usePdfDocument } from '@/components/submission/PdfPage';
 
 type ViewId = 'original' | 'transcription' | 'submission' | 'correction';
 
@@ -111,10 +114,16 @@ function formatCommunities(raw: string): string {
 export function SubmissionPage() {
   const { id = '' } = useParams();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
 
   const [view, setView] = useState<ViewId>('correction');
+  const [originalPage, setOriginalPage] = useState(0);
+  const [originalUrl, setOriginalUrl] = useState<string | undefined>();
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [validatedOpen, setValidatedOpen] = useState(false);
+  const [parkOpen, setParkOpen] = useState(false);
+  const [parkReason, setParkReason] = useState('');
+  const [reprocessOpen, setReprocessOpen] = useState(false);
 
   const detailQuery = useQuery({
     queryKey: queryKeys.submission(id),
@@ -123,9 +132,53 @@ export function SubmissionPage() {
   });
 
   const detail = detailQuery.data ?? null;
+  const protectedOriginal = detail?.scanUrls[0]?.includes('/original') ?? false;
+  const originalQuery = useQuery({
+    queryKey: ['submission', id, 'original'],
+    queryFn: ({ signal }) => api.original(id, signal),
+    enabled: id !== '' && protectedOriginal,
+  });
+  useEffect(() => {
+    if (!originalQuery.data) {
+      setOriginalUrl(undefined);
+      return;
+    }
+    const url = URL.createObjectURL(originalQuery.data);
+    setOriginalUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [originalQuery.data]);
+  const originalPdf = usePdfDocument(originalUrl);
   const draft = useCorrectionDraft(detail?.correction ?? null);
   const { save, validate, publish } = useCorrectionMutations(id);
   const next = useNextInQueue(id);
+  const park = useMutation({
+    mutationFn: (reason: string) => api.park(id, { reason }),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.queueRoot }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.submission(id) }),
+      ]);
+      notify.success('Entrega omitida', 'Queda aparcada y fuera de la revisión activa.');
+      navigate('/');
+    },
+    onError: (error) => notify.error('No se ha podido omitir la entrega', error),
+  });
+  const reprocess = useMutation({
+    mutationFn: (scope: 'full' | 'grade_only') => api.reprocess(id, { scope }),
+    onSuccess: async (_, scope) => {
+      setReprocessOpen(false);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.queueRoot }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.submission(id) }),
+      ]);
+      notify.success(
+        'Reproceso en cola',
+        scope === 'grade_only' ? 'Se conservarán las dos lecturas existentes.' : 'Se repetirán lectura y corrección.',
+      );
+      navigate('/');
+    },
+    onError: (error) => notify.error('No se ha podido iniciar el reproceso', error),
+  });
 
   const views = detail && !hasStudentFile(detail.activity.kind) ? TEXT_VIEWS : FILE_VIEWS;
   const index = views.findIndex((item) => item.value === view);
@@ -157,14 +210,19 @@ export function SubmissionPage() {
 
   const studentLabel = detail ? labelOf(detail.submission, detail.student) : '';
   const readOnly = detail?.submission.status === 'published';
-  const working = save.isPending || validate.isPending || publish.isPending;
+  const working = save.isPending || validate.isPending || publish.isPending || park.isPending || reprocess.isPending;
 
   const panels = useMemo(() => {
     if (!detail) return [];
+    const protectedOriginalFeedback = protectedOriginal && !originalPdf.document
+      ? originalQuery.isError || originalPdf.error
+        ? <div className="mx-auto max-w-lg p-4"><ErrorState title="No se ha podido abrir el original" error={originalQuery.error ?? originalPdf.error} onRetry={() => void originalQuery.refetch()} /></div>
+        : <div className="mx-auto w-full max-w-3xl p-4"><Skeleton className="h-96 w-full rounded-md" /></div>
+      : null;
     const content: Record<ViewId, ReactNode> = {
-      original: <OriginalView scanUrls={detail.scanUrls} studentLabel={studentLabel} />,
+      original: protectedOriginalFeedback ?? <OriginalView scanUrls={detail.scanUrls} studentLabel={studentLabel} originalDocument={originalPdf.document ?? undefined} page={originalPage} onPageChange={setOriginalPage} totalPages={detail.submission.pageCount} />,
       transcription: (
-        <TranscriptionView transcription={detail.transcription} studentLabel={studentLabel} />
+        protectedOriginalFeedback ?? <TranscriptionView transcription={detail.transcription} studentLabel={studentLabel} originalDocument={originalPdf.document ?? undefined} />
       ),
       submission: (
         <StudentTextView
@@ -180,11 +238,16 @@ export function SubmissionPage() {
           graded={detail.activity.graded}
           draft={draft}
           readOnly={readOnly ?? false}
+          onQuoteOpen={(page) => {
+            setOriginalPage(Math.max(0, page - 1));
+            setView('original');
+            requestAnimationFrame(() => document.getElementById(tabId('original'))?.focus());
+          }}
         />
       ),
     };
     return views.map((item) => ({ id: item.value, content: content[item.value] }));
-  }, [detail, draft, studentLabel, readOnly, views]);
+  }, [detail, draft, studentLabel, readOnly, views, originalPage, originalPdf.document, originalPdf.error, originalQuery.error, originalQuery.isError, protectedOriginal]);
 
   if (detailQuery.isError) {
     return (
@@ -299,6 +362,21 @@ export function SubmissionPage() {
           </TabsList>
         </Tabs>
 
+        {!readOnly ? (
+          <div className="flex flex-wrap items-center justify-center gap-2 border-t border-border px-3 py-2">
+            {detail.submission.status !== 'parked' ? (
+              <Button size="sm" variant="ghost" onClick={() => setParkOpen(true)}>
+                <SkipForward aria-hidden="true" />
+                Omitir
+              </Button>
+            ) : null}
+            <Button size="sm" variant="ghost" onClick={() => setReprocessOpen(true)}>
+              <RefreshCw aria-hidden="true" />
+              Forzar reproceso
+            </Button>
+          </div>
+        ) : null}
+
         {readOnly ? (
           <p className="flex items-center justify-center gap-2 border-t border-border bg-muted px-4 py-2 text-ui text-muted-foreground">
             <Lock className="size-4 shrink-0" aria-hidden="true" />
@@ -338,6 +416,56 @@ export function SubmissionPage() {
         onValidate={() => setConfirmOpen(true)}
         onPublish={() => void runPublish()}
       />
+
+      <Sheet open={parkOpen} onOpenChange={(open) => !open && setParkOpen(false)}>
+        <SheetContent>
+          <SheetHeader>
+            <SheetTitle>¿Omitir esta entrega?</SheetTitle>
+            <SheetDescription>
+              Saldrá de la revisión activa, pero quedará aparcada con el motivo y podrás localizarla después.
+            </SheetDescription>
+          </SheetHeader>
+          <SheetBody>
+            <label className="eyebrow mb-1.5 block" htmlFor="park-reason">Motivo</label>
+            <AutoTextarea
+              id="park-reason"
+              value={parkReason}
+              minRows={3}
+              autoFocus
+              placeholder="Por ejemplo, el archivo no corresponde a esta actividad."
+              onChange={(event) => setParkReason(event.target.value)}
+            />
+          </SheetBody>
+          <SheetFooter>
+            <Button variant="ghost" size="lg" disabled={park.isPending} onClick={() => setParkOpen(false)}>Cancelar</Button>
+            <Button size="lg" disabled={parkReason.trim() === ''} loading={park.isPending} onClick={() => park.mutate(parkReason.trim())}>Omitir entrega</Button>
+          </SheetFooter>
+        </SheetContent>
+      </Sheet>
+
+      <Sheet open={reprocessOpen} onOpenChange={(open) => !open && setReprocessOpen(false)}>
+        <SheetContent>
+          <SheetHeader>
+            <SheetTitle>Forzar reproceso</SheetTitle>
+            <SheetDescription>
+              El borrador actual se sustituirá cuando termine el nuevo proceso. Elige cuánto repetir.
+            </SheetDescription>
+          </SheetHeader>
+          <SheetBody className="flex flex-col gap-2">
+            {detail.transcription ? (
+              <Button variant="outline" size="lg" disabled={reprocess.isPending} onClick={() => reprocess.mutate('grade_only')}>
+                Sólo corrección
+              </Button>
+            ) : null}
+            <Button variant="outline" size="lg" disabled={reprocess.isPending} onClick={() => reprocess.mutate('full')}>
+              Lectura y corrección
+            </Button>
+          </SheetBody>
+          <SheetFooter>
+            <Button variant="ghost" size="lg" disabled={reprocess.isPending} onClick={() => setReprocessOpen(false)}>Cancelar</Button>
+          </SheetFooter>
+        </SheetContent>
+      </Sheet>
 
       <Sheet open={confirmOpen} onOpenChange={(open) => !open && setConfirmOpen(false)}>
         <SheetContent>
