@@ -250,11 +250,18 @@ Todo lo necesario para la pantalla de revisión, en una sola llamada.
 |---|---|---|
 | `submission` | `Submission` | |
 | `activity` | `Activity` | Completa: incluye `referenceSolution`, `pointsAllocation` y `files` |
+| `student` | `Student \| null` | Ficha del alumno. `null` en entregas sembradas o si el LMS no deja leer perfiles |
 | `transcription` | `Transcription \| null` | `null` en foros y antes de transcribir |
 | `correction` | `Correction \| null` | `null` antes de `graded`. `items` ordenados por `position` |
 | `scanUrls` | `string[]` | Páginas escaneadas originales. Vacío en foros |
 
 **Errores**: 401, 403 (fuera de su alcance), 404.
+
+> **`student` es lo que Vega guarda, no lo que el modelo ve.** La ficha sale entera hacia el
+> profesor —es quien tiene que saber de quién es lo que firma—, pero al prompt sólo viaja el recorte
+> de `studentContextFor()`: nombre, comunidad autónoma, provincia y población. Correo, teléfono,
+> NIF, DNI validado, dirección y código postal **no salen nunca**, aunque estén en esta respuesta.
+> Ver [ADR 0013](decisiones/0013-ficha-del-alumno-y-contexto-al-modelo.md).
 
 ### `GET /api/submissions/{id}/feedback.pdf`
 
@@ -306,12 +313,24 @@ contrato.
 
 **Respuesta 200** — `CorrectionResponse` con `publishedAt` relleno y `status = 'published'`.
 
-**Errores**: 401, 403, 404; **409 `CONFLICT`** si la entrega no está en `validated`. Publicar sin
-validar es imposible por diseño ([ADR 0004](decisiones/0004-validacion-humana-obligatoria.md)); la
-excepción son los modos de autonomía, que publican desde el lote y no por esta ruta.
+Llama de verdad al conector: `publishGrade` con la nota y el feedback **efectivos**
+(`teacherPoints ?? aiPoints`) y, en una entrega con fichero, `publishFeedbackFile` con el PDF de
+corrección. Se publica con la credencial de **quien importó la actividad**, no con la de quien pulsa
+el botón: es la misma con la que se ingirió, y en un curso co-impartido puede que sólo una tenga
+permiso de calificación en Moodle.
 
-> **Sigue sin cablear.** Marca `published_at` y el estado en base de datos, con un `TODO(vega)` donde
-> irán `publishGrade` y `publishFeedbackFile`. **Nada llega a Moodle todavía.** Es H5.
+**Errores**: 401, 403, 404; **409 `CONFLICT`** si la entrega no está en `validated` ni en `error`, o
+si no tiene `remote_id` —una entrega sembrada no viene del LMS y no hay dónde publicarla—. Publicar
+sin validar es imposible por diseño ([ADR 0004](decisiones/0004-validacion-humana-obligatoria.md));
+la excepción son los modos de autonomía, que publican desde el lote y no por esta ruta. `422`/`502`
+si el conector devuelve `LMS_AUTH` o `LMS_UNAVAILABLE` al publicar la nota; la entrega queda en
+`error` y se reintenta **sin volver a validar**.
+
+> **Publicar son dos operaciones y puede quedarse a medias** ([ADR 0012](decisiones/0012-ingesta-almacen-y-publicacion-en-dos-fases.md)).
+> Si falla la nota, no ha llegado nada al alumno y la entrega va a `error`. Si falla **sólo** el
+> fichero —el caso de Moodle 3, que no expone `assignfeedback_file`—, la entrega llega igualmente a
+> `published` y el motivo viaja en `correction.publishNotice`, que la pantalla de revisión enseña.
+> Un reintento reenvía sólo lo que falta: la nota no se republica.
 
 ### `POST /api/submissions/{id}/reprocess`
 
@@ -643,18 +662,28 @@ sólo entran filas con gasto en la ventana.
 
 ### `POST /api/batch/run`
 
-`routes.triggerBatch` · **Autenticado** · sin cuerpo
+`routes.triggerBatch` · **Administrador** · sin cuerpo
 
-Lanza el lote a mano, sin esperar a la hora programada. Queda registrado quién lo forzó
+Lanza el proceso a mano, sin esperar a la hora programada. Queda registrado quién lo forzó
 (`batch_runs.triggered_by`); el planificador deja `null`.
 
-**Respuesta 200** — `TriggerBatchResponse`: `{ run, queued }`.
+El proceso hace **dos cosas, en este orden**: ingerir del LMS las entregas nuevas de todas las
+actividades activas con `moodle_ref`, y corregir lo que quede en `pending` (tope de 25 por
+ejecución, `MAX_PER_RUN`). Que la ingesta falle no cancela la corrección: lo que ya estaba pendiente
+se corrige aunque Moodle no responda.
 
-> **No es asíncrono, aunque el nombre lo sugiera.** La ruta **espera a que el lote termine** y
-> devuelve el `BatchRun` ya cerrado; no hay 202 ni encolado. Con `AI_PROVIDER=mock` y el tope de 25
-> entregas por ejecución (`MAX_PER_RUN`) es tolerable; con llamadas reales, una petición HTTP puede
-> quedarse colgada varios minutos. **Tampoco está restringida a administrador**, pese a lo que decía
-> esta página antes.
+**Respuesta 200** — `TriggerBatchResponse`: `{ run, queued }`. El `BatchRun` trae
+`submissionsIngested` y `activitiesFailed` además de los recuentos de corrección.
+
+**Errores**: 401; **403** si no eres administrador; **409 `CONFLICT`** si ya hay un lote en
+`running`. Sin ese cerrojo, dos disparos seguidos corrigen las mismas entregas dos veces y **pagan
+dos veces**.
+
+> **Sigue sin ser asíncrono, aunque el nombre lo sugiera.** La ruta **espera a que el proceso
+> termine** y devuelve el `BatchRun` ya cerrado; no hay 202. Con `AI_PROVIDER=mock` es tolerable;
+> con llamadas reales una petición puede quedarse colgada varios minutos y morir en el proxy
+> inverso. Es el hueco de orquestación que queda antes del motor (HU-09 RN-8); hay un diseño
+> propuesto en [`revision/h2-preparacion-motor-ia.md`](revision/h2-preparacion-motor-ia.md) §4.5.
 
 ---
 
@@ -701,7 +730,7 @@ Lanza el lote a mano, sin esperar a la hora programada. Queda registrado quién 
 | `overview` | GET | `/api/stats/overview` | Profesor · por curso | — | `OverviewResponse` |
 | `costBreakdown` | GET | `/api/stats/cost` | Profesor · por curso | *query* | `CostBreakdownResponse` |
 | `batchRuns` | GET | `/api/batch/runs` | Profesor | — | `BatchRunListResponse` |
-| `triggerBatch` | POST | `/api/batch/run` | Autenticado | — | `TriggerBatchResponse` |
+| `triggerBatch` | POST | `/api/batch/run` | **Administrador** | — | `TriggerBatchResponse` |
 
 Fuera del objeto `routes`, hay una ruta más que el contrato no declara: `GET /api/scans/{id}/{page}.svg`,
 que genera al vuelo las páginas escaneadas de demostración.

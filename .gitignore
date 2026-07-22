@@ -157,3 +157,7 @@ vite.config.ts.timestamp-*
 # checkout entero dentro de sí mismo. El worktree tiene su propio .git y su
 # propia rama; nada de lo que hay dentro pertenece a este árbol.
 .claude/worktrees/
+
+# Almacén local de ficheros de alumnos (STORAGE_ROOT). Nunca al repositorio.
+var/
+apps/api/var/

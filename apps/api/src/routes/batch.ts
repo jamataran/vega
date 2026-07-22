@@ -3,6 +3,7 @@ import type { FastifyInstance } from 'fastify';
 import {
   hasStudentFile,
   routes,
+  studentContextFor,
   type AutonomyMode,
   type BatchRun,
   type BatchRunListResponse,
@@ -10,11 +11,14 @@ import {
   type UsageMetrics,
 } from '@vega/shared';
 import { gradeSubmission } from '@vega/core';
-import type { AiProvider, PageSource, ResolveContextInput } from '@vega/core';
+import type { AiProvider, PageSource, ResolveContextInput, StudentContext } from '@vega/core';
 import { currentUser } from '../auth/plugin.js';
 import { aiProviderForInstall } from '../ai/factory.js';
 import { schema } from '../db/client.js';
 import { toBatchRun } from '../db/mappers.js';
+import { conflict } from '../http/errors.js';
+import { ingestAll, type IngestReport } from '../ingest/run.js';
+import { FileStore } from '../storage/files.js';
 import { readContextLevel } from './contexts.js';
 import type { AppContext } from '../context.js';
 
@@ -60,9 +64,12 @@ export async function batchRoutes(app: FastifyInstance, ctx: AppContext): Promis
     },
   );
 
+  // Lanzar el proceso a mano es de administrador (HU-09, RN-7): consume dinero
+  // real en cuanto el proveedor de IA deje de ser el simulado, y hasta ahora
+  // podía dispararlo cualquier usuario autenticado.
   app.post(
     routes.triggerBatch,
-    { preHandler: app.authenticate },
+    { preHandler: app.requireRole('admin') },
     async (request): Promise<TriggerBatchResponse> => {
       // Queda registrado quién lo fuerza; el planificador deja `null`.
       const session = currentUser(request);
@@ -78,16 +85,18 @@ export interface RunBatchResult {
   readonly processed: number;
   readonly failed: number;
   readonly autoPublished: number;
+  readonly ingested: number;
   readonly queued: number;
   readonly run: BatchRun;
 }
 
 interface Logger {
   info: (obj: unknown, msg?: string) => void;
+  warn: (obj: unknown, msg?: string) => void;
   error: (obj: unknown, msg?: string) => void;
 }
 
-const SILENT: Logger = { info: () => {}, error: () => {} };
+const SILENT: Logger = { info: () => {}, warn: () => {}, error: () => {} };
 
 /**
  * Corrige las entregas pendientes de las actividades activas.
@@ -102,17 +111,18 @@ export async function runBatch(
 ): Promise<RunBatchResult> {
   const { db } = ctx;
 
-  // Sólo actividades activas, y agrupadas por actividad para aprovechar la
-  // caché del prompt.
-  const pending = await db
-    .select({ submission: schema.submissions, activity: schema.activities })
-    .from(schema.submissions)
-    .innerJoin(schema.activities, eq(schema.activities.id, schema.submissions.activityId))
-    .where(eq(schema.submissions.status, 'pending'))
-    .orderBy(asc(schema.submissions.activityId), asc(schema.submissions.submittedAt))
-    .limit(MAX_PER_RUN);
-
-  const enabled = pending.filter((row) => row.activity.enabled);
+  // Un solo lote a la vez (HU-09, RN-3). Sin esto, dos disparos seguidos —o el
+  // planificador y una persona a la vez— corrigen las mismas entregas dos veces
+  // y **pagan el doble**. Se comprueba antes de crear la fila para que el
+  // conflicto no deje un `batch_runs` fantasma.
+  const [alreadyRunning] = await db
+    .select({ id: schema.batchRuns.id })
+    .from(schema.batchRuns)
+    .where(eq(schema.batchRuns.status, 'running'))
+    .limit(1);
+  if (alreadyRunning) {
+    throw conflict('Ya hay un proceso de corrección en marcha. Espera a que termine.');
+  }
 
   const [run] = await db
     .insert(schema.batchRuns)
@@ -120,69 +130,130 @@ export async function runBatch(
     .returning();
   if (!run) throw new Error('No se ha podido registrar el lote.');
 
-  let processed = 0;
-  let failed = 0;
-  let autoPublished = 0;
-  const usage: UsageMetrics = {
-    inputTokens: 0,
-    outputTokens: 0,
-    cachedInputTokens: 0,
-    costCents: 0,
+  // A partir de aquí la fila existe y está en `running`. Todo lo que pueda
+  // lanzar va dentro del `try` de abajo, porque un lote que muere sin cerrarla
+  // bloquearía todos los siguientes contra el cerrojo de arriba hasta que la
+  // recuperación del arranque lo desatascara media hora después.
+  let ingest: IngestReport = {
+    ingested: 0,
+    activitiesFailed: 0,
+    activitiesVisited: 0,
+    problems: [],
   };
 
-  // Memoria del contexto ya resuelto por actividad: dentro de un lote no cambia.
-  const contextCache = new Map<string, ResolveContextInput>();
-
-  // Un único proveedor para todo el lote: es lo que permite que la caché del
-  // prompt de Anthropic sirva de una entrega a la siguiente. Se construye desde
-  // `app_settings` (con el `.env` de respaldo), así que respeta el proveedor, los
-  // modelos y la clave que el administrador configura en la web.
-  const provider = await aiProviderForInstall(ctx);
-
-  for (const { submission, activity } of enabled) {
+  try {
+    // ── Ingesta ─────────────────────────────────────────────────────────────
+    //
+    // Primero se trae lo nuevo del LMS y sólo después se corrige, de modo que
+    // una entrega que llegó hace un minuto se corrija esta misma noche y no la
+    // siguiente. Que la ingesta falle no cancela la corrección: lo que ya
+    // estaba en `pending` se corrige igual aunque Moodle no responda.
     try {
-      const outcome = await processOne(ctx, submission, activity, usage, contextCache, provider);
-      processed += 1;
-      if (outcome.autoPublished) autoPublished += 1;
+      ingest = await ingestAll(ctx, log);
+      for (const problem of ingest.problems) {
+        log.warn({ slug: problem.slug, kind: problem.kind }, problem.message);
+      }
     } catch (error) {
-      failed += 1;
-      await db
-        .update(schema.submissions)
-        .set({
-          status: 'error',
-          errorMessage: (error as Error).message.slice(0, 500),
-          updatedAt: new Date(),
-        })
-        .where(eq(schema.submissions.id, submission.id));
-      log.error({ err: error, submissionId: submission.id }, 'Fallo al corregir una entrega');
+      log.error({ err: error }, 'La ingesta ha fallado entera; se corrige lo que ya había');
     }
+
+    // Sólo actividades activas, y agrupadas por actividad para aprovechar la
+    // caché del prompt.
+    const pending = await db
+      .select({ submission: schema.submissions, activity: schema.activities })
+      .from(schema.submissions)
+      .innerJoin(schema.activities, eq(schema.activities.id, schema.submissions.activityId))
+      .where(eq(schema.submissions.status, 'pending'))
+      .orderBy(asc(schema.submissions.activityId), asc(schema.submissions.submittedAt))
+      .limit(MAX_PER_RUN);
+
+    const enabled = pending.filter((row) => row.activity.enabled);
+
+    let processed = 0;
+    let failed = 0;
+    let autoPublished = 0;
+    const usage: UsageMetrics = {
+      inputTokens: 0,
+      outputTokens: 0,
+      cachedInputTokens: 0,
+      costCents: 0,
+    };
+
+    // Memoria del contexto ya resuelto por actividad: dentro de un lote no cambia.
+    const contextCache = new Map<string, ResolveContextInput>();
+
+    // Un único proveedor para todo el lote: es lo que permite que la caché del
+    // prompt de Anthropic sirva de una entrega a la siguiente. Se construye desde
+    // `app_settings` (con el `.env` de respaldo), así que respeta el proveedor, los
+    // modelos y la clave que el administrador configura en la web.
+    const provider = await aiProviderForInstall(ctx);
+
+    for (const { submission, activity } of enabled) {
+      try {
+        const outcome = await processOne(ctx, submission, activity, usage, contextCache, provider);
+        processed += 1;
+        if (outcome.autoPublished) autoPublished += 1;
+      } catch (error) {
+        failed += 1;
+        await db
+          .update(schema.submissions)
+          .set({
+            status: 'error',
+            errorMessage: (error as Error).message.slice(0, 500),
+            updatedAt: new Date(),
+          })
+          .where(eq(schema.submissions.id, submission.id));
+        log.error({ err: error, submissionId: submission.id }, 'Fallo al corregir una entrega');
+      }
+    }
+
+    const [finished] = await db
+      .update(schema.batchRuns)
+      .set({
+        status: failed > 0 && processed === 0 ? 'failed' : 'done',
+        finishedAt: new Date(),
+        submissionsProcessed: processed,
+        submissionsFailed: failed,
+        submissionsAutoPublished: autoPublished,
+        submissionsIngested: ingest.ingested,
+        activitiesFailed: ingest.activitiesFailed,
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens,
+        cachedInputTokens: usage.cachedInputTokens,
+        costCents: usage.costCents.toFixed(4),
+      })
+      .where(eq(schema.batchRuns.id, run.id))
+      .returning();
+
+    log.info(
+      { processed, failed, autoPublished, ingested: ingest.ingested },
+      'Lote de corrección terminado',
+    );
+
+    return {
+      processed,
+      failed,
+      autoPublished,
+      ingested: ingest.ingested,
+      queued: enabled.length,
+      run: toBatchRun(finished ?? run),
+    };
+  } catch (error) {
+    // El lote se ha caído entero. Cerrar la fila es lo que permite que el
+    // siguiente pueda arrancar; el error se propaga para que quien lo lanzó lo
+    // vea, en vez de recibir un «terminado» que no ocurrió.
+    await db
+      .update(schema.batchRuns)
+      .set({
+        status: 'failed',
+        finishedAt: new Date(),
+        submissionsIngested: ingest.ingested,
+        activitiesFailed: ingest.activitiesFailed,
+      })
+      .where(eq(schema.batchRuns.id, run.id))
+      .catch(() => {});
+    throw error;
   }
-
-  const [finished] = await db
-    .update(schema.batchRuns)
-    .set({
-      status: failed > 0 && processed === 0 ? 'failed' : 'done',
-      finishedAt: new Date(),
-      submissionsProcessed: processed,
-      submissionsFailed: failed,
-      submissionsAutoPublished: autoPublished,
-      inputTokens: usage.inputTokens,
-      outputTokens: usage.outputTokens,
-      cachedInputTokens: usage.cachedInputTokens,
-      costCents: usage.costCents.toFixed(4),
-    })
-    .where(eq(schema.batchRuns.id, run.id))
-    .returning();
-
-  log.info({ processed, failed, autoPublished }, 'Lote de corrección terminado');
-
-  return {
-    processed,
-    failed,
-    autoPublished,
-    queued: enabled.length,
-    run: toBatchRun(finished ?? run),
-  };
 }
 
 // ── Una entrega ─────────────────────────────────────────────────────────────
@@ -253,20 +324,19 @@ async function processOne(
     throw new Error('La intervención del alumno está vacía: no hay nada que corregir.');
   }
 
-  // El proveedor mock no lee los ficheros, pero sí necesita saber cuántas
-  // páginas tiene la entrega para transcribirlas.
-  const pages: PageSource[] = withFile
-    ? Array.from({ length: Math.max(1, submission.pageCount) }, (_unused, index) => ({
-        page: index + 1,
-        mediaType: 'application/pdf' as const,
-        path: `${submission.originalFilename ?? submission.id}#${index + 1}`,
-      }))
-    : [];
+  const pages: PageSource[] = withFile ? pagesOf(ctx, submission) : [];
+
+  // Lo que el modelo va a saber del alumno, ya recortado: nombre y comunidad
+  // autónoma, nunca su correo, su teléfono ni su NIF. El recorte lo hace
+  // `studentContextFor()` en `@vega/shared`, en un solo sitio y con pruebas que
+  // fallan si un dato de identidad se cuela.
+  const student = await studentContextOf(ctx, submission.studentId);
 
   const graded = await gradeSubmission({
     provider,
     submissionId: submission.id,
     studentRef: submission.studentRef,
+    student,
     activityKind: activity.kind,
     pages,
     textContent: submission.textContent,
@@ -371,6 +441,90 @@ async function processOne(
     Math.round((usageAccumulator.costCents + result.usage.costCents) * 10_000) / 10_000;
 
   return { autoPublished: decision === 'publish' };
+}
+
+/**
+ * El recorte del perfil del alumno que puede entrar en el prompt.
+ *
+ * Se lee por entrega y no se memoriza por actividad como el contexto: cada
+ * entrega es de un alumno distinto, así que no hay nada que compartir entre
+ * ellas. Y por eso mismo **no viaja dentro del contexto**, que es el prefijo
+ * cacheado de la actividad: meter ahí un dato que cambia en cada entrega
+ * invalidaría la caché en todas.
+ */
+async function studentContextOf(
+  ctx: AppContext,
+  studentId: string | null,
+): Promise<StudentContext | null> {
+  if (studentId === null) return null;
+
+  const [row] = await ctx.db
+    .select()
+    .from(schema.students)
+    .where(eq(schema.students.id, studentId))
+    .limit(1);
+  if (!row) return null;
+
+  const context = studentContextFor(row);
+  if (context === null) return null;
+
+  // `@vega/shared` devuelve arrays de sólo lectura —lo que impide que nadie le
+  // añada un campo por el camino— y el esquema Zod del motor los quiere
+  // mutables. Se copian aquí, en la frontera, y no se relaja el tipo de origen.
+  return { name: context.name, community: context.community, fields: [...context.fields] };
+}
+
+/**
+ * De dónde saca el motor lo que el alumno entregó.
+ *
+ * Hasta la ingesta, aquí se fabricaban rutas falsas (`examen.pdf#1`) que sólo el
+ * proveedor simulado toleraba: el real habría hecho `readFile` sobre ellas y
+ * habría reventado. Con el fichero descargado y guardado, se pasa la ruta buena.
+ *
+ * **Un PDF viaja como un solo documento, no como N páginas.** La API de visión
+ * recibe el PDF entero y lo pagina ella; partirlo exigiría rasterizar, que es
+ * justo la dependencia nativa que el proyecto evita (ADR 0001). `page_count`
+ * sigue siendo metadato: sirve para la interfaz, para el coste y para detectar
+ * una entrega desproporcionada, no para trocear la petición.
+ *
+ * Consecuencia que hay que tener presente al encender el motor: con un fichero
+ * real el proveedor simulado recibe **una** página y devuelve una transcripción
+ * de una página, aunque el PDF tenga cuatro. No es un fallo de la ingesta; es
+ * que el troceado por página es una decisión del motor y aún no está tomada.
+ */
+function pagesOf(ctx: AppContext, submission: SubmissionRow): PageSource[] {
+  if (submission.storagePath !== null) {
+    const store = new FileStore(ctx.config.STORAGE_ROOT);
+    return [
+      {
+        page: 1,
+        mediaType: pageMediaType(submission.mediaType),
+        path: store.absolutePathOf(submission.storagePath),
+      },
+    ];
+  }
+
+  // Entregas sembradas por `pnpm db:demo`: no hay fichero en ninguna parte y la
+  // ruta es sólo un identificador con el que el mock siembra su generador. Con
+  // un proveedor real esto no llega a ejecutarse, porque una entrega sin fichero
+  // descargado no debería salir de la ingesta.
+  return Array.from({ length: Math.max(1, submission.pageCount) }, (_unused, index) => ({
+    page: index + 1,
+    mediaType: 'application/pdf' as const,
+    path: `${submission.originalFilename ?? submission.id}#${index + 1}`,
+  }));
+}
+
+/** El motor sólo admite los tipos que la API de visión sabe leer. */
+function pageMediaType(mediaType: string | null): 'application/pdf' | 'image/jpeg' | 'image/png' {
+  switch (mediaType) {
+    case 'image/jpeg':
+      return 'image/jpeg';
+    case 'image/png':
+      return 'image/png';
+    default:
+      return 'application/pdf';
+  }
 }
 
 /**

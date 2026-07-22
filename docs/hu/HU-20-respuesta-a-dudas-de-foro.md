@@ -340,14 +340,17 @@ funcionaría en Moodle —`mod_assign_save_grade` con `grade: -1`— pero **no e
 escribiría en el libro de notas de una tarea, no en el foro. RN-4 exige el otro camino, y ese camino
 **no está en el contrato**. Ver pregunta 1, `[bloqueante]`.
 
-**Lo que falta en el conector de Moodle 3.** Peor: **hoy ni siquiera se leen las intervenciones**.
-`connectors/moodle3/src/connector.ts` lanza un error explícito en `listSubmissions` cuando
-`activityRef.kind === 'forum'` —«Todavía no se leen las intervenciones de un foro de Moodle 3 […]
-Usa el conector mock o filesystem para probar el camino de foros»— con un `TODO(vega)` que apunta a
-`mod_forum_get_forum_discussions_paginated` más los posts de cada debate, concatenados por alumno.
-`WS_FUNCTIONS` ya declara `getForumDiscussions`, pero no se llama desde ninguna parte, y
-`mod_forum_add_discussion_post` **no está declarado**. En resumen, sobre Moodle 3 real esta HU no
-tiene hoy ni entrada ni salida. Ver preguntas 1 y 2, ambas `[bloqueante]`.
+**Lo que falta en el conector de Moodle 3: ya no es la entrada, es la salida.**
+`listSubmissions` **ya lee** las intervenciones (`mod_forum_get_forum_discussions_paginated` más los
+mensajes de cada debate) y produce **como mucho una entrega por debate**: la del mensaje raíz, y sólo
+si nadie distinto del autor ha respondido. Sigue **sin verificarse contra un Moodle real**, y con dos
+supuestos gordos: `mod_forum_get_forum_discussion_posts` quedó obsoleta en Moodle 3.8 en favor de
+`mod_forum_get_discussion_posts`, que devuelve otra forma; y la paginación asume que el sitio respeta
+`perpage`.
+
+Lo que sigue faltando es **publicar la respuesta**: `mod_forum_add_discussion_post` **no está
+declarado** en `WS_FUNCTIONS`, y `publishGrade` escribe en el libro de notas de una tarea, que no es
+el camino de un foro. Ver pregunta 1, `[bloqueante]`.
 
 Lo que **sí** funciona: el conector `mock` genera intervenciones realistas
 (`connectors/lms/src/mock.ts`, `FORUM_POSTS`) y el `filesystem` deduce `kind: 'forum'` de los
@@ -393,10 +396,16 @@ verosímiles. Lo que queda fuera de la entrega mockeada es la publicación real.
    repetirlas en cada lote para detectar lo nuevo. Además falta decidir cómo se filtran las
    intervenciones del profesor y las de Vega para no responderse a sí misma. Necesita un spike
    contra un Moodle real, igual que `assignfeedback_file` en HU-17.
-   **`[bloqueante]`: hoy `listSubmissions` de un foro lanza una excepción.**
+   **Parcialmente resuelto**: `listSubmissions` de un foro ya no lanza, y el coste de N+1 peticiones
+   se acota respondiendo sólo a la primera duda sin responder de cada debate. Lo que sigue sin
+   decidirse es cómo se filtran las intervenciones del profesor y las de la propia Vega.
 
-3. **¿Cuál es la identidad de una intervención de foro?** Con `original_filename` a `NULL`, la clave
-   única de `submissions` no impide duplicados y la ingesta **deja de ser idempotente**, que es la
+3. **~~¿Cuál es la identidad de una intervención de foro?~~ Resuelto** por el
+   [ADR 0012](../decisiones/0012-ingesta-almacen-y-publicacion-en-dos-fases.md): la identidad es
+   `(activity_id, remote_id)`, con índice único parcial, y en `moodle3` el `remoteId` de una duda es
+   `<foro>:<debate>:<mensaje>`. Se conserva abajo el razonamiento original porque explica por qué se
+   descartaron las otras dos opciones. Con `original_filename` a `NULL`, la clave
+   única de `submissions` no impedía duplicados y la ingesta **dejaba de ser idempotente**, que es la
    propiedad que HU-08 llama «aburrida» y considera la principal garantía del esquema. Opciones: (a)
    usar el `remoteId` del conector como parte de la clave, lo que exige columna nueva y migración; (b)
    guardar en `original_filename` un identificador sintético del hilo (`discussion-4711`), que abusa

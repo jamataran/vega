@@ -8,6 +8,7 @@ import type {
   LmsConnectionInfo,
   LmsConnectorConfig,
   RemoteGrade,
+  RemoteStudent,
   RemoteSubmission,
   SubmissionRef,
 } from './types.js';
@@ -136,6 +137,128 @@ En mi grupo el error más repetido no es de cálculo, es de notación: enlazan l
 Un sistema de ecuaciones es un ejercicio para quien tiene el método automatizado y un problema para quien aún debe decidir qué hacer. No creo que haya que sustituir unos por otros, sino cuidar el momento. Lo que sí cambiaría es el peso en la evaluación.`,
 ];
 
+/**
+ * Perfiles simulados. Se reparten por índice de alumno y no al azar: la maqueta
+ * tiene que enseñar siempre lo mismo para que una captura de pantalla de ayer
+ * siga valiendo hoy, y para que las pruebas puedan afirmar algo concreto.
+ *
+ * `ccaa` y `provincia` imitan los campos de perfil que el cliente tiene dados de
+ * alta en su Moodle. El de Andrés lleva **dos comunidades separadas por `', '`**
+ * porque así es exactamente como las guarda su sistema: no es un caso raro, es
+ * el formato, y la interfaz tiene que poder enseñarlo sin partirse.
+ *
+ * `nif` es un dato personal que aquí está sólo para poder comprobar que **no**
+ * acaba en el prompt del modelo. Los valores son deliberadamente imposibles.
+ */
+interface MockStudentProfile {
+  readonly firstName: string;
+  readonly lastName: string;
+  readonly username: string;
+  readonly email: string;
+  /** `null` en alguno a propósito: un perfil incompleto es lo normal. */
+  readonly phone: string | null;
+  readonly city: string;
+  readonly ccaa: string;
+  readonly provincia: string;
+  readonly nif: string;
+}
+
+const STUDENT_PROFILES: readonly MockStudentProfile[] = [
+  {
+    firstName: 'Lucía',
+    lastName: 'Serrano Peña',
+    username: 'lserrano',
+    email: 'lucia.serrano@ejemplo.invalid',
+    phone: '+34 600 000 001',
+    city: 'Granada',
+    ccaa: 'Andalucía',
+    provincia: 'Granada',
+    nif: '00000001X',
+  },
+  {
+    firstName: 'Andrés',
+    lastName: 'Iglesias Roldán',
+    username: 'aiglesias',
+    email: 'andres.iglesias@ejemplo.invalid',
+    phone: null,
+    city: 'Toledo',
+    // Dos comunidades en un solo campo: el formato real del cliente.
+    ccaa: 'Comunidad de Madrid, Castilla-La Mancha',
+    provincia: 'Toledo',
+    nif: '00000002X',
+  },
+  {
+    firstName: 'Nuria',
+    lastName: 'Bermejo Cañas',
+    username: 'nbermejo',
+    email: 'nuria.bermejo@ejemplo.invalid',
+    phone: '+34 600 000 003',
+    city: 'Valencia',
+    ccaa: 'Comunitat Valenciana',
+    provincia: 'Valencia',
+    nif: '00000003X',
+  },
+  {
+    firstName: 'Javier',
+    lastName: 'Otxoa Ibarra',
+    username: 'jotxoa',
+    email: 'javier.otxoa@ejemplo.invalid',
+    phone: '+34 600 000 004',
+    city: 'Bilbao',
+    ccaa: 'País Vasco, La Rioja',
+    provincia: 'Bizkaia',
+    nif: '00000004X',
+  },
+  {
+    firstName: 'Marta',
+    lastName: 'Feijóo Lens',
+    username: 'mfeijoo',
+    email: 'marta.feijoo@ejemplo.invalid',
+    phone: '+34 600 000 005',
+    city: 'Santiago de Compostela',
+    ccaa: 'Galicia',
+    provincia: 'A Coruña',
+    nif: '00000005X',
+  },
+];
+
+/** El centro es el mismo para todos: la academia del catálogo simulado. */
+const MOCK_INSTITUTION = 'Academia Hipatia';
+const MOCK_DEPARTMENT = 'Secundaria · Matemáticas';
+
+/**
+ * El perfil que le toca a un alumno. Depende sólo del índice, así que el mismo
+ * `studentRef` devuelve siempre exactamente el mismo perfil, en esta actividad y
+ * en cualquier otra.
+ */
+function mockStudent(studentRef: string, index: number): RemoteStudent {
+  // El módulo hace que el catálogo aguante cualquier `submissionsPerActivity`
+  // sin dejar alumnos sin perfil.
+  const profile = STUDENT_PROFILES[index % STUDENT_PROFILES.length] ?? STUDENT_PROFILES[0]!;
+
+  return {
+    ref: studentRef,
+    username: profile.username,
+    firstName: profile.firstName,
+    lastName: profile.lastName,
+    fullName: `${profile.firstName} ${profile.lastName}`,
+    email: profile.email,
+    phone: profile.phone,
+    idnumber: `ALU-${String(index + 1).padStart(4, '0')}`,
+    institution: MOCK_INSTITUTION,
+    department: MOCK_DEPARTMENT,
+    city: profile.city,
+    country: 'ES',
+    // Tal cual los daría el LMS, sin interpretar: los `shortname` son los que
+    // usa el cliente y el conector no decide cuáles importan.
+    customFields: [
+      { shortname: 'CCAA', name: 'Comunidad autónoma', value: profile.ccaa },
+      { shortname: 'PROVINCIA', name: 'Provincia', value: profile.provincia },
+      { shortname: 'NIF', name: 'NIF', value: profile.nif },
+    ],
+  };
+}
+
 export interface MockLmsConnectorOptions {
   /** Entregas simuladas por actividad (por defecto 4). */
   readonly submissionsPerActivity?: number;
@@ -222,6 +345,7 @@ export class MockLmsConnector implements LmsConnector {
         studentRef,
         remoteId: `${activityRef.slug}:${studentRef}`,
       };
+      const student = mockStudent(studentRef, index);
 
       // Un foro no trae fichero: lo que entrega el alumno es texto.
       if (!withFile) {
@@ -233,6 +357,7 @@ export class MockLmsConnector implements LmsConnector {
           sizeBytes: text.length,
           mediaType: 'text/plain',
           textContent: text,
+          student,
         };
       }
 
@@ -244,6 +369,7 @@ export class MockLmsConnector implements LmsConnector {
         sizeBytes: 480_000 + index * 17_000,
         mediaType: 'application/pdf',
         textContent: null,
+        student,
       };
     });
     return Promise.resolve(submissions);
@@ -258,12 +384,14 @@ export class MockLmsConnector implements LmsConnector {
         ),
       );
     }
-    // PDF mínimo válido: suficiente para que el visor no proteste en la maqueta.
-    const body = `%PDF-1.4\n% Entrega simulada de ${ref.studentRef} en ${ref.activity.slug}\n%%EOF\n`;
+    // Un PDF **de verdad**, no un fichero con cabecera de PDF. La diferencia
+    // importa: la ingesta cuenta las páginas al descargar y marca la entrega en
+    // `error` si no puede abrir el fichero, así que un mock inválido haría
+    // fallar el camino feliz y nadie vería el circuito completo.
     return Promise.resolve({
       filename: `${ref.activity.slug}-${ref.studentRef}.pdf`,
       mediaType: 'application/pdf',
-      bytes: new TextEncoder().encode(body),
+      bytes: simulatedPdf(3, `${ref.activity.slug} · ${ref.studentRef}`),
     });
   }
 
@@ -276,6 +404,57 @@ export class MockLmsConnector implements LmsConnector {
     this.#files.push({ ref, file });
     return Promise.resolve();
   }
+}
+
+/**
+ * PDF sintético válido, escrito a mano.
+ *
+ * Se construye byte a byte en vez de usar una librería porque `connectors/lms`
+ * es la frontera con el exterior y no debe arrastrar dependencias: `pdf-lib`
+ * vive en `apps/api`, que es quien genera documentos de verdad. Aquí basta con
+ * un documento que un lector de PDF acepte y del que se puedan contar páginas.
+ */
+export function simulatedPdf(pageCount: number, label: string): Uint8Array {
+  const pages = Math.max(1, pageCount);
+  const encoder = new TextEncoder();
+
+  const objects: string[] = [];
+  // 1: catálogo · 2: árbol de páginas · 3..: una página y su contenido.
+  const pageIds = Array.from({ length: pages }, (_unused, index) => 3 + index * 2);
+
+  objects.push('<< /Type /Catalog /Pages 2 0 R >>');
+  objects.push(
+    `<< /Type /Pages /Count ${pages} /Kids [${pageIds.map((id) => `${id} 0 R`).join(' ')}] >>`,
+  );
+
+  for (const [index, id] of pageIds.entries()) {
+    const text = `Entrega simulada · ${label} · pagina ${index + 1} de ${pages}`
+      .replace(/\\/g, '')
+      .replace(/[()]/g, '');
+    const stream = `BT /F1 12 Tf 60 760 Td (${text}) Tj ET`;
+    objects.push(
+      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] ` +
+        `/Resources << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >> ` +
+        `/Contents ${id + 1} 0 R >>`,
+    );
+    objects.push(`<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`);
+  }
+
+  let body = '%PDF-1.4\n';
+  const offsets: number[] = [];
+  for (const [index, object] of objects.entries()) {
+    offsets.push(body.length);
+    body += `${index + 1} 0 obj\n${object}\nendobj\n`;
+  }
+
+  const xrefStart = body.length;
+  body += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  for (const offset of offsets) {
+    body += `${String(offset).padStart(10, '0')} 00000 n \n`;
+  }
+  body += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF\n`;
+
+  return encoder.encode(body);
 }
 
 /** Convención del catálogo simulado: los foros llevan `foro`/`forum` en el slug. */

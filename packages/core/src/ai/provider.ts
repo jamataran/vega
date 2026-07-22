@@ -75,6 +75,24 @@ export const TranscriptionSummary = z.object({
 });
 export type TranscriptionSummary = z.infer<typeof TranscriptionSummary>;
 
+/**
+ * Lo que el modelo llega a saber del alumno.
+ *
+ * Deliberadamente pobre: aquí no cabe la ficha entera, y eso es la garantía, no
+ * una limitación. Quien quiera añadir un campo tiene que pasar por
+ * `studentContextFor()` de `@vega/shared`, donde está escrito qué se manda y por
+ * qué, y donde hay pruebas que fallan si se cuela un dato de identidad.
+ */
+export const StudentContext = z.object({
+  /** Nombre del alumno, para que el feedback pueda dirigirse a él. */
+  name: z.string().nullable(),
+  /** Comunidad autónoma. Puede traer varias separadas por coma. */
+  community: z.string().nullable(),
+  /** Otros datos que afectan al criterio: provincia, población… */
+  fields: z.array(z.object({ label: z.string(), value: z.string() })),
+});
+export type StudentContext = z.infer<typeof StudentContext>;
+
 export const GradeInput = z.object({
   submissionId: Id,
   activityKind: ActivityKind,
@@ -95,6 +113,19 @@ export const GradeInput = z.object({
    * misma actividad.
    */
   context: z.string(),
+  /**
+   * Lo que el modelo puede saber del alumno: su nombre, su comunidad autónoma y
+   * poco más. **No es la ficha del alumno**, sino el recorte que produce
+   * `studentContextFor()` de `@vega/shared`, que deja fuera correo, teléfono,
+   * NIF y domicilio.
+   *
+   * Viaja aparte del `context` y no dentro de él por un motivo de coste, no de
+   * orden: el `context` es el prefijo cacheado que comparten todas las entregas
+   * de una actividad, y meter ahí un dato que cambia en cada entrega
+   * **invalidaría la caché en todas ellas**. El proveedor lo coloca junto al
+   * trabajo del alumno, que es lo que ya cambia.
+   */
+  student: StudentContext.nullable().default(null),
   pointsAllocation: z.array(PointsAllocation),
   /**
    * Si la actividad se puntúa. Con `false` no se esperan apartados ni nota: la

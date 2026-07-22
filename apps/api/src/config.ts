@@ -23,6 +23,24 @@ const EnvSchema = z.object({
   ANTHROPIC_API_KEY: z.string().optional(),
   AI_MODEL_TRANSCRIPTION: z.string().default('claude-opus-4-8'),
   AI_MODEL_GRADING: z.string().default('claude-opus-4-8'),
+  /**
+   * Dónde se guardan los ficheros que los alumnos entregan. Es un directorio
+   * del contenedor —un volumen en el compose—, no un almacén de objetos: para
+   * una academia con decenas de entregas por noche, S3 sería una dependencia de
+   * infraestructura sin contrapartida. La frontera está en `storage/files.ts`,
+   * así que cambiarlo el día que haga falta no toca ni la ingesta ni el motor.
+   */
+  STORAGE_ROOT: z.string().default('./var/storage'),
+  /**
+   * Campo personalizado de Moodle que lleva la comunidad autónoma del alumno.
+   * Es configurable porque el nombre lo elige quien monta el Moodle: en la
+   * instalación del cliente es `CCAA`, y puede traer varias separadas por coma.
+   *
+   * Importa más de lo que parece: una oposición de matemáticas no se corrige
+   * igual en dos comunidades —cambian el tribunal y los criterios—, así que es
+   * el único dato del perfil del alumno que pesa en la nota.
+   */
+  STUDENT_COMMUNITY_FIELD: z.string().default('CCAA'),
   LMS_CONNECTOR: z.enum(['mock', 'filesystem', 'moodle3']).default('mock'),
   LMS_FILESYSTEM_ROOT: z.string().optional(),
   MOODLE_BASE_URL: z.string().optional(),

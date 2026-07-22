@@ -217,6 +217,13 @@ export class AnthropicAiProvider implements AiProvider {
       ? `Reparto de puntos (nota máxima ${input.maxScore ?? 0}):\n${allocation}`
       : 'Esta actividad NO se puntúa: no devuelvas apartados ni nota.';
 
+    // Los datos del alumno van con SU trabajo y no con el contexto de la
+    // actividad. No es una cuestión de orden: el bloque de contexto lleva
+    // `cache_control` y lo comparten todas las entregas de la actividad, así que
+    // meter aquí un dato que cambia en cada entrega invalidaría la caché en
+    // todas ellas y el ahorro desaparecería.
+    const about = renderStudent(input.student);
+
     // El orden importa para el caché: instrucciones fijas → contexto de la actividad
     // (con el punto de caché) → transcripción, que cambia en cada entrega.
     const response = await this.#client.messages.create(
@@ -235,7 +242,7 @@ export class AnthropicAiProvider implements AiProvider {
             cache_control: { type: 'ephemeral' },
           },
         ],
-        messages: [{ role: 'user', content: [{ type: 'text', text: work }] }],
+        messages: [{ role: 'user', content: [{ type: 'text', text: `${about}${work}` }] }],
       }),
     );
 
@@ -386,4 +393,29 @@ function describeAnthropicError(error: unknown, model: string): string {
   return error instanceof Error
     ? error.message
     : 'No se ha podido probar la conexión con Anthropic.';
+}
+
+/**
+ * La sección de alumno del mensaje, o cadena vacía si no hay nada que contar.
+ *
+ * Vacía y no un encabezado suelto: un «## Alumno» sin contenido gasta tokens y
+ * le sugiere al modelo que hay información que se le ha ocultado.
+ *
+ * Lo que llega aquí ya viene recortado por `studentContextFor()`; este código no
+ * decide qué se manda, sólo cómo se escribe.
+ */
+function renderStudent(student: GradeInput['student']): string {
+  if (student === null) return '';
+
+  const lines: string[] = [];
+  if (student.name !== null) lines.push(`Alumno: ${student.name}`);
+  if (student.community !== null) {
+    // En plural cuando son varias: un opositor se presenta en más de una
+    // comunidad y el criterio de corrección puede depender de todas.
+    const varias = student.community.includes(',');
+    lines.push(`Comunidad autónoma en la que se presenta${varias ? 'n' : ''}: ${student.community}`);
+  }
+  for (const field of student.fields) lines.push(`${field.label}: ${field.value}`);
+
+  return `${lines.join('\n')}\n\n`;
 }

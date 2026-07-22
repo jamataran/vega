@@ -24,6 +24,7 @@ function gradeInputFor(submissionId: string): GradeInput {
     activityKind: 'assignment',
     transcription: { pages: [], flags: [], confidence: 0.9 },
     textContent: null,
+    student: null,
     context: '## Instrucciones globales\n\nCorrige con rigor.',
     pointsAllocation: [
       { label: '1a', statement: 'Derivada', maxPoints: 2.5 },
@@ -42,6 +43,7 @@ function forumInputFor(submissionId: string, textContent: string | null = null):
     activityKind: 'forum',
     transcription: null,
     textContent,
+    student: null,
     context: '## Instrucciones globales\n\nValora la argumentación.',
     pointsAllocation: [],
     graded: false,

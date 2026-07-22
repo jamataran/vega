@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm';
 import {
   boolean,
   integer,
@@ -10,7 +11,12 @@ import {
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
-import type { PointsAllocation, TranscriptionFlag, TranscriptionPage } from '@vega/shared';
+import type {
+  PointsAllocation,
+  StudentCustomField,
+  TranscriptionFlag,
+  TranscriptionPage,
+} from '@vega/shared';
 
 /**
  * Definiciones Drizzle para consultar. El esquema *real* lo crean las
@@ -107,6 +113,39 @@ export const activityFiles = pgTable('activity_files', {
   uploadedAt: timestamp('uploaded_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
+/**
+ * Ficha del alumno tal y como la ve el LMS.
+ *
+ * Tabla propia porque un alumno entrega muchas veces: repetir su perfil en cada
+ * entrega haría que actualizar un dato exigiera recorrerlas todas y que dos
+ * entregas suyas pudieran discrepar.
+ */
+export const students = pgTable('students', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  /** Identidad del LMS, en el mismo formato que `submissions.student_ref`. */
+  studentRef: text('student_ref').notNull().unique(),
+  username: text('username'),
+  firstName: text('first_name'),
+  lastName: text('last_name'),
+  fullName: text('full_name'),
+  email: text('email'),
+  phone: text('phone'),
+  idnumber: text('idnumber'),
+  institution: text('institution'),
+  department: text('department'),
+  city: text('city'),
+  country: text('country'),
+  /**
+   * Comunidad autónoma, resuelta del campo personalizado `CCAA`. Puede traer
+   * varias separadas por coma: un opositor se presenta en más de una.
+   */
+  community: text('community'),
+  /** Campos personalizados tal cual llegan del LMS; aquí no se interpretan. */
+  customFields: jsonb('custom_fields').$type<StudentCustomField[]>().notNull().default([]),
+  syncedAt: timestamp('synced_at', { withTimezone: true }).notNull().defaultNow(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
 export const submissions = pgTable(
   'submissions',
   {
@@ -115,7 +154,10 @@ export const submissions = pgTable(
       .notNull()
       .references(() => activities.id, { onDelete: 'cascade' }),
     studentRef: text('student_ref').notNull(),
+    /** Nombre legible. Lo rellena la ingesta con el del perfil del alumno. */
     studentAlias: text('student_alias'),
+    /** Ficha completa del alumno. `null` en entregas sembradas o sin perfil. */
+    studentId: uuid('student_id').references(() => students.id, { onDelete: 'set null' }),
     status: text('status')
       .$type<
         | 'pending'
@@ -134,6 +176,16 @@ export const submissions = pgTable(
     pageCount: integer('page_count').notNull().default(0),
     /** Contenido textual cuando no hay fichero: los mensajes del foro. */
     textContent: text('text_content'),
+    /**
+     * Identidad de la entrega en el sistema de origen (`SubmissionRef.remoteId`).
+     * Es lo que hace idempotente la ingesta también en foros, donde la clave
+     * natural no protege porque `original_filename` es `null`.
+     */
+    remoteId: text('remote_id'),
+    /** Ruta del fichero descargado, relativa a `STORAGE_ROOT`. `null` en foros. */
+    storagePath: text('storage_path'),
+    mediaType: text('media_type'),
+    sizeBytes: integer('size_bytes').notNull().default(0),
     errorMessage: text('error_message'),
     submittedAt: timestamp('submitted_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
@@ -144,6 +196,11 @@ export const submissions = pgTable(
       table.studentRef,
       table.originalFilename,
     ),
+    // Índice parcial: sólo las entregas que vienen de un conector tienen
+    // `remote_id`, y dos sembradas sin él no deben colisionar entre sí.
+    uniqueIndex('submissions_remote_key')
+      .on(table.activityId, table.remoteId)
+      .where(sql`remote_id IS NOT NULL`),
   ],
 );
 
@@ -182,7 +239,16 @@ export const corrections = pgTable('corrections', {
   publishedAutomatically: boolean('published_automatically').notNull().default(false),
   validatedBy: uuid('validated_by').references(() => users.id, { onDelete: 'set null' }),
   validatedAt: timestamp('validated_at', { withTimezone: true }),
+  /**
+   * `published_at` significa **publicación completa**. Las dos marcas de abajo
+   * dicen qué se llegó a publicar cuando se queda a medias, que es lo que
+   * permite reintentar sin volver a mandar la nota al alumno.
+   */
   publishedAt: timestamp('published_at', { withTimezone: true }),
+  gradePublishedAt: timestamp('grade_published_at', { withTimezone: true }),
+  feedbackFilePublishedAt: timestamp('feedback_file_published_at', { withTimezone: true }),
+  /** Por qué la publicación no fue completa, en español y para el profesor. */
+  publishNotice: text('publish_notice'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -226,6 +292,10 @@ export const batchRuns = pgTable('batch_runs', {
   submissionsProcessed: integer('submissions_processed').notNull().default(0),
   submissionsFailed: integer('submissions_failed').notNull().default(0),
   submissionsAutoPublished: integer('submissions_auto_published').notNull().default(0),
+  /** Entregas nuevas traídas del LMS en este lote. */
+  submissionsIngested: integer('submissions_ingested').notNull().default(0),
+  /** Actividades cuya ingesta falló entera (LMS caído, token, configuración). */
+  activitiesFailed: integer('activities_failed').notNull().default(0),
   inputTokens: integer('input_tokens').notNull().default(0),
   outputTokens: integer('output_tokens').notNull().default(0),
   cachedInputTokens: integer('cached_input_tokens').notNull().default(0),
