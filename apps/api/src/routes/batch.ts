@@ -159,7 +159,7 @@ export async function runBatch(
   // A partir de aquí la fila existe y está en `running`. Todo lo que pueda
   // lanzar va dentro del `try` de abajo, porque un lote que muere sin cerrarla
   // bloquearía todos los siguientes contra el cerrojo de arriba hasta que la
-  // recuperación del arranque lo desatascara media hora después.
+  // recuperación del siguiente arranque lo desatasque.
   let ingest: IngestReport = {
     ingested: 0,
     activitiesFailed: 0,
@@ -168,6 +168,8 @@ export async function runBatch(
   };
 
   try {
+    log.info({ batchRunId: run.id, kinds }, 'Lote de corrección iniciado');
+
     // ── Ingesta ─────────────────────────────────────────────────────────────
     //
     // Primero se trae lo nuevo del LMS y sólo después se corrige, de modo que
@@ -175,6 +177,7 @@ export async function runBatch(
     // siguiente. Que la ingesta falle no cancela la corrección: lo que ya
     // estaba en `pending` se corrige igual aunque Moodle no responda.
     try {
+      log.info({ batchRunId: run.id, kinds }, 'Ingesta iniciada');
       ingest = await ingestAll(ctx, log, kinds);
       for (const problem of ingest.problems) {
         log.warn({ slug: problem.slug, kind: problem.kind }, problem.message);
@@ -243,6 +246,10 @@ export async function runBatch(
 
     for (const { submission, activity } of enabled) {
       try {
+        log.info(
+          { batchRunId: run.id, submissionId: submission.id, activityId: activity.id, kind: activity.kind },
+          'Corrección de entrega iniciada',
+        );
         const outcome = await processOne(
           ctx,
           submission,
@@ -254,6 +261,10 @@ export async function runBatch(
         );
         processed += 1;
         if (outcome.autoPublished) autoPublished += 1;
+        log.info(
+          { batchRunId: run.id, submissionId: submission.id, activityId: activity.id },
+          'Corrección de entrega terminada',
+        );
       } catch (error) {
         failed += 1;
         await db

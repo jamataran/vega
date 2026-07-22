@@ -15,7 +15,7 @@ import type {
 } from '@vega/core';
 import { UnpricedModelError, gradePromptKey } from '@vega/core';
 import { schema } from '../db/client.js';
-import { lt } from 'drizzle-orm';
+import { eq, lt } from 'drizzle-orm';
 import type { AppContext } from '../context.js';
 
 interface LedgerOptions {
@@ -53,10 +53,9 @@ export function withAiLedger(
     model: (result: T) => string | null;
   }): Promise<T> => {
     const started = Date.now();
-    try {
-      const result = await args.call();
-      const usage = args.usage(result);
-      await ctx.db.insert(schema.aiCalls).values({
+    const [pending] = await ctx.db
+      .insert(schema.aiCalls)
+      .values({
         batchRunId: options.batchRunId ?? null,
         aiBatchId: options.aiBatchId ?? null,
         submissionId: args.submissionId,
@@ -64,14 +63,49 @@ export function withAiLedger(
         transport: options.transport,
         provider: provider.name,
         modelRequested: options.models[args.operation],
-        modelReturned: args.model(result),
         promptKey: args.promptKey,
         promptVersion: args.promptKey ? options.prompts[args.promptKey] ?? null : null,
         contextHash: hashContext(args.segments ?? []),
-        contextVersions: (args.segments ?? []).map(({ level, key, contextId, version, contentHash }) => ({
-          level, key, contextId, version, contentHash,
-        })),
+        contextVersions: (args.segments ?? []).map(
+          ({ level, key, contextId, version, contentHash }) => ({
+            level,
+            key,
+            contextId,
+            version,
+            contentHash,
+          }),
+        ),
         requestParams: sanitize(args.request),
+        simulated: provider.name === 'mock',
+      })
+      .returning({ id: schema.aiCalls.id });
+
+    // Registrar antes de llamar al proveedor hace visible una espera larga y,
+    // además, evita consumir una llamada de pago si el ledger no está disponible.
+    if (!pending) throw new Error('No se ha podido registrar el inicio de la llamada de IA.');
+
+    let result: T;
+    try {
+      result = await args.call();
+    } catch (error) {
+      await ctx.db
+        .update(schema.aiCalls)
+        .set({
+          modelReturned: error instanceof UnpricedModelError ? error.model : null,
+          parsedOk: false,
+          unpriced: error instanceof UnpricedModelError,
+          error: error instanceof Error ? error.message.slice(0, 2_000) : String(error),
+          latencyMs: Date.now() - started,
+        })
+        .where(eq(schema.aiCalls.id, pending.id));
+      throw error;
+    }
+
+    const usage = args.usage(result);
+    await ctx.db
+      .update(schema.aiCalls)
+      .set({
+        modelReturned: args.model(result),
         responseRaw: result,
         parsedOk: true,
         stopReason: 'end_turn',
@@ -81,34 +115,9 @@ export function withAiLedger(
         cacheReadTokens: usage?.cachedInputTokens ?? 0,
         cacheCreationTokens: usage?.cacheCreationTokens ?? 0,
         costCents: usage === null ? null : String(usage.costCents),
-        simulated: provider.name === 'mock',
-      });
-      return result;
-    } catch (error) {
-      await ctx.db.insert(schema.aiCalls).values({
-        batchRunId: options.batchRunId ?? null,
-        aiBatchId: options.aiBatchId ?? null,
-        submissionId: args.submissionId,
-        operation: args.operation,
-        transport: options.transport,
-        provider: provider.name,
-        modelRequested: options.models[args.operation],
-        modelReturned: error instanceof UnpricedModelError ? error.model : null,
-        promptKey: args.promptKey,
-        promptVersion: args.promptKey ? options.prompts[args.promptKey] ?? null : null,
-        contextHash: hashContext(args.segments ?? []),
-        contextVersions: (args.segments ?? []).map(({ level, key, contextId, version, contentHash }) => ({
-          level, key, contextId, version, contentHash,
-        })),
-        requestParams: sanitize(args.request),
-        parsedOk: false,
-        unpriced: error instanceof UnpricedModelError,
-        error: error instanceof Error ? error.message.slice(0, 2_000) : String(error),
-        latencyMs: Date.now() - started,
-        simulated: provider.name === 'mock',
-      });
-      throw error;
-    }
+      })
+      .where(eq(schema.aiCalls.id, pending.id));
+    return result;
   };
 
   return {

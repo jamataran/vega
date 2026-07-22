@@ -431,22 +431,31 @@ export type GetCourseContentsResponse = z.infer<typeof GetCourseContentsResponse
 
 // ── Cliente ─────────────────────────────────────────────────────────────────
 
+export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+
 export interface MoodleClientOptions {
   readonly baseUrl: string;
   readonly token: string;
   /** Inyectable para poder testear sin red cuando llegue el momento. */
   readonly fetchImpl?: typeof fetch;
+  /** Límite por llamada o descarga completa; evita dejar un lote bloqueado. */
+  readonly timeoutMs?: number;
 }
 
 export class MoodleClient {
   readonly #baseUrl: string;
   readonly #token: string;
   readonly #fetch: typeof fetch;
+  readonly #timeoutMs: number;
 
   constructor(options: MoodleClientOptions) {
     this.#baseUrl = options.baseUrl.replace(/\/+$/, '');
     this.#token = options.token;
     this.#fetch = options.fetchImpl ?? fetch;
+    this.#timeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    if (!Number.isFinite(this.#timeoutMs) || this.#timeoutMs <= 0) {
+      throw new RangeError('timeoutMs debe ser un número positivo.');
+    }
   }
 
   /** URL del endpoint REST, útil también para depurar desde el navegador. */
@@ -464,6 +473,18 @@ export class MoodleClient {
   }
 
   async call<T>(wsfunction: string, params: Record<string, unknown>, schema: z.ZodType<T>): Promise<T> {
+    return this.#withTimeout(
+      (signal) => this.#call(wsfunction, params, schema, signal),
+      `Moodle no ha respondido en ${this.#timeoutMs} ms al llamar a ${wsfunction}. Vuelve a intentarlo en unos minutos.`,
+    );
+  }
+
+  async #call<T>(
+    wsfunction: string,
+    params: Record<string, unknown>,
+    schema: z.ZodType<T>,
+    signal: AbortSignal,
+  ): Promise<T> {
     const body = new URLSearchParams({
       wstoken: this.#token,
       wsfunction,
@@ -477,6 +498,7 @@ export class MoodleClient {
         method: 'POST',
         headers: { 'content-type': 'application/x-www-form-urlencoded' },
         body,
+        signal,
       });
     } catch (cause) {
       // DNS, TLS, timeout, host caído: el token puede ser perfectamente bueno.
@@ -521,9 +543,16 @@ export class MoodleClient {
   }
 
   async downloadFile(fileUrl: string): Promise<Uint8Array> {
+    return this.#withTimeout(
+      (signal) => this.#downloadFile(fileUrl, signal),
+      `Moodle no ha respondido en ${this.#timeoutMs} ms al descargar la entrega. Vuelve a intentarlo en unos minutos.`,
+    );
+  }
+
+  async #downloadFile(fileUrl: string, signal: AbortSignal): Promise<Uint8Array> {
     let response: Response;
     try {
-      response = await this.#fetch(this.signFileUrl(fileUrl));
+      response = await this.#fetch(this.signFileUrl(fileUrl), { signal });
     } catch (cause) {
       throw new LmsUnavailableError(
         'No se ha podido contactar con Moodle para descargar la entrega. Vuelve a intentarlo en unos minutos.',
@@ -534,6 +563,24 @@ export class MoodleClient {
       throw httpFailure(response.status, 'la descarga de la entrega');
     }
     return new Uint8Array(await response.arrayBuffer());
+  }
+
+  async #withTimeout<T>(operation: (signal: AbortSignal) => Promise<T>, message: string): Promise<T> {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        const cause = new DOMException(message, 'TimeoutError');
+        reject(new LmsUnavailableError(message, { cause }));
+        controller.abort(cause);
+      }, this.#timeoutMs);
+    });
+
+    try {
+      return await Promise.race([operation(controller.signal), timeout]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
   }
 }
 

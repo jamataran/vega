@@ -20,6 +20,7 @@ const SEIS_PAGINAS: PageSource[] = [
 interface Llamada {
   readonly maxTokens: number;
   readonly texto: string;
+  readonly signal: AbortSignal | undefined;
 }
 
 /**
@@ -40,7 +41,10 @@ function clienteFalso(
   const llamadas: Llamada[] = [];
   let indice = 0;
 
-  const stream = (body: Record<string, unknown>): { finalMessage: () => Promise<unknown> } => ({
+  const stream = (
+    body: Record<string, unknown>,
+    options?: { signal?: AbortSignal },
+  ): { finalMessage: () => Promise<unknown> } => ({
     finalMessage: async (): Promise<unknown> => {
       const contenido = (body['messages'] as Array<{ content: unknown[] }>)[0]?.content ?? [];
       const texto = contenido
@@ -49,7 +53,7 @@ function clienteFalso(
         )
         .map((bloque) => bloque.text)
         .join('\n');
-      llamadas.push({ maxTokens: body['max_tokens'] as number, texto });
+      llamadas.push({ maxTokens: body['max_tokens'] as number, texto, signal: options?.signal });
 
       const respuesta = respuestas[Math.min(indice, respuestas.length - 1)];
       indice += 1;
@@ -94,6 +98,68 @@ test('la transcripción pide las páginas del original, no los bloques enviados'
   assert.doesNotMatch(texto, /Transcribe las 2 páginas/);
   // La numeración esperada viaja explícita: es lo que el ensamblado comprueba.
   assert.match(texto, /1, 2, 3, 4, 5, 6/);
+  assert.ok(llamadas[0]?.signal, 'la lectura debe poder abortar el stream completo');
+  assert.equal(llamadas[0]?.signal?.aborted, false);
+});
+
+test('el triaje usa un timeout corto para no bloquear la cola', async () => {
+  let signal: AbortSignal | undefined;
+  const client = {
+    messages: {
+      stream: (_body: unknown, options?: { signal?: AbortSignal }) => {
+        signal = options?.signal;
+        return {
+          finalMessage: async () => ({
+            model: 'claude-haiku-4-5',
+            stop_reason: 'end_turn',
+            usage: { input_tokens: 4, output_tokens: 2 },
+            parsed_output: {
+              label: 'sencilla',
+              confidence: 0.9,
+              reason: 'Clasificación de prueba',
+            },
+          }),
+        };
+      },
+    },
+  } as unknown as Anthropic;
+
+  await new AnthropicAiProvider({ apiKey: 'sk-de-prueba', client }).triage({
+    submissionId: SUBMISSION,
+    message: '¿Cómo se resuelve?',
+    thread: [],
+  });
+
+  assert.ok(signal);
+  assert.equal(signal.aborted, false);
+});
+
+test('un stream que conecta pero no termina se aborta al vencer el deadline', async () => {
+  let signal: AbortSignal | undefined;
+  const client = {
+    messages: {
+      stream: (_body: unknown, options?: { signal?: AbortSignal }) => {
+        signal = options?.signal;
+        return {
+          // Ignora la señal deliberadamente: el deadline debe ganar la carrera
+          // incluso si el transporte no coopera con el aborto.
+          finalMessage: () => new Promise<never>(() => undefined),
+        };
+      },
+    },
+  } as unknown as Anthropic;
+
+  const provider = new AnthropicAiProvider({
+    apiKey: 'sk-de-prueba',
+    client,
+    shortCallTimeoutMs: 10,
+  });
+
+  await assert.rejects(
+    provider.triage({ submissionId: SUBMISSION, message: '¿Cómo se resuelve?', thread: [] }),
+    /no ha terminado la operación en 1 segundo/,
+  );
+  assert.equal(signal?.aborted, true);
 });
 
 test('una salida cortada a mitad del JSON se reintenta con más tokens', async () => {

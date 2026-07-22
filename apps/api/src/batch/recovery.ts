@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull, lt } from 'drizzle-orm';
+import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { schema } from '../db/client.js';
 import type { AppContext } from '../context.js';
 
@@ -18,17 +18,14 @@ import type { AppContext } from '../context.js';
  * una entrega tarda minutos y la ventana deja de ser teórica.
  *
  * Se ejecuta antes de escuchar peticiones, cuando todavía no hay ningún lote en
- * marcha en este proceso. Si hubiera dos réplicas, la de al lado podría estar
- * corrigiendo de verdad: por eso se limita a lo que lleva parado un rato y no a
- * todo lo que encuentra.
+ * marcha en este proceso. El despliegue soportado es de una sola instancia: una
+ * fila `running` en ese momento pertenece necesariamente al proceso anterior.
  */
-
-/** Margen de gracia: por debajo de esto se asume que alguien está trabajando. */
-const STALE_AFTER_MS = 30 * 60_000;
 
 export interface RecoveryReport {
   readonly runsClosed: number;
   readonly submissionsRequeued: number;
+  readonly callsClosed: number;
 }
 
 export async function recoverInterruptedWork(
@@ -36,14 +33,13 @@ export async function recoverInterruptedWork(
   now: Date = new Date(),
 ): Promise<RecoveryReport> {
   const { db } = ctx;
-  const threshold = new Date(now.getTime() - STALE_AFTER_MS);
 
   const stuckRuns = await db
-    .select({ id: schema.batchRuns.id, startedAt: schema.batchRuns.startedAt })
+    .select({ id: schema.batchRuns.id })
     .from(schema.batchRuns)
     .where(and(eq(schema.batchRuns.status, 'running'), isNull(schema.batchRuns.finishedAt)));
 
-  const toClose = stuckRuns.filter((run) => run.startedAt < threshold).map((run) => run.id);
+  const toClose = stuckRuns.map((run) => run.id);
 
   if (toClose.length > 0) {
     await db
@@ -63,15 +59,30 @@ export async function recoverInterruptedWork(
   const requeued = await db
     .update(schema.submissions)
     .set({ status: 'pending', updatedAt: now })
-    .where(
-      and(
-        inArray(schema.submissions.status, ['transcribing', 'grading']),
-        // Sólo lo que lleva parado más del margen: una entrega que se está
-        // procesando ahora mismo en otra réplica no se toca.
-        lt(schema.submissions.updatedAt, threshold),
-      ),
-    )
+    .where(inArray(schema.submissions.status, ['transcribing', 'grading']))
     .returning({ id: schema.submissions.id });
 
-  return { runsClosed: toClose.length, submissionsRequeued: requeued.length };
+  // El ledger inserta la fila antes de salir a la red. Si el proceso cae, esa
+  // fila no puede completarse sola y la UI la interpretaría como «En curso»
+  // para siempre. Al arrancar no existe todavía ninguna llamada de este proceso.
+  const interruptedCalls = await db
+    .update(schema.aiCalls)
+    .set({
+      error: 'La llamada se interrumpió al reiniciar el servicio.',
+      stopReason: 'interrupted',
+    })
+    .where(
+      and(
+        eq(schema.aiCalls.parsedOk, false),
+        isNull(schema.aiCalls.error),
+        isNull(schema.aiCalls.latencyMs),
+      ),
+    )
+    .returning({ id: schema.aiCalls.id });
+
+  return {
+    runsClosed: toClose.length,
+    submissionsRequeued: requeued.length,
+    callsClosed: interruptedCalls.length,
+  };
 }

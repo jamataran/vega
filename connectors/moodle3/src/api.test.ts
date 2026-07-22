@@ -111,6 +111,50 @@ test('un fallo de red es indisponibilidad y conserva la causa', async () => {
   assert.equal(error.cause, cause);
 });
 
+test('una llamada que no responde vence como indisponibilidad', async () => {
+  let signal: AbortSignal | null | undefined;
+  const client = new MoodleClient({
+    baseUrl: 'https://moodle.ejemplo.es',
+    token: 'token-de-prueba',
+    timeoutMs: 10,
+    fetchImpl: (_url, init) => {
+      signal = init?.signal;
+      return new Promise<Response>(() => undefined);
+    },
+  });
+
+  const error = await failureOf(client);
+
+  assert.ok(error instanceof LmsUnavailableError);
+  assert.equal(error.code, 'LMS_UNAVAILABLE');
+  assert.match(error.message, /10 ms/);
+  assert.equal(signal?.aborted, true);
+});
+
+test('una descarga que no responde vence como indisponibilidad', async () => {
+  let signal: AbortSignal | null | undefined;
+  const client = new MoodleClient({
+    baseUrl: 'https://moodle.ejemplo.es',
+    token: 'token-de-prueba',
+    timeoutMs: 10,
+    fetchImpl: (_url, init) => {
+      signal = init?.signal;
+      return new Promise<Response>(() => undefined);
+    },
+  });
+
+  await assert.rejects(
+    client.downloadFile('https://moodle.ejemplo.es/pluginfile.php/1/entrega.pdf'),
+    (error: unknown) => {
+      assert.ok(error instanceof LmsUnavailableError);
+      assert.equal(error.code, 'LMS_UNAVAILABLE');
+      assert.match(error.message, /10 ms/);
+      return true;
+    },
+  );
+  assert.equal(signal?.aborted, true);
+});
+
 test('una respuesta con forma inesperada no se confunde con un token malo', async () => {
   // Otra versión de Moodle o un plugin que altera la salida: reintentar no
   // arregla nada, pero mandar a revisar el token es una pista falsa peor.

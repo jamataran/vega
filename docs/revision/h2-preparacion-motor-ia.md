@@ -375,7 +375,7 @@ seguro no esperar. La pantalla de procesos ya refresca sola.
 | Punto | Estado |
 |---|---|
 | Un solo lote en `running` a la vez | **Resuelto aquí.** Devuelve `409` |
-| Recuperación de un reinicio a mitad de lote | **Resuelto aquí.** Al arrancar, los lotes parados más de 30 minutos se cierran como `failed` y sus entregas vuelven a `pending` |
+| Recuperación de un reinicio a mitad de lote | **Resuelto aquí.** Al arrancar la única instancia soportada, los lotes `running` del proceso anterior se cierran como `failed` y sus entregas vuelven a `pending` |
 | Un fallo de una entrega no aborta el lote | Ya estaba |
 | Un fallo de una actividad no aborta la ingesta | **Resuelto aquí** |
 | Fallo de configuración vs. fallo transitorio | **Resuelto aquí** en la ingesta (`IngestProblem.kind`). **No se persiste**: se cuenta en `activities_failed` y se registra en el log, pero no hay columna |

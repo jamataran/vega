@@ -35,10 +35,15 @@ try {
     config,
     startedAt: Date.now(),
   });
-  if (recovered.runsClosed > 0 || recovered.submissionsRequeued > 0) {
+  if (
+    recovered.runsClosed > 0 ||
+    recovered.submissionsRequeued > 0 ||
+    recovered.callsClosed > 0
+  ) {
     console.log(
       `↺ Recuperación: ${recovered.runsClosed} proceso(s) cerrado(s) como fallidos y ` +
-        `${recovered.submissionsRequeued} entrega(s) devueltas a la cola.`,
+        `${recovered.submissionsRequeued} entrega(s) devueltas a la cola; ` +
+        `${recovered.callsClosed} llamada(s) de IA marcadas como interrumpidas.`,
     );
   }
 } catch (error) {

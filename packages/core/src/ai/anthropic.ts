@@ -61,10 +61,13 @@ const TRANSCRIPTION_MIN_TOKENS = 32_000;
 /**
  * Timeout explícito para las llamadas largas (transcripción y corrección).
  * Con streaming el SDK no impone el límite de 10 minutos, pero su timeout por
- * defecto sigue siendo corto para una lectura con razonamiento extendido que
- * tarda lo que tarda: se le da margen de sobra y que decida la API.
+ * defecto sigue siendo corto para una lectura con razonamiento extendido. El
+ * límite evita que una conexión rota bloquee el lote entero durante una hora.
  */
-const LONG_CALL_TIMEOUT_MS = 60 * 60 * 1_000;
+const LONG_CALL_TIMEOUT_MS = 15 * 60_000;
+
+/** Triaje y prueba de conexión deben responder deprisa o dejar paso al resto. */
+const SHORT_CALL_TIMEOUT_MS = 2 * 60_000;
 
 /** Haiku 4.5 es de una generación anterior: `thinking: adaptive` y `effort` devuelven 400. */
 function supportsExtendedReasoning(model: string): boolean {
@@ -122,6 +125,9 @@ export interface AnthropicAiProviderOptions {
   readonly systemPrompts?: Readonly<Record<string, string>>;
   /** Inyectable para poder testear sin red. */
   readonly client?: Anthropic;
+  /** Inyectables para comprobar los deadlines sin esperar minutos. */
+  readonly longCallTimeoutMs?: number;
+  readonly shortCallTimeoutMs?: number;
 }
 
 // ── Respuestas esperadas del modelo ─────────────────────────────────────────
@@ -239,6 +245,8 @@ export class AnthropicAiProvider implements AiProvider {
   readonly #verifyModel: string;
   readonly #maxTokens: number;
   readonly #systemPrompts: Readonly<Record<string, string>>;
+  readonly #longCallTimeoutMs: number;
+  readonly #shortCallTimeoutMs: number;
 
   constructor(options: AnthropicAiProviderOptions = {}) {
     this.#client = options.client ?? new Anthropic({ apiKey: options.apiKey });
@@ -247,6 +255,8 @@ export class AnthropicAiProvider implements AiProvider {
     this.#triageModel = options.triageModel ?? DEFAULT_TRIAGE_MODEL;
     this.#verifyModel = options.verifyModel ?? DEFAULT_VERIFY_MODEL;
     this.#systemPrompts = options.systemPrompts ?? {};
+    this.#longCallTimeoutMs = positiveTimeout(options.longCallTimeoutMs, LONG_CALL_TIMEOUT_MS);
+    this.#shortCallTimeoutMs = positiveTimeout(options.shortCallTimeoutMs, SHORT_CALL_TIMEOUT_MS);
     // El tope configurado manda; `MAX_TOKENS` es sólo el valor por defecto de
     // una instalación que aún no lo ha tocado.
     this.#maxTokens = options.maxTokens && options.maxTokens > 0 ? options.maxTokens : MAX_TOKENS;
@@ -295,7 +305,7 @@ export class AnthropicAiProvider implements AiProvider {
     // 300 ppp puede pasarse y habrá que trocearlo.
     const response = await withStopRetry(
       (maxTokens) =>
-        this.#client.messages.stream({
+        withDeadline(this.#longCallTimeoutMs, (signal) => this.#client.messages.stream({
         model,
         max_tokens: maxTokens,
         ...(supportsExtendedReasoning(model) ? { thinking: { type: 'adaptive' as const } } : {}),
@@ -322,7 +332,7 @@ export class AnthropicAiProvider implements AiProvider {
             ],
           },
         ],
-        }, { timeout: LONG_CALL_TIMEOUT_MS }).finalMessage(),
+        }, { signal }).finalMessage()),
       // Un examen entero de manuscrito pasado a LaTeX no cabe en topes
       // pequeños, y el razonamiento adaptativo consume del mismo presupuesto:
       // con 16k, seis páginas cortaban el JSON a mitad de una cadena. Se
@@ -411,7 +421,7 @@ export class AnthropicAiProvider implements AiProvider {
     const effort = clampEffort(model, 'xhigh');
     const response = await withStopRetry(
       (maxTokens) =>
-        this.#client.messages.stream({
+        withDeadline(this.#longCallTimeoutMs, (signal) => this.#client.messages.stream({
         model,
         max_tokens: maxTokens,
         ...(supportsExtendedReasoning(model) ? { thinking: { type: 'adaptive' as const } } : {}),
@@ -421,7 +431,7 @@ export class AnthropicAiProvider implements AiProvider {
         },
         system,
         messages: [{ role: 'user', content: [...originals, { type: 'text', text: `${about}AI_TEACHER_NOTES=${input.explanations === false ? 'false' : 'true'}\n\n${work}` }] }],
-        }, { timeout: LONG_CALL_TIMEOUT_MS }).finalMessage(),
+        }, { signal }).finalMessage()),
       Math.max(this.#maxTokens, 32_000, minTokensFor(effort)),
       maxOutputFor(model),
     );
@@ -458,7 +468,7 @@ export class AnthropicAiProvider implements AiProvider {
     // Sin `thinking` ni `effort` a propósito: el modelo de triaje por defecto
     // es Haiku 4.5, de una generación que responde 400 a ambos parámetros.
     const response = await withStopRetry(
-      (maxTokens) => this.#client.messages.stream({
+      (maxTokens) => withDeadline(this.#shortCallTimeoutMs, (signal) => this.#client.messages.stream({
         model: this.#triageModel,
         max_tokens: maxTokens,
         output_config: { format: zodOutputFormat(TriageAnswer) },
@@ -467,7 +477,7 @@ export class AnthropicAiProvider implements AiProvider {
           role: 'user',
           content: `Hilo previo:\n${input.thread.join('\n---\n') || '(vacío)'}\n\nMensaje nuevo:\n${input.message}`,
         }],
-      }).finalMessage(),
+      }, { signal }).finalMessage()),
       1_000,
       maxOutputFor(this.#triageModel),
     );
@@ -487,7 +497,7 @@ export class AnthropicAiProvider implements AiProvider {
       .join('\n\n') ?? '(sin transcripción; intervención de foro)';
     const model = this.#verifyModel;
     const response = await withStopRetry(
-      (maxTokens) => this.#client.messages.stream({
+      (maxTokens) => withDeadline(this.#longCallTimeoutMs, (signal) => this.#client.messages.stream({
         model,
         max_tokens: maxTokens,
         ...(supportsExtendedReasoning(model) ? { thinking: { type: 'adaptive' as const } } : {}),
@@ -500,7 +510,7 @@ export class AnthropicAiProvider implements AiProvider {
           role: 'user',
           content: `Trabajo:\n${transcript}\n\nApartados propuestos:\n${JSON.stringify(input.items)}\n\nResumen:\n${input.aiSummary}\n\nDocumento de corrección:\n${input.aiLatex}`,
         }],
-      }).finalMessage(),
+      }, { signal }).finalMessage()),
       Math.min(this.#maxTokens, 8_000),
       maxOutputFor(model),
     );
@@ -522,11 +532,16 @@ export class AnthropicAiProvider implements AiProvider {
    */
   async verifyConnection(): Promise<VerifyConnectionResult> {
     try {
-      const response = await this.#client.messages.create({
-        model: this.#gradingModel,
-        max_tokens: 8,
-        messages: [{ role: 'user', content: 'Responde solo con: OK' }],
-      });
+      const response = await withDeadline(this.#shortCallTimeoutMs, (signal) =>
+        this.#client.messages.create(
+          {
+            model: this.#gradingModel,
+            max_tokens: 8,
+            messages: [{ role: 'user', content: 'Responde solo con: OK' }],
+          },
+          { signal },
+        ),
+      );
       return {
         ok: true,
         message: `Conexión correcta con Anthropic. Modelo «${this.#gradingModel}» disponible.`,
@@ -552,6 +567,48 @@ export class AiResponseError extends Error {
   constructor(readonly code: AiResponseErrorCode, message: string) {
     super(message);
     this.name = 'AiResponseError';
+  }
+}
+
+function positiveTimeout(value: number | undefined, fallback: number): number {
+  const timeout = value ?? fallback;
+  if (!Number.isFinite(timeout) || timeout <= 0) {
+    throw new RangeError('El timeout de Anthropic debe ser un número positivo.');
+  }
+  return timeout;
+}
+
+/**
+ * Deadline de la operación completa, no sólo de la conexión HTTP.
+ *
+ * El `timeout` del cliente se limpia al recibir la respuesta; en streaming eso
+ * puede ocurrir mucho antes del último evento. La señal permanece activa hasta
+ * que `finalMessage()` resuelve y corta también un SSE abierto que deja de emitir.
+ */
+async function withDeadline<T>(
+  timeoutMs: number,
+  operation: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const controller = new AbortController();
+  const seconds = Math.max(1, Math.ceil(timeoutMs / 1_000));
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      const error = new Error(
+        `Anthropic no ha terminado la operación en ${seconds} ${seconds === 1 ? 'segundo' : 'segundos'}.`,
+      );
+      reject(error);
+      controller.abort(error);
+    }, timeoutMs);
+    timer.unref?.();
+  });
+
+  try {
+    // La carrera es una segunda defensa: hoy el SDK respeta `signal`, pero el
+    // deadline también debe vencer si una implementación inyectada lo ignora.
+    return await Promise.race([operation(controller.signal), timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 
