@@ -48,6 +48,13 @@ export const DEFAULT_VERIFY_MODEL = 'claude-sonnet-5';
 const MAX_TOKENS = 16_000;
 
 /**
+ * Suelo de salida para la transcripción. El razonamiento adaptativo gasta del
+ * mismo presupuesto que el texto, así que con 16k un examen de seis páginas
+ * agotaba el tope a mitad del JSON y la entrega moría con un error de parseo.
+ */
+const TRANSCRIPTION_MIN_TOKENS = 32_000;
+
+/**
  * Timeout explícito para las llamadas largas (transcripción y corrección).
  * Sin él, el SDK **rechaza** una petición no-streaming cuyo `max_tokens`
  * implique más de ~10 minutos de generación; con un timeout explícito acepta
@@ -76,6 +83,29 @@ function clampEffort(model: string, effort: 'high' | 'xhigh'): 'high' | 'xhigh' 
 /** Suelo de `max_tokens` que impone el nivel de esfuerzo pedido. */
 function minTokensFor(effort: 'high' | 'xhigh'): number {
   return effort === 'xhigh' ? 64_000 : 16_000;
+}
+
+/**
+ * Techo de `max_tokens` del modelo. Pedir más es un 400, así que el reintento
+ * por respuesta truncada tiene que respetarlo: Haiku 4.5 llega a 64k y el
+ * resto de la familia actual, a 128k.
+ */
+function maxOutputFor(model: string): number {
+  return model.includes('haiku') ? 64_000 : 128_000;
+}
+
+/**
+ * Una salida estructurada que no se puede parsear casi siempre es una
+ * **respuesta cortada**: el modelo agotó `max_tokens` a mitad de una cadena y
+ * el JSON quedó sin cerrar.
+ *
+ * Importa distinguirlo porque el SDK lanza al parsear, **antes** de que nadie
+ * pueda mirar `stop_reason`, así que el reintento por tope de tokens no se
+ * activaba nunca: la entrega moría con un «Unterminated string in JSON» que no
+ * le dice nada a un profesor.
+ */
+function isTruncatedOutput(error: unknown): boolean {
+  return error instanceof Error && /parse structured output/i.test(error.message);
 }
 
 export interface AnthropicAiProviderOptions {
@@ -248,6 +278,14 @@ export class AnthropicAiProvider implements AiProvider {
       ]),
     );
 
+    // Los números de página REALES del original, no cuántos bloques se mandan.
+    // El PDF viaja troceado (`ai.pagesPerChunk`), así que `input.pages` son
+    // bloques: pedir «transcribe las 2 páginas» de un examen de seis hacía que
+    // el modelo devolviera dos entradas numeradas 1 y 1, y el ensamblado se
+    // caía con «faltan [2,3,4,5,6], duplicadas [1]». La entrega moría después
+    // de haber pagado las dos lecturas.
+    const pageNumbers = input.pages.flatMap((page) => page.pageNumbers ?? [page.page]);
+
     const model = this.#transcriptionModel;
     // TODO(vega): sin verificar contra la API real — límites de tamaño de
     // petición (32 MB) y de páginas por PDF; un simulacro largo escaneado a
@@ -270,15 +308,24 @@ export class AnthropicAiProvider implements AiProvider {
               ...attachments.flat(),
               {
                 type: 'text',
-                text: `Transcribe las ${input.pages.length} páginas del examen (referencia interna del alumno: ${input.studentRef}).`,
+                text:
+                  `Transcribe el examen completo: ${pageNumbers.length} ` +
+                  `${pageNumbers.length === 1 ? 'página' : 'páginas'} repartidas en ` +
+                  `${input.pages.length} ${input.pages.length === 1 ? 'bloque' : 'bloques'}. ` +
+                  `Devuelve una entrada por página, numeradas ${pageNumbers.join(', ')} ` +
+                  '—los números del original, no la posición dentro de su bloque—. ' +
+                  `Referencia interna del alumno: ${input.studentRef}.`,
               },
             ],
           },
         ],
         }, { timeout: LONG_CALL_TIMEOUT_MS }),
-      // Un bloque de 4 páginas densas no cabe en topes pequeños: se garantiza
-      // un mínimo razonable aunque el ajuste de la instalación sea más bajo.
-      Math.max(this.#maxTokens, MAX_TOKENS),
+      // Un examen entero de manuscrito pasado a LaTeX no cabe en topes
+      // pequeños, y el razonamiento adaptativo consume del mismo presupuesto:
+      // con 16k, seis páginas cortaban el JSON a mitad de una cadena. Se
+      // garantiza un suelo alto aunque el ajuste de la instalación sea menor.
+      Math.max(this.#maxTokens, TRANSCRIPTION_MIN_TOKENS),
+      maxOutputFor(model),
     );
 
     const answer = response.parsed_output;
@@ -373,6 +420,7 @@ export class AnthropicAiProvider implements AiProvider {
         messages: [{ role: 'user', content: [...originals, { type: 'text', text: `${about}AI_TEACHER_NOTES=${input.explanations === false ? 'false' : 'true'}\n\n${work}` }] }],
         }, { timeout: LONG_CALL_TIMEOUT_MS }),
       Math.max(this.#maxTokens, 32_000, minTokensFor(effort)),
+      maxOutputFor(model),
     );
 
     const answer = response.parsed_output;
@@ -418,6 +466,7 @@ export class AnthropicAiProvider implements AiProvider {
         }],
       }),
       1_000,
+      maxOutputFor(this.#triageModel),
     );
     const answer = response.parsed_output;
     if (answer === null) throw new AiResponseError('invalid_output', 'El triaje no contiene una salida estructurada.');
@@ -450,6 +499,7 @@ export class AnthropicAiProvider implements AiProvider {
         }],
       }),
       Math.min(this.#maxTokens, 8_000),
+      maxOutputFor(model),
     );
     const answer = response.parsed_output;
     if (answer === null) throw new AiResponseError('invalid_output', 'La verificación no contiene una salida estructurada.');
@@ -512,10 +562,31 @@ export class AiResponseError extends Error {
 async function withStopRetry<T extends Anthropic.Message>(
   request: (maxTokens: number) => Promise<T>,
   initialMaxTokens: number,
+  ceiling: number,
 ): Promise<T> {
-  let maxTokens = initialMaxTokens;
+  let maxTokens = Math.min(initialMaxTokens, ceiling);
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const response = await request(maxTokens);
+    const ampliado = Math.min(Math.max(maxTokens * 2, 32_000), ceiling);
+    let response: T;
+    try {
+      response = await request(maxTokens);
+    } catch (error) {
+      // El JSON llegó cortado: es el mismo caso que `stop_reason: max_tokens`,
+      // sólo que el SDK revienta al parsear antes de que se pueda comprobar.
+      if (attempt === 0 && isTruncatedOutput(error) && ampliado > maxTokens) {
+        maxTokens = ampliado;
+        continue;
+      }
+      if (isTruncatedOutput(error)) {
+        throw new AiResponseError(
+          'max_tokens',
+          'La respuesta del modelo se ha cortado por el límite de salida, incluso tras ampliarlo. ' +
+            'Suele pasar con entregas muy largas: baja «Páginas por bloque» en Ajustes para partirlas más.',
+        );
+      }
+      throw error;
+    }
+
     if (response.stop_reason === 'refusal') {
       throw new AiResponseError(
         'refusal',
@@ -525,8 +596,8 @@ async function withStopRetry<T extends Anthropic.Message>(
     if (response.stop_reason !== 'max_tokens') {
       return response;
     }
-    if (attempt === 0) {
-      maxTokens = Math.min(Math.max(maxTokens * 2, 32_000), 128_000);
+    if (attempt === 0 && ampliado > maxTokens) {
+      maxTokens = ampliado;
       continue;
     }
     throw new AiResponseError(

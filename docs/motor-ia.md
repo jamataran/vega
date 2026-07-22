@@ -180,7 +180,7 @@ Configurables en Ajustes (combo por rol, sesión §3); los ids nunca se escriben
 
 | Rol (clave en `app_settings`) | Modelo por defecto | Parámetros | Se usa en |
 |---|---|---|---|
-| `anthropic.readingModel` | `claude-opus-4-8` | thinking adaptive, effort `high`, max_tokens 16k/bloque | Lecturas A y B |
+| `anthropic.readingModel` | `claude-opus-4-8` | thinking adaptive, effort `high`, **max_tokens ≥ 32k por lectura** | Lecturas A y B |
 | `anthropic.gradingModel` | `claude-opus-4-8` | thinking adaptive, effort `xhigh`, max_tokens ≥ 64k (**lo exige `xhigh`**; con timeout explícito para que el SDK no rechace la llamada no-streaming) | Corrección y respuesta experta de foro |
 | `anthropic.verifyModel` | `claude-sonnet-5` | thinking adaptive, effort `high`, max_tokens 8k | `verify()` y respuesta sencilla de foro |
 | `anthropic.triageModel` | `claude-haiku-4-5` | sin thinking, max_tokens 1k | Triaje de dudas |
@@ -204,9 +204,20 @@ Hechos de la API que condicionan esto (verificados contra la referencia actual d
 - **Subir el SDK es el primer commit del motor**: `@anthropic-ai/sdk@0.65.0` no tipa `thinking`
   adaptativo ni `output_config` (de ahí los casts de `anthropic.ts:buildParams`) ni la Batches API
   tipada que necesita §6.
-- `stop_reason: 'max_tokens'` se reintenta **una vez** con más presupuesto de salida;
+- `stop_reason: 'max_tokens'` se reintenta **una vez** con más presupuesto de salida, sin pasar
+  del techo del modelo (128k en la familia actual; 64k en Haiku 4.5, donde pedir más es un 400);
   `'refusal'` **no se reintenta jamás** (repetir la misma petición tras un rechazo no cambia el
   resultado y va contra la guía de la API): fallo tipado directo, registrado en el ledger.
+- **Una salida estructurada que no parsea es, casi siempre, una respuesta cortada.** El SDK lanza
+  al parsear el JSON, **antes** de que se pueda mirar `stop_reason`, así que el reintento por tope
+  de tokens no se activaba nunca: la entrega moría con un «Unterminated string in JSON». Se trata
+  igual que `max_tokens` y se amplía el presupuesto. Medido en el piloto: con 16k, un examen de
+  seis páginas agota el tope a mitad del JSON, porque el razonamiento adaptativo gasta del mismo
+  presupuesto que el texto.
+- **La transcripción recibe bloques, no páginas.** `input.pages` son los trozos en que la ingesta
+  parte el PDF (`ai.pagesPerChunk`), y el prompt debe anunciar los **números de página del
+  original**. Anunciar el número de bloques hacía que el modelo devolviera una entrada por bloque
+  numerada desde 1, y el ensamblado tiraba la entrega ya pagada.
 - **Visión en alta resolución automática (Opus 4.8)**: las imágenes/PDF se procesan hasta 2.576 px
   → hasta ~4.800 tokens por página densa, no los ~1.600 clásicos. Afecta directamente al
   presupuesto (§14): los números de visión son cotas inferiores hasta medir en el piloto.
