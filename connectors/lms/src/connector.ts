@@ -6,16 +6,21 @@ import type {
   LmsConnectionInfo,
   LmsConnectorConfig,
   RemoteGrade,
+  RemoteReply,
   RemoteSubmission,
   SubmissionRef,
 } from './types.js';
 
 /**
  * La interfaz mínima que tiene que cumplir cualquier LMS para hablar con Vega.
- * Siete operaciones: comprueba que la credencial vale, qué cursos hay, qué
- * actividades hay en uno, qué hay pendiente en una, tráemelo, publica la nota y
- * publica el PDF de feedback. Cuanto más pequeña sea, más fácil es que alguien
- * mande una PR con su propio LMS.
+ * Ocho operaciones: comprueba que la credencial vale, qué cursos hay, qué
+ * actividades hay en uno, qué hay pendiente en una, tráemelo, publica la nota,
+ * publica el PDF de feedback y responde a una duda de foro. Cuanto más pequeña
+ * sea, más fácil es que alguien mande una PR con su propio LMS.
+ *
+ * Las dos últimas **escriben en el LMS**: son las únicas que un alumno llega a
+ * ver, y las únicas que no se pueden ensayar sin consecuencias. Ver
+ * `verifyConnection()`.
  */
 export interface LmsConnector {
   /** Nombre con el que se registra: `"mock"`, `"filesystem"`, `"moodle3"`. */
@@ -65,11 +70,35 @@ export interface LmsConnector {
   /**
    * Publica la nota validada. Sólo se llama tras la validación explícita del
    * profesor: nada llega al alumno sin que él lo apruebe.
+   *
+   * **Sólo en actividades con entrega.** Un foro no tiene libro de notas, y
+   * un conector que reciba aquí una referencia de foro debe rechazarla en vez
+   * de apañárselas: publicar una respuesta como si fuera una calificación es
+   * exactamente el error que HU-20 (RN-4) prohíbe.
    */
   publishGrade(ref: SubmissionRef, grade: RemoteGrade): Promise<void>;
 
   /** Publica el PDF (o markdown) de corrección junto a la entrega. */
   publishFeedbackFile(ref: SubmissionRef, file: FeedbackFile): Promise<void>;
+
+  /**
+   * Publica la respuesta validada a una duda de foro, como mensaje colgando de
+   * la pregunta del alumno.
+   *
+   * Es la octava operación de la interfaz y rompe la promesa de mínimos del
+   * [ADR 0006](../../../docs/decisiones/0006-conectores-lms-interfaz-minima.md),
+   * que el [ADR 0009](../../../docs/decisiones/0009-interfaz-lms-siete-operaciones.md)
+   * ya había estirado. La alternativa era generalizar `publishGrade` a un
+   * `publishOutcome` que decidiera según el `kind`, y eso mete una decisión de
+   * dominio —qué significa publicar en cada tipo de actividad— dentro del
+   * conector, que es el sitio donde peor se prueba y donde nadie la busca.
+   * Dos verbos distintos para dos cosas distintas.
+   *
+   * Un conector que no sepa escribir en foros debe rechazar la llamada con un
+   * mensaje que lo diga; la capa de publicación lo cuenta como publicación
+   * incompleta y se lo explica al profesor.
+   */
+  publishForumReply(ref: SubmissionRef, reply: RemoteReply): Promise<void>;
 }
 
 export type LmsConnectorFactory = (config: LmsConnectorConfig) => LmsConnector;

@@ -52,7 +52,26 @@ export const WS_FUNCTIONS = {
    */
   getUsersByField: 'core_user_get_users_by_field',
   saveGrade: 'mod_assign_save_grade',
+  /**
+   * Responder a una duda de foro. Cuelga la respuesta del mensaje del alumno,
+   * que es lo que exige HU-20 (RN-4): una duda no se contesta escribiendo en el
+   * libro de notas de una tarea.
+   */
+  addDiscussionPost: 'mod_forum_add_discussion_post',
 } as const;
+
+/**
+ * Las funciones que **escriben** en Moodle.
+ *
+ * Están apartadas porque no se pueden ensayar: llamar a `mod_assign_save_grade`
+ * para ver si el token la tiene pondría una nota a un alumno de verdad, y
+ * llamar a `mod_forum_add_discussion_post` publicaría un mensaje en un foro con
+ * gente dentro. Su comprobación es distinta y está en `verifyConnection()`.
+ */
+export const WRITE_FUNCTIONS: readonly string[] = [
+  WS_FUNCTIONS.saveGrade,
+  WS_FUNCTIONS.addDiscussionPost,
+];
 
 // ── Esquemas de respuesta ───────────────────────────────────────────────────
 
@@ -140,6 +159,17 @@ export const GetSiteInfoResponse = z.object({
   sitename: z.string(),
   username: z.string(),
   userid: z.number(),
+  /**
+   * Las funciones que el token puede llamar. Es la única forma de saber si una
+   * función de **escritura** está en el servicio web sin llamarla —y llamarla
+   * significaría calificar a un alumno o publicar un mensaje en un foro.
+   *
+   * Opcional porque no todas las versiones ni todas las configuraciones la
+   * devuelven; cuando falta, la comprobación se declara omitida en lugar de
+   * fallida. Dar por ausente lo que no se ha podido leer mandaría a habilitar
+   * funciones que probablemente ya estén puestas.
+   */
+  functions: z.array(z.object({ name: z.string() })).optional(),
 });
 export type GetSiteInfoResponse = z.infer<typeof GetSiteInfoResponse>;
 

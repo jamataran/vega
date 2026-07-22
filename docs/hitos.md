@@ -150,6 +150,7 @@ la migración `0005` y el [ADR 0012](decisiones/0012-ingesta-almacen-y-publicaci
 | j | **Ingesta desde el LMS** | **Hecho.** `apps/api/src/ingest/`: el lote llama a `listSubmissions()` y `download()` con la credencial de `activities.imported_by`, guarda el fichero y cuenta sus páginas. Idempotente por `remote_id` |
 | k | **Almacén de las entregas** | **Hecho.** `STORAGE_ROOT` y `submissions.storage_path`. El lote deja de fabricar rutas falsas, que era el camino crítico oculto de `motor-ia.md` §14 |
 | l | **Publicación en el LMS** | **Hecho.** `publishGrade` + `publishFeedbackFile` con lo efectivo, en dos marcas para que el reintento no republique la nota. Un conector sin fichero de feedback deja de ser un error |
+| l bis | **Publicación en foro y verificación de la escritura** | **Hecho.** `publishForumReply` como octava operación, con `mod_forum_add_discussion_post`. Cierra la pregunta 1 de HU-20 y, de paso, un fallo que publicaba respuestas de foro como notas de otra actividad **sin dar error**. Las funciones de escritura se comprueban en Ajustes sin llamarlas. Ver [ADR 0014](decisiones/0014-publicar-en-foro-y-verificar-la-escritura.md) |
 | m | **Foros de Moodle** | **Hecho.** `listSubmissions()` ya no lanza: primera duda sin responder de cada debate. Sin verificar contra Moodle real |
 | n | **Orquestación** | **Hecho.** Recuperación al arrancar de lo que quedó a medias, un solo lote a la vez (`409`) y disparo manual restringido a administración |
 | o | **Ficha del alumno y contexto al modelo** | **Hecho.** Tabla `students`, migración `0006`: la ingesta trae el perfil de Moodle y la **comunidad autónoma** (`CCAA`), que es el dato que cambia el criterio de corrección y que hasta ahora el modelo no veía. Enmienda HU-08 RN-4; ver [ADR 0013](decisiones/0013-ficha-del-alumno-y-contexto-al-modelo.md) |
@@ -236,7 +237,9 @@ Aquí se cierra el coste real, que es lo que da sentido al panel de H1.d.
 **Objetivo:** publicar en Moodle y cerrar el círculo.
 
 **HU implicadas:** HU-17 (publicar nota y PDF de feedback), más la publicación de respuesta en el
-foro, que es un camino distinto: `mod_forum_add_discussion_post`, sin nota.
+foro, que es un camino distinto: `mod_forum_add_discussion_post`, sin nota. **El transporte de las
+dos ya está hecho en H2** (ADR 0012 y ADR 0014); lo que queda para aquí es verificarlo contra un
+Moodle real y resolver el formato del mensaje de foro.
 
 **HU nueva: HU-21 (modos de autonomía)**, escrita. Es lo que permite que Vega deje de necesitar
 validación cuando el contexto ya está afinado, y por tanto lo que decide si el producto ahorra

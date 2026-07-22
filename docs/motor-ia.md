@@ -140,7 +140,7 @@ pagar: la lectura es donde no se puede fallar.
 
 `AiProvider` pasa de 3 operaciones reales (`provider.ts:190-200`: `transcribe`, `grade`,
 `verifyConnection`) a **4 + conexión**, según ADR 0011, con dos enmiendas de entrada que exige
-este diseño (se formalizan en el ADR 0014, §17):
+este diseño (se formalizan en el ADR 0015, §17):
 
 ```ts
 transcribe(input: TranscribeInput): Promise<TranscribeResult>
@@ -670,7 +670,7 @@ pantalla admin (lista, editor con diff, activar, restaurar); `prompt_key/version
   filtro `upload_complete` en el contexto resuelto;
 - documentar y probar la consulta SQL de §7 que lista sólo versiones inactivas para desarrollo;
 - reconciliar en el mismo PR HU-06, `contexts/README.md`, `arquitectura.md`,
-  `modelo-de-datos.md`, `api.md` e `hitos.md`. El ADR 0015 sustituye expresamente al ADR 0003; el
+  `modelo-de-datos.md`, `api.md` e `hitos.md`. El ADR 0016 sustituye expresamente al ADR 0003; el
   ADR aceptado no se reescribe.
 
 **Aceptación**:
@@ -695,9 +695,9 @@ serán exclusivamente de administración (E1).
 `GradeInput` con `document` + contexto segmentado; orquestación de doble `transcribe` +
 comparación canónica (`normalizeCanonical()` compartida entre diff y citas) + consolidación con
 `DISCREPANCIA`; verificación mecánica (existencia de citas, aritmética ya existente, item a
-máxima puntuación con descuentos en el feedback); `GradedItem.aiQuote`; **escribir ADR 0014**
+máxima puntuación con descuentos en el feedback); `GradedItem.aiQuote`; **escribir ADR 0015**
 (enmienda 0011: el original entra en `grade()`, doble lectura, Batches como transporte) y
-**ADR 0015** (registro de prompts y 5 niveles).
+**ADR 0016** (registro de prompts y 5 niveles).
 **Aceptación**: tests unitarios de diff/citas/consolidación; mock produce discrepancias y el motor
 las convierte en flags; `gradeSubmission()` sigue siendo función pura.
 **Depende de**: T1, T2 (SDK), T4 (contexto segmentado)
@@ -839,7 +839,7 @@ paralelo} → T14. E1 queda expresamente fuera.
   `docs/analisis/*` como material de análisis.
 - `docs/diseno-motor-ia.md`: banner de sustitución (su §5 —API key y prueba de conexión— ya está
   implementado; su §4 queda superado por este documento).
-- ADR 0014 y ADR 0015 (se escriben en T5).
+- ADR 0015 y ADR 0016 (se escriben en T5).
 - `modelo-de-datos.md` (T1), `api.md` (T1/T7), `glosario.md` (términos: lectura doble,
   discrepancia, aparcada, plantilla, ledger; y corregir los pasajes obsoletos que niegan la tabla
   `courses` y el envío de la solución al modelo).

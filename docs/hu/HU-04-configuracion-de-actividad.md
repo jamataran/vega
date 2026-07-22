@@ -317,14 +317,15 @@ lógica de esta HU es la definitiva.
    notas que el profesor va a firmar.**
 
 2. **Un foro puntuable, ¿cómo publica la nota?** RN-3 permite `graded = true` en un `forum`, pero
-   el camino de publicación de foro es `mod_forum_add_discussion_post`, que no lleva calificación,
-   y `Moodle3Connector.publishGrade` sólo sabe de `mod_assign`. Opciones: (a) permitirlo y publicar
-   sólo la respuesta, dejando la nota como información interna de Vega —útil para que el profesor
-   la copie al libro de calificaciones—; (b) publicar la nota contra el ítem de calificación del
-   foro, lo que exige una llamada nueva al conector y verificarla contra un Moodle real; (c)
-   prohibir `graded = true` en `forum` y cerrar el caso. Consecuencia: con (a) hay una nota que
-   nadie publica y hay que decirlo en la UI para no engañar al profesor. **`[bloqueante]`: hoy la
-   UI ofrece una opción cuyo efecto no está definido.**
+   el camino de publicación de foro es `mod_forum_add_discussion_post`, que **no lleva
+   calificación**, y `publishGrade` está ahora explícitamente prohibido sobre un foro
+   ([ADR 0014](../decisiones/0014-publicar-en-foro-y-verificar-la-escritura.md)). Con lo
+   implementado, la conducta de hecho es la opción (a): **se publica la respuesta y la nota se queda
+   dentro de Vega, en silencio**. Opciones: (a) dejarlo así y **decirlo en la UI**, que es lo que
+   falta; (b) publicar la nota contra el ítem de calificación del foro, lo que exige una llamada
+   nueva al conector y verificarla contra un Moodle real; (c) prohibir `graded = true` en `forum` y
+   cerrar el caso. **`[bloqueante]`: hoy la UI ofrece una opción cuyo efecto no se explica, y el
+   profesor puede firmar una nota que nadie va a publicar.**
 
 3. **¿Debe la lista mostrar cuántas entregas hay en cada estado por actividad?** Es la información
    que decide dónde ponerse a trabajar. Opciones: (a) añadir un contador a `Activity` o a

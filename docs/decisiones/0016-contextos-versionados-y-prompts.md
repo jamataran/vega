@@ -1,4 +1,4 @@
-# ADR 0015 — Contextos en cinco niveles y prompts versionados en PostgreSQL
+# ADR 0016 — Contextos en cinco niveles y prompts versionados en PostgreSQL
 
 **Estado**: Aceptado
 
