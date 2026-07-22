@@ -250,11 +250,18 @@ Todo lo necesario para la pantalla de revisión, en una sola llamada.
 |---|---|---|
 | `submission` | `Submission` | |
 | `activity` | `Activity` | Completa: incluye `referenceSolution`, `pointsAllocation` y `files` |
+| `student` | `Student \| null` | Ficha del alumno. `null` en entregas sembradas o si el LMS no deja leer perfiles |
 | `transcription` | `Transcription \| null` | `null` en foros y antes de transcribir |
 | `correction` | `Correction \| null` | `null` antes de `graded`. `items` ordenados por `position` |
 | `scanUrls` | `string[]` | Páginas escaneadas originales. Vacío en foros |
 
 **Errores**: 401, 403 (fuera de su alcance), 404.
+
+> **`student` es lo que Vega guarda, no lo que el modelo ve.** La ficha sale entera hacia el
+> profesor —es quien tiene que saber de quién es lo que firma—, pero al prompt sólo viaja el recorte
+> de `studentContextFor()`: nombre, comunidad autónoma, provincia y población. Correo, teléfono,
+> NIF, DNI validado, dirección y código postal **no salen nunca**, aunque estén en esta respuesta.
+> Ver [ADR 0013](decisiones/0013-ficha-del-alumno-y-contexto-al-modelo.md).
 
 ### `GET /api/submissions/{id}/feedback.pdf`
 

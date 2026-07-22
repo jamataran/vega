@@ -152,6 +152,7 @@ la migración `0005` y el [ADR 0012](decisiones/0012-ingesta-almacen-y-publicaci
 | l | **Publicación en el LMS** | **Hecho.** `publishGrade` + `publishFeedbackFile` con lo efectivo, en dos marcas para que el reintento no republique la nota. Un conector sin fichero de feedback deja de ser un error |
 | m | **Foros de Moodle** | **Hecho.** `listSubmissions()` ya no lanza: primera duda sin responder de cada debate. Sin verificar contra Moodle real |
 | n | **Orquestación** | **Hecho.** Recuperación al arrancar de lo que quedó a medias, un solo lote a la vez (`409`) y disparo manual restringido a administración |
+| o | **Ficha del alumno y contexto al modelo** | **Hecho.** Tabla `students`, migración `0006`: la ingesta trae el perfil de Moodle y la **comunidad autónoma** (`CCAA`), que es el dato que cambia el criterio de corrección y que hasta ahora el modelo no veía. Enmienda HU-08 RN-4; ver [ADR 0013](decisiones/0013-ficha-del-alumno-y-contexto-al-modelo.md) |
 | ñ | **Persistencia de prompts** | **Sigue abierto, y es lo que hay que decidir antes del motor.** Los ocho ficheros de `prompts/` no los lee nadie: no hay tabla, ni versionado, ni edición |
 
 ### Lo que H2 deja sin cerrar

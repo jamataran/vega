@@ -10,6 +10,7 @@ import type {
   LmsConnectionInfo,
   LmsConnectorConfig,
   RemoteGrade,
+  RemoteStudent,
   RemoteSubmission,
   SubmissionRef,
 } from '@vega/connector-lms';
@@ -21,10 +22,16 @@ import {
   GetSiteInfoResponse,
   GetSubmissionsResponse,
   GetUserCoursesResponse,
+  GetUsersByFieldResponse,
   MoodleClient,
   WS_FUNCTIONS,
 } from './api.js';
-import type { MoodleForumDiscussion, MoodleForumPost, MoodleSubmission } from './api.js';
+import type {
+  MoodleForumDiscussion,
+  MoodleForumPost,
+  MoodleSubmission,
+  MoodleUser,
+} from './api.js';
 
 /**
  * Conector para Moodle 3.x vía web services REST.
@@ -64,6 +71,15 @@ const DISCUSSIONS_PER_PAGE = 50;
  * deje el proceso girando para siempre.
  */
 const MAX_DISCUSSION_PAGES = 20;
+
+/**
+ * Cuántos alumnos se piden por petición al traer los perfiles. Moodle serializa
+ * los arrays como `values[0]=…&values[1]=…`, así que un foro de doscientos
+ * participantes en una sola llamada se convierte en un cuerpo enorme que algunas
+ * instalaciones cortan por `max_input_vars` sin decir por qué. Cincuenta es el
+ * mismo compromiso que en los debates: pocas peticiones y ninguna desmesurada.
+ */
+const STUDENTS_PER_REQUEST = 50;
 
 /** Las entregas antes que los foros: es el orden en que el profesor los busca. */
 const KIND_ORDER: Readonly<Record<ActivityKind, number>> = { assignment: 0, forum: 1 };
@@ -236,6 +252,31 @@ export class Moodle3Connector implements LmsConnector {
       ),
     );
 
+    // Opcional a propósito: sin esta función Vega corrige exactamente igual,
+    // sólo que la cola enseña el identificador de Moodle en lugar del nombre del
+    // alumno. Marcarla como obligatoria mandaría a pelearse con los permisos del
+    // servicio web para conseguir algo que no bloquea nada.
+    //
+    // Se prueba con el propio usuario del token: es el único id que se sabe que
+    // existe en el sitio, y basta para saber si la función está habilitada.
+    checks.push(
+      await this.#probe(
+        WS_FUNCTIONS.getUsersByField,
+        'Leer el perfil de los alumnos',
+        () =>
+          this.#client.call(
+            WS_FUNCTIONS.getUsersByField,
+            { field: 'id', values: siteInfo === undefined ? [] : [siteInfo.userid] },
+            GetUsersByFieldResponse,
+          ),
+        (result) =>
+          result.length === 0
+            ? 'Responde correctamente, pero no ha devuelto ningún perfil.'
+            : `${result.length} ${result.length === 1 ? 'perfil' : 'perfiles'}`,
+        false,
+      ),
+    );
+
     return {
       siteName: siteInfo?.sitename ?? '',
       username: siteInfo?.username ?? '',
@@ -244,17 +285,23 @@ export class Moodle3Connector implements LmsConnector {
     };
   }
 
-  /** Una comprobación suelta: no propaga el fallo, lo convierte en parte. */
+  /**
+   * Una comprobación suelta: no propaga el fallo, lo convierte en parte.
+   * `required` por defecto a `true` porque casi todas lo son; las que no, lo
+   * dicen explícitamente y la pantalla de Ajustes puede enseñarlas como aviso en
+   * vez de como impedimento.
+   */
   async #probe<T>(
     name: string,
     label: string,
     call: () => Promise<T>,
     describeOk: (result: T) => string,
+    required = true,
   ): Promise<LmsConnectionCheck> {
     try {
-      return { name, label, status: 'ok', detail: describeOk(await call()), required: true };
+      return { name, label, status: 'ok', detail: describeOk(await call()), required };
     } catch (error) {
-      return { name, label, status: 'failed', detail: describe(error), required: true };
+      return { name, label, status: 'failed', detail: describe(error), required };
     }
   }
 
@@ -388,16 +435,19 @@ export class Moodle3Connector implements LmsConnector {
     );
 
     const submissions: RemoteSubmission[] = [];
+    const userIds: number[] = [];
     for (const assignment of response.assignments) {
       for (const submission of assignment.submissions) {
         const file = firstSubmissionFile(submission);
         if (file === undefined) continue;
 
-        // Nunca pedimos el nombre del alumno: el id numérico de Moodle es
-        // suficiente para publicar la nota y no identifica a nadie fuera de él.
+        // La referencia sigue siendo el id numérico de Moodle: es lo que se usa
+        // para publicar la nota y lo que nunca cambia. El nombre del alumno,
+        // cuando se puede leer, viaja aparte en `student`.
         const studentRef = `moodle-${submission.userid}`;
         const remoteId = `${assignment.assignmentid}:${submission.userid}:${submission.attemptnumber}`;
         this.#fileUrls.set(remoteId, file.fileurl);
+        userIds.push(submission.userid);
 
         submissions.push({
           ref: { activity: activityRef, studentRef, remoteId },
@@ -406,10 +456,85 @@ export class Moodle3Connector implements LmsConnector {
           sizeBytes: file.filesize ?? 0,
           mediaType: file.mimetype ?? 'application/pdf',
           textContent: null,
+          student: null,
         });
       }
     }
-    return submissions;
+    return this.#withStudents(submissions, userIds);
+  }
+
+  /**
+   * Pega a cada entrega el perfil de quien la firma. Se hace aquí, una sola vez
+   * por llamada y con todos los ids juntos, y no dentro del bucle: una petición
+   * por alumno convertiría una entrega de treinta en treinta viajes a Moodle
+   * para enseñar treinta nombres.
+   */
+  async #withStudents(
+    submissions: RemoteSubmission[],
+    userIds: number[],
+  ): Promise<RemoteSubmission[]> {
+    if (submissions.length === 0) return submissions;
+
+    const students = await this.#fetchStudents(userIds);
+    // Sin perfiles no hay nada que pegar: se devuelven las entregas tal cual, ya
+    // con `student: null`, en vez de reconstruir la lista entera para nada.
+    if (students.size === 0) return submissions;
+
+    return submissions.map((submission) => ({
+      ...submission,
+      student: students.get(submission.ref.studentRef) ?? null,
+    }));
+  }
+
+  /**
+   * El perfil de los alumnos indicados, indexado por `moodle-<id>`, que es el
+   * mismo formato que usa `studentRef`: así quien llama los casa sin volver a
+   * parsear nada.
+   *
+   * **Este método no falla nunca hacia fuera.** Si Moodle rechaza la llamada
+   * —porque la función no está en el servicio web, o porque al token le falta
+   * `moodle/user:viewalldetails`— se devuelve lo que se haya podido reunir, que
+   * puede ser nada. Traer el perfil es un extra para el profesor y para el
+   * contexto del modelo: que Moodle no deje leer perfiles no puede impedir que
+   * se corrijan las entregas, que es para lo que sirve el producto.
+   *
+   * TODO(vega): sin verificar contra Moodle real — `core_user_get_users_by_field`
+   * exige la capacidad `moodle/user:viewalldetails` para ver perfiles ajenos, y
+   * además `moodle/site:viewuseridentity` para `email` e `idnumber`. Sin ellas
+   * Moodle **no avisa**: devuelve el perfil recortado, con los campos
+   * simplemente ausentes. Hay que comprobar contra una instalación real qué
+   * llega con un token de profesor corriente antes de prometer nada en la
+   * interfaz.
+   */
+  async #fetchStudents(userIds: number[]): Promise<Map<string, RemoteStudent>> {
+    const students = new Map<string, RemoteStudent>();
+
+    // Un mismo alumno puede tener varias entregas en la misma actividad (un
+    // fichero por cada adjunto), y pedir su perfil dos veces no aporta nada.
+    const unique = [...new Set(userIds)];
+    if (unique.length === 0) return students;
+
+    for (let start = 0; start < unique.length; start += STUDENTS_PER_REQUEST) {
+      const batch = unique.slice(start, start + STUDENTS_PER_REQUEST);
+      let users: MoodleUser[];
+      try {
+        users = await this.#client.call(
+          WS_FUNCTIONS.getUsersByField,
+          { field: 'id', values: batch },
+          GetUsersByFieldResponse,
+        );
+      } catch {
+        // Un fallo aquí es casi siempre de configuración —función no habilitada
+        // o capacidad que falta—, así que afecta igual a los lotes siguientes:
+        // se corta el recorrido en lugar de repetir el mismo error N veces.
+        break;
+      }
+      for (const user of users) {
+        students.set(`moodle-${user.id}`, toRemoteStudent(user));
+      }
+    }
+
+    return students;
   }
 
   /**
@@ -435,6 +560,7 @@ export class Moodle3Connector implements LmsConnector {
     const discussions = await this.#listDiscussions(forumId);
 
     const submissions: RemoteSubmission[] = [];
+    const userIds: number[] = [];
     // Un debate detrás de otro y no en paralelo: son foros de un curso, no hay
     // prisa, y un profesor con cincuenta debates no debería provocarle a su
     // Moodle cincuenta peticiones simultáneas.
@@ -449,9 +575,12 @@ export class Moodle3Connector implements LmsConnector {
       const question = pendingQuestionOf(posts);
       if (question === null) continue;
 
+      userIds.push(question.userid);
       submissions.push(forumSubmission(activityRef, forumId, discussionId, question));
     }
-    return submissions;
+    // Los perfiles se piden después del recorrido, con todos los autores de una
+    // vez: dentro del bucle serían tantas peticiones más como debates abiertos.
+    return this.#withStudents(submissions, userIds);
   }
 
   /**
@@ -743,6 +872,43 @@ function forumSubmission(
     sizeBytes: new TextEncoder().encode(textContent).length,
     mediaType: 'text/plain',
     textContent,
+    // El perfil se pega después, de una sola vez para todo el foro.
+    student: null,
+  };
+}
+
+/**
+ * El usuario de Moodle en la forma que entiende Vega. Todo lo que Moodle no
+ * manda se convierte en `null` —y no en cadena vacía— para que quien lo pinte
+ * pueda distinguir «este dato no ha llegado» de «este dato está en blanco»: lo
+ * primero suele ser una capacidad que le falta al token, lo segundo un perfil
+ * que nadie ha rellenado, y se arreglan en sitios distintos.
+ *
+ * Los `customfields` pasan tal cual, con su `shortname` original. Ver la nota de
+ * `RemoteStudent`: qué campos existen depende de cada instalación y filtrarlos
+ * aquí sería decidir por el producto desde el conector.
+ */
+function toRemoteStudent(user: MoodleUser): RemoteStudent {
+  return {
+    ref: `moodle-${user.id}`,
+    username: user.username ?? null,
+    firstName: user.firstname ?? null,
+    lastName: user.lastname ?? null,
+    fullName: user.fullname ?? null,
+    email: user.email ?? null,
+    phone: user.phone1 ?? null,
+    idnumber: user.idnumber ?? null,
+    institution: user.institution ?? null,
+    department: user.department ?? null,
+    city: user.city ?? null,
+    country: user.country ?? null,
+    customFields: (user.customfields ?? []).map((field) => ({
+      shortname: field.shortname,
+      name: field.name ?? null,
+      // Un campo sin valor es un campo vacío, no un campo ausente: Moodle los
+      // devuelve igual y quitarlos escondería que existen en la instalación.
+      value: field.value ?? '',
+    })),
   };
 }
 

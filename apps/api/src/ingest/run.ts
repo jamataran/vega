@@ -1,6 +1,12 @@
 import { and, eq, isNotNull } from 'drizzle-orm';
 import { hasStudentFile } from '@vega/shared';
-import type { LmsConnector, RemoteSubmission, SubmissionRef } from '@vega/connector-lms';
+import type { StudentCustomField } from '@vega/shared';
+import type {
+  LmsConnector,
+  RemoteStudent,
+  RemoteSubmission,
+  SubmissionRef,
+} from '@vega/connector-lms';
 import { isLmsError } from '@vega/connector-lms';
 import { connectorForUser } from '../lms/factory.js';
 import { schema } from '../db/client.js';
@@ -169,7 +175,19 @@ async function ingestActivity(
     // clase. El fallo se guarda en la propia entrega, que es donde el profesor
     // lo va a buscar.
     try {
-      const inserted = await insertIfNew(ctx, activity, item, withFile);
+      // La ficha se refresca **siempre**, aunque la entrega ya existiera: un
+      // alumno cambia de comunidad entre convocatorias, y corregir con la de
+      // hace un año sería peor que no tenerla.
+      const student = await upsertStudent(ctx, item.student);
+
+      const inserted = await insertIfNew(
+        ctx,
+        activity,
+        item,
+        withFile,
+        student?.id ?? null,
+        student?.fullName ?? null,
+      );
       if (inserted === null) continue;
       created += 1;
 
@@ -188,6 +206,80 @@ async function ingestActivity(
 }
 
 /**
+ * Guarda o refresca la ficha del alumno.
+ *
+ * Se llama en cada ingesta, también para entregas que ya existían: un opositor
+ * cambia de comunidad autónoma entre convocatorias, y corregir con la de hace un
+ * año sería peor que no tener el dato. El coste es un `UPSERT` por entrega
+ * listada, contra una tabla pequeña y por clave única.
+ *
+ * La **comunidad se resuelve aquí y se guarda en su columna** en vez de dejarla
+ * enterrada en el `jsonb`: es el único campo del perfil que afecta a la
+ * corrección, y buscarlo dentro del jsonb en cada entrega del lote sería caro y
+ * frágil. Qué shortname la contiene es configuración de la instalación, porque
+ * el nombre del campo lo elige quien monta el Moodle.
+ */
+async function upsertStudent(
+  ctx: AppContext,
+  remote: RemoteStudent | null,
+): Promise<{ id: string; fullName: string | null } | null> {
+  if (remote === null) return null;
+
+  const customFields: StudentCustomField[] = remote.customFields.map((field) => ({
+    shortname: field.shortname,
+    name: field.name,
+    value: field.value,
+  }));
+
+  const community = communityOf(customFields, ctx.config.STUDENT_COMMUNITY_FIELD);
+  const fullName =
+    remote.fullName?.trim() ||
+    [remote.firstName, remote.lastName].filter(Boolean).join(' ').trim() ||
+    null;
+
+  const values = {
+    studentRef: remote.ref,
+    username: remote.username,
+    firstName: remote.firstName,
+    lastName: remote.lastName,
+    fullName,
+    email: remote.email,
+    phone: remote.phone,
+    idnumber: remote.idnumber,
+    institution: remote.institution,
+    department: remote.department,
+    city: remote.city,
+    country: remote.country,
+    community,
+    customFields,
+    syncedAt: new Date(),
+  };
+
+  const [row] = await ctx.db
+    .insert(schema.students)
+    .values(values)
+    .onConflictDoUpdate({ target: schema.students.studentRef, set: values })
+    .returning({ id: schema.students.id, fullName: schema.students.fullName });
+
+  return row ?? null;
+}
+
+/**
+ * La comunidad autónoma, sacada del campo personalizado que la lleva.
+ *
+ * Puede traer **varias separadas por coma**: un opositor se presenta en más de
+ * una comunidad y todas condicionan el criterio de corrección. No se parte ni se
+ * normaliza aquí; se guarda tal cual llegó, porque quien sabe qué significan
+ * esos valores es el contexto de corrección que escribe el profesorado.
+ */
+function communityOf(fields: readonly StudentCustomField[], shortname: string): string | null {
+  const wanted = shortname.trim().toUpperCase();
+  const found = fields.find((field) => field.shortname.trim().toUpperCase() === wanted);
+  const value = found?.value.trim() ?? '';
+  return value === '' ? null : value;
+}
+
+/**
  * Crea la fila si no existía. Devuelve `null` cuando ya estaba, que es el caso
  * normal a partir de la segunda ejecución.
  *
@@ -201,12 +293,16 @@ async function insertIfNew(
   activity: ActivityRow,
   item: RemoteSubmission,
   withFile: boolean,
+  studentId: string | null,
+  studentAlias: string | null,
 ): Promise<{ id: string } | null> {
   const [row] = await ctx.db
     .insert(schema.submissions)
     .values({
       activityId: activity.id,
       studentRef: item.ref.studentRef,
+      studentId,
+      studentAlias,
       remoteId: item.ref.remoteId,
       status: 'pending',
       originalFilename: withFile ? item.filename : null,

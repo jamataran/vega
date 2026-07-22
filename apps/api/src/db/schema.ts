@@ -11,7 +11,12 @@ import {
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
-import type { PointsAllocation, TranscriptionFlag, TranscriptionPage } from '@vega/shared';
+import type {
+  PointsAllocation,
+  StudentCustomField,
+  TranscriptionFlag,
+  TranscriptionPage,
+} from '@vega/shared';
 
 /**
  * Definiciones Drizzle para consultar. El esquema *real* lo crean las
@@ -108,6 +113,39 @@ export const activityFiles = pgTable('activity_files', {
   uploadedAt: timestamp('uploaded_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
+/**
+ * Ficha del alumno tal y como la ve el LMS.
+ *
+ * Tabla propia porque un alumno entrega muchas veces: repetir su perfil en cada
+ * entrega haría que actualizar un dato exigiera recorrerlas todas y que dos
+ * entregas suyas pudieran discrepar.
+ */
+export const students = pgTable('students', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  /** Identidad del LMS, en el mismo formato que `submissions.student_ref`. */
+  studentRef: text('student_ref').notNull().unique(),
+  username: text('username'),
+  firstName: text('first_name'),
+  lastName: text('last_name'),
+  fullName: text('full_name'),
+  email: text('email'),
+  phone: text('phone'),
+  idnumber: text('idnumber'),
+  institution: text('institution'),
+  department: text('department'),
+  city: text('city'),
+  country: text('country'),
+  /**
+   * Comunidad autónoma, resuelta del campo personalizado `CCAA`. Puede traer
+   * varias separadas por coma: un opositor se presenta en más de una.
+   */
+  community: text('community'),
+  /** Campos personalizados tal cual llegan del LMS; aquí no se interpretan. */
+  customFields: jsonb('custom_fields').$type<StudentCustomField[]>().notNull().default([]),
+  syncedAt: timestamp('synced_at', { withTimezone: true }).notNull().defaultNow(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
 export const submissions = pgTable(
   'submissions',
   {
@@ -116,7 +154,10 @@ export const submissions = pgTable(
       .notNull()
       .references(() => activities.id, { onDelete: 'cascade' }),
     studentRef: text('student_ref').notNull(),
+    /** Nombre legible. Lo rellena la ingesta con el del perfil del alumno. */
     studentAlias: text('student_alias'),
+    /** Ficha completa del alumno. `null` en entregas sembradas o sin perfil. */
+    studentId: uuid('student_id').references(() => students.id, { onDelete: 'set null' }),
     status: text('status')
       .$type<
         | 'pending'

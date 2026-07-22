@@ -1,7 +1,7 @@
 # Modelo de datos
 
 Derivado de las migraciones de `apps/api/migrations/` —de `0001_init.sql` a
-`0005_ingesta_y_publicacion.sql`— y de `packages/shared/src/domain.ts`. El SQL manda: si algo aquí no cuadra con
+`0006_alumnos.sql`— y de `packages/shared/src/domain.ts`. El SQL manda: si algo aquí no cuadra con
 las migraciones, el error está en este documento.
 
 `0002_activities.sql` cambió el eje del modelo. Los antiguos «buzones» son ahora **actividades de
@@ -43,6 +43,15 @@ cuatro cosas, todas exigidas por la ingesta y la publicación reales ([ADR 0012]
 4. **La ingesta se mide**: `batch_runs.submissions_ingested` y `activities_failed`. Sin ellos, «no
    había nada que corregir» y «no ha entrado nada» son el mismo cero.
 
+`0006_alumnos.sql` añade la tabla **`students`** y `submissions.student_id`. Hasta ella, de un
+alumno sólo se sabía un identificador; ahora se guarda su ficha del LMS, y el motivo no es de
+comodidad: **la corrección depende de la comunidad autónoma**, porque el tribunal y los criterios de
+una oposición no son los mismos en dos comunidades. Ese dato vive en Moodle como campo personalizado
+y no llegaba a Vega. Ver [ADR 0013](decisiones/0013-ficha-del-alumno-y-contexto-al-modelo.md).
+
+Tabla propia y no columnas en `submissions` porque un alumno entrega muchas veces: repetir su perfil
+en cada fila haría que actualizar un dato exigiera recorrerlas todas.
+
 Como la 0002, todo con `ALTER` e idempotente.
 
 Las migraciones se aplican al arrancar el contenedor del API y quedan registradas con su suma de
@@ -60,6 +69,7 @@ erDiagram
   users ||--o{ course_teachers : "alcanza"
   courses ||--o{ course_teachers : "lo imparten"
   courses ||--o{ activities : "agrupa"
+  students ||--o{ submissions : "entrega"
   activities ||--o{ submissions : "agrupa"
   activities ||--o{ activity_files : "adjunta"
   submissions ||--o| transcriptions : "tiene (sólo assignment)"
@@ -123,11 +133,32 @@ erDiagram
     timestamptz uploaded_at
   }
 
+  students {
+    uuid id PK
+    text student_ref UK "identidad del LMS · moodle-4217"
+    text username
+    text first_name
+    text last_name
+    text full_name
+    text email
+    text phone
+    text idnumber "del centro · NO es el NIF"
+    text institution
+    text department
+    text city
+    text country
+    text community "comunidad autónoma · VARIAS separadas por coma"
+    jsonb custom_fields "campos personalizados del LMS, sin interpretar"
+    timestamptz synced_at
+    timestamptz created_at
+  }
+
   submissions {
     uuid id PK
     uuid activity_id FK
-    text student_ref "id interno, nunca el nombre"
-    text student_alias "nullable · sólo para el profesor"
+    text student_ref "id interno del LMS, nunca el nombre"
+    text student_alias "nullable · el nombre, para el profesor"
+    uuid student_id FK "nullable · ON DELETE SET NULL"
     text status "SubmissionStatus"
     text original_filename "nullable · NULL en foros · el nombre tal cual lo puso el alumno"
     integer page_count "0 en foros · contado del PDF al ingerir"
@@ -261,6 +292,8 @@ referencial:
 | Una entrega tiene **como mucho una** transcripción | `transcriptions.submission_id UNIQUE` | Reprocesar sustituye, no acumula. No hay historial de transcripciones. |
 | Una entrega tiene **como mucho una** corrección | `corrections.submission_id UNIQUE` | Ídem: no hay historial de correcciones. El lote borra la anterior antes de insertar. |
 | No se importa dos veces la misma entrega | `UNIQUE (activity_id, student_ref, original_filename)` **y** `UNIQUE (activity_id, remote_id) WHERE remote_id IS NOT NULL` | La ingesta es idempotente en los dos tipos de actividad. La segunda, parcial, es la que cubre los foros. Ver el aviso de abajo. |
+| Borrar la ficha de un alumno **no** borra sus entregas | `submissions.student_id ... ON DELETE SET NULL` | Un derecho de supresión no puede llevarse por delante una corrección que un profesor firmó. La entrega sobrevive con su `student_ref`, que es un identificador y no un dato personal. **No hay ruta que lo haga**: hoy se atiende con SQL a mano. |
+| Un alumno está una sola vez | `students.student_ref UNIQUE` | Es lo que permite refrescar su ficha en cada ingesta en vez de acumular duplicados. Un opositor cambia de comunidad entre convocatorias. |
 | Borrar una actividad borra sus entregas y sus ficheros | `ON DELETE CASCADE` | Y en cascada, transcripciones y correcciones. Operación destructiva. |
 | Borrar un usuario no borra lo que validó, lanzó o configuró | `validated_by`, `triggered_by`, `updated_by` … `ON DELETE SET NULL` | Se pierde el quién, no el qué. Por eso los usuarios se **desactivan** (`active = false`) en lugar de borrarse. |
 | Los puntos nunca son negativos | `CHECK (ai_points >= 0)`, `CHECK (teacher_points >= 0)` | No existe la penalización con puntos negativos a nivel de apartado. |
@@ -391,7 +424,8 @@ El SQL usa `snake_case`; el contrato HTTP, `camelCase`. La capa de acceso a dato
 | `course_teachers` | — | **No tiene tipo en el contrato**: no se expone. Es la regla de alcance, y actúa filtrando lo que devuelven las demás rutas |
 | `activities` | `Activity` | `points_allocation` (jsonb) ↔ `PointsAllocation[]`; los ficheros adjuntos se cargan aparte y se sirven en `files`. `imported_by` **no se expone**: es fontanería de la ingesta, no información del profesor |
 | `activity_files` | `ActivityFile` | `storage_path` sigue siempre a `null` (los ficheros de contexto binarios no tienen almacén) y no se expone; en su lugar la API calcula `url`. `content` tampoco: se resume en `hasContent` (`content IS NOT NULL`) y se lee aparte con `GET .../content` |
-| `submissions` | `Submission` | `remote_id`, `storage_path`, `media_type` y `size_bytes` **no se exponen**: son fontanería de la ingesta. El resto, 1:1 |
+| `students` | `Student` | Sale **entera** hacia el profesor. Lo que llega al modelo es otra cosa: el recorte de `studentContextFor()`, que deja fuera correo, teléfono, NIF y domicilio |
+| `submissions` | `Submission` | `remote_id`, `storage_path`, `media_type`, `size_bytes` y `student_id` **no se exponen**: son fontanería. La ficha del alumno se sirve aparte en `SubmissionDetail.student` |
 | `transcriptions` | `Transcription` | `pages` y `flags` son jsonb ↔ `TranscriptionPage[]` / `TranscriptionFlag[]` |
 | `corrections` | `Correction` | Las cuatro columnas de consumo se agrupan en `usage: UsageMetrics`; los apartados llegan en `items`. De las tres columnas de publicación sólo sale `publish_notice`: las dos fechas parciales son internas |
 | `correction_items` | `CorrectionItem` | Se sirven ordenados por `position` |

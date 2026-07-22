@@ -10,6 +10,7 @@ import {
   Id,
   IsoDate,
   PointsAllocation,
+  Student,
   Submission,
   Transcription,
   UsageMetrics,
@@ -150,6 +151,12 @@ export type QueueCounts = z.infer<typeof QueueCounts>;
 export const SubmissionDetail = z.object({
   submission: Submission,
   activity: Activity,
+  /**
+   * Ficha del alumno. `null` en entregas sembradas o cuando el LMS no deja leer
+   * perfiles. **Es lo que Vega guarda, no lo que el modelo ve**: al prompt sólo
+   * viaja el recorte de `studentContextFor()`.
+   */
+  student: Student.nullable(),
   transcription: Transcription.nullable(),
   correction: Correction.nullable(),
   /** URLs de las páginas escaneadas. Vacío en actividades sin fichero. */

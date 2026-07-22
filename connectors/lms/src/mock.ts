@@ -8,6 +8,7 @@ import type {
   LmsConnectionInfo,
   LmsConnectorConfig,
   RemoteGrade,
+  RemoteStudent,
   RemoteSubmission,
   SubmissionRef,
 } from './types.js';
@@ -136,6 +137,128 @@ En mi grupo el error más repetido no es de cálculo, es de notación: enlazan l
 Un sistema de ecuaciones es un ejercicio para quien tiene el método automatizado y un problema para quien aún debe decidir qué hacer. No creo que haya que sustituir unos por otros, sino cuidar el momento. Lo que sí cambiaría es el peso en la evaluación.`,
 ];
 
+/**
+ * Perfiles simulados. Se reparten por índice de alumno y no al azar: la maqueta
+ * tiene que enseñar siempre lo mismo para que una captura de pantalla de ayer
+ * siga valiendo hoy, y para que las pruebas puedan afirmar algo concreto.
+ *
+ * `ccaa` y `provincia` imitan los campos de perfil que el cliente tiene dados de
+ * alta en su Moodle. El de Andrés lleva **dos comunidades separadas por `', '`**
+ * porque así es exactamente como las guarda su sistema: no es un caso raro, es
+ * el formato, y la interfaz tiene que poder enseñarlo sin partirse.
+ *
+ * `nif` es un dato personal que aquí está sólo para poder comprobar que **no**
+ * acaba en el prompt del modelo. Los valores son deliberadamente imposibles.
+ */
+interface MockStudentProfile {
+  readonly firstName: string;
+  readonly lastName: string;
+  readonly username: string;
+  readonly email: string;
+  /** `null` en alguno a propósito: un perfil incompleto es lo normal. */
+  readonly phone: string | null;
+  readonly city: string;
+  readonly ccaa: string;
+  readonly provincia: string;
+  readonly nif: string;
+}
+
+const STUDENT_PROFILES: readonly MockStudentProfile[] = [
+  {
+    firstName: 'Lucía',
+    lastName: 'Serrano Peña',
+    username: 'lserrano',
+    email: 'lucia.serrano@ejemplo.invalid',
+    phone: '+34 600 000 001',
+    city: 'Granada',
+    ccaa: 'Andalucía',
+    provincia: 'Granada',
+    nif: '00000001X',
+  },
+  {
+    firstName: 'Andrés',
+    lastName: 'Iglesias Roldán',
+    username: 'aiglesias',
+    email: 'andres.iglesias@ejemplo.invalid',
+    phone: null,
+    city: 'Toledo',
+    // Dos comunidades en un solo campo: el formato real del cliente.
+    ccaa: 'Comunidad de Madrid, Castilla-La Mancha',
+    provincia: 'Toledo',
+    nif: '00000002X',
+  },
+  {
+    firstName: 'Nuria',
+    lastName: 'Bermejo Cañas',
+    username: 'nbermejo',
+    email: 'nuria.bermejo@ejemplo.invalid',
+    phone: '+34 600 000 003',
+    city: 'Valencia',
+    ccaa: 'Comunitat Valenciana',
+    provincia: 'Valencia',
+    nif: '00000003X',
+  },
+  {
+    firstName: 'Javier',
+    lastName: 'Otxoa Ibarra',
+    username: 'jotxoa',
+    email: 'javier.otxoa@ejemplo.invalid',
+    phone: '+34 600 000 004',
+    city: 'Bilbao',
+    ccaa: 'País Vasco, La Rioja',
+    provincia: 'Bizkaia',
+    nif: '00000004X',
+  },
+  {
+    firstName: 'Marta',
+    lastName: 'Feijóo Lens',
+    username: 'mfeijoo',
+    email: 'marta.feijoo@ejemplo.invalid',
+    phone: '+34 600 000 005',
+    city: 'Santiago de Compostela',
+    ccaa: 'Galicia',
+    provincia: 'A Coruña',
+    nif: '00000005X',
+  },
+];
+
+/** El centro es el mismo para todos: la academia del catálogo simulado. */
+const MOCK_INSTITUTION = 'Academia Hipatia';
+const MOCK_DEPARTMENT = 'Secundaria · Matemáticas';
+
+/**
+ * El perfil que le toca a un alumno. Depende sólo del índice, así que el mismo
+ * `studentRef` devuelve siempre exactamente el mismo perfil, en esta actividad y
+ * en cualquier otra.
+ */
+function mockStudent(studentRef: string, index: number): RemoteStudent {
+  // El módulo hace que el catálogo aguante cualquier `submissionsPerActivity`
+  // sin dejar alumnos sin perfil.
+  const profile = STUDENT_PROFILES[index % STUDENT_PROFILES.length] ?? STUDENT_PROFILES[0]!;
+
+  return {
+    ref: studentRef,
+    username: profile.username,
+    firstName: profile.firstName,
+    lastName: profile.lastName,
+    fullName: `${profile.firstName} ${profile.lastName}`,
+    email: profile.email,
+    phone: profile.phone,
+    idnumber: `ALU-${String(index + 1).padStart(4, '0')}`,
+    institution: MOCK_INSTITUTION,
+    department: MOCK_DEPARTMENT,
+    city: profile.city,
+    country: 'ES',
+    // Tal cual los daría el LMS, sin interpretar: los `shortname` son los que
+    // usa el cliente y el conector no decide cuáles importan.
+    customFields: [
+      { shortname: 'CCAA', name: 'Comunidad autónoma', value: profile.ccaa },
+      { shortname: 'PROVINCIA', name: 'Provincia', value: profile.provincia },
+      { shortname: 'NIF', name: 'NIF', value: profile.nif },
+    ],
+  };
+}
+
 export interface MockLmsConnectorOptions {
   /** Entregas simuladas por actividad (por defecto 4). */
   readonly submissionsPerActivity?: number;
@@ -222,6 +345,7 @@ export class MockLmsConnector implements LmsConnector {
         studentRef,
         remoteId: `${activityRef.slug}:${studentRef}`,
       };
+      const student = mockStudent(studentRef, index);
 
       // Un foro no trae fichero: lo que entrega el alumno es texto.
       if (!withFile) {
@@ -233,6 +357,7 @@ export class MockLmsConnector implements LmsConnector {
           sizeBytes: text.length,
           mediaType: 'text/plain',
           textContent: text,
+          student,
         };
       }
 
@@ -244,6 +369,7 @@ export class MockLmsConnector implements LmsConnector {
         sizeBytes: 480_000 + index * 17_000,
         mediaType: 'application/pdf',
         textContent: null,
+        student,
       };
     });
     return Promise.resolve(submissions);

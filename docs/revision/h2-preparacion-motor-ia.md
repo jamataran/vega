@@ -84,7 +84,8 @@ Está en la rama de revisión, **no en `feat/h3-motor-ia`**.
 | Recuperación al arrancar | `apps/api/src/batch/recovery.ts` | Un reinicio a mitad de lote dejaba entregas atrapadas para siempre |
 | Un solo lote a la vez | `apps/api/src/routes/batch.ts` | Dos disparos simultáneos corregían lo mismo dos veces, y **pagaban dos veces** |
 | Lote sólo para administración | `apps/api/src/routes/batch.ts` | Lo lanzaba cualquier usuario autenticado |
-| Primeros tests de `apps/api` | 3 ficheros, 20 casos | El paquete tenía **cero** |
+| Ficha del alumno y contexto al modelo | `students` · `apps/api/src/ingest/` · `@vega/shared` | El modelo corregía **sin saber la comunidad autónoma** del alumno, que es lo que decide el tribunal y los criterios. Ver abajo |
+| Primeros tests de `apps/api` y de `packages/shared` | 4 ficheros, 32 casos | Los dos paquetes tenían **cero** |
 
 Las decisiones de producto que ha habido que tomar para esto están en
 [ADR 0012](../decisiones/0012-ingesta-almacen-y-publicacion-en-dos-fases.md).
@@ -208,6 +209,43 @@ verificar, por orden de probabilidad de dar problemas:
 6. **`pendingCount` de una entrega sigue siendo `0`** a propósito, y la interfaz lo enseña. Sigue
    siendo falso.
 
+### 4.2 bis  Qué sabe el modelo del alumno
+
+Añadido después de la revisión inicial, a petición del cliente, y merece su propio apartado porque
+**contradice una regla escrita** del proyecto (`HU-08` RN-4, ahora enmendada).
+
+El problema real: la corrección de una oposición de matemáticas **depende de la comunidad
+autónoma** —cambian el tribunal y los criterios— y ese dato vive en Moodle como campo personalizado
+del perfil (`CCAA` en la instalación del cliente, configurable). No llegaba a Vega, así que el modelo
+corregía sin saber contra qué convocatoria.
+
+Lo que se ha hecho: tabla `students`, la ingesta trae el perfil y lo refresca en cada pasada, y
+`submissions.student_alias` deja de estar vacío —era la pregunta abierta 6 de HU-08—.
+
+**Lo que Vega guarda y lo que el modelo ve son cosas distintas**, y esa distinción es ahora la
+frontera de protección de datos del producto:
+
+| | Se guarda | Va al modelo |
+|---|---|---|
+| Nombre y apellidos | Sí | **Sí** — decisión explícita del cliente |
+| Comunidad autónoma | Sí | **Sí** — es el motivo de todo esto |
+| Provincia, población | Sí | **Sí** |
+| Correo, teléfono, usuario, `idnumber` | Sí | No |
+| NIF, DNI validado, dirección, código postal | Sí | **Nunca** |
+
+Tres cosas que conviene no perder de vista al implementar el motor:
+
+1. **El recorte está en una función con pruebas**, `studentContextFor()` de `@vega/shared`, y no en
+   una regla escrita en una HU. Hay tests que fallan si un dato de identidad se cuela, incluso
+   ampliando por descuido la lista configurable.
+2. **Los datos del alumno viajan aparte del contexto, y no dentro.** El contexto es el prefijo
+   cacheado que comparten todas las entregas de una actividad: meter ahí un dato que cambia en cada
+   entrega invalidaría la caché en todas. Ese fallo no da error, sólo multiplica la factura. Hay un
+   test en `packages/core` que lo fija.
+3. **Vega pasa a custodiar datos personales de verdad.** No hay cifrado en reposo, ni política de
+   retención, ni forma de borrar un alumno desde la aplicación. Se suma a los secretos en claro del
+   ADR 0010, y ahora pesa más.
+
 ### 4.3 Llamadas simuladas a la IA
 
 **Es lo mejor resuelto del sistema.** No hace falta tocar nada aquí para empezar el motor.
@@ -319,7 +357,9 @@ seguro no esperar. La pantalla de procesos ya refresca sola.
 8. Contabilizar `cache_creation_input_tokens`.
 9. Señal de «modo simulado» en el contrato.
 10. Reentregas (HU-08, pregunta 1).
-11. Unificar el umbral 0,75, hoy duplicado en `engine.ts` y `batch.ts`.
+11. **Retención y borrado de datos de alumnos** (HU-08, pregunta 3). Con la ficha guardada, un
+    derecho de supresión hoy se atiende con SQL a mano. Sube de prioridad desde el ADR 0013.
+12. Unificar el umbral 0,75, hoy duplicado en `engine.ts` y `batch.ts`.
 
 ### Deuda declarada que no bloquea
 
@@ -327,9 +367,9 @@ seguro no esperar. La pantalla de procesos ya refresca sola.
   base de datos expone credenciales de Moodle y de Anthropic. Está en ADR 0010 y en
   `diseno-motor-ia.md` §7.
 - **`lint` es `echo` en los siete paquetes.** El CI no comprueba nada de estilo en ningún sitio.
-- **`apps/frontend` y `packages/shared` no tienen tests.** `apps/api` tenía cero y ahora tiene 20
-  casos en 3 ficheros, todos sobre lógica pura: **no hay ninguna prueba que levante Fastify ni que
-  toque Postgres**, así que el cableado que el motor va a modificar sigue sin red.
+- **`apps/frontend` no tiene tests.** `apps/api` y `packages/shared` tenían cero y ahora suman 32
+  casos, todos sobre lógica pura: **no hay ninguna prueba que levante Fastify ni que toque
+  Postgres**, así que el cableado que el motor va a modificar sigue sin red.
 - **Los escaneos de la interfaz siguen siendo SVG generados al vuelo** (`routes/scans.ts`), aunque
   ahora el PDF de verdad esté guardado. Enseñar el original exige rasterizar o embeber el PDF en un
   visor; no se ha tocado.

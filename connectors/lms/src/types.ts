@@ -35,6 +35,48 @@ export const SubmissionRef = z.object({
 });
 export type SubmissionRef = z.infer<typeof SubmissionRef>;
 
+/**
+ * El perfil del alumno tal y como lo guarda el LMS. Es un extra: sirve para que
+ * el profesor vea a quién está corrigiendo y para dar contexto al modelo, pero
+ * la corrección tiene que poder hacerse sin él. Por eso todos los campos —salvo
+ * `ref`— admiten `null`: cada instalación decide qué datos pide y qué datos deja
+ * leer, y un perfil a medias es lo normal, no un fallo.
+ *
+ * `customFields` llega **tal cual, sin interpretar**. Qué campos existen depende
+ * de cada instalación del LMS —una academia guarda ahí la comunidad autónoma,
+ * otra el tutor asignado, otra nada—, así que el conector se limita a
+ * transportarlos con su `shortname` original. Decidir cuáles importan, cuáles se
+ * enseñan y cuáles no deben salir del sistema es una decisión de producto, y se
+ * toma más arriba: aquí no se filtra, no se renombra y no se adivina nada.
+ */
+export const RemoteStudent = z.object({
+  /** El mismo valor que `SubmissionRef.studentRef`, para poder casarlos. */
+  ref: z.string().min(1),
+  username: z.string().nullable(),
+  firstName: z.string().nullable(),
+  lastName: z.string().nullable(),
+  /** Nombre completo ya compuesto por el LMS: cada país los ordena a su manera. */
+  fullName: z.string().nullable(),
+  email: z.string().nullable(),
+  phone: z.string().nullable(),
+  /** Identificador interno del centro (matrícula, expediente…). */
+  idnumber: z.string().nullable(),
+  institution: z.string().nullable(),
+  department: z.string().nullable(),
+  city: z.string().nullable(),
+  country: z.string().nullable(),
+  /** Campos de perfil propios de la instalación. Ver la nota de arriba. */
+  customFields: z.array(
+    z.object({
+      shortname: z.string(),
+      /** Etiqueta visible del campo; `null` si el LMS no la manda. */
+      name: z.string().nullable(),
+      value: z.string(),
+    }),
+  ),
+});
+export type RemoteStudent = z.infer<typeof RemoteStudent>;
+
 export const RemoteSubmission = z.object({
   ref: SubmissionRef,
   /** Nombre del fichero entregado. `null` en actividades sin fichero (foros). */
@@ -48,6 +90,12 @@ export const RemoteSubmission = z.object({
    * concatenados. `null` en las entregas con fichero.
    */
   textContent: z.string().nullable().default(null),
+  /**
+   * Quién entrega, con nombre y apellidos, cuando el conector puede averiguarlo.
+   * `null` cuando el origen no da perfiles o cuando la credencial no tiene
+   * permiso para leerlos: eso no impide corregir, sólo deja la cola sin nombres.
+   */
+  student: RemoteStudent.nullable().default(null),
 });
 export type RemoteSubmission = z.infer<typeof RemoteSubmission>;
 

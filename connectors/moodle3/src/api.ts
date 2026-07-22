@@ -45,6 +45,12 @@ export const WS_FUNCTIONS = {
    * debate sigue sin contestar, que es lo único a lo que Vega responde.
    */
   getDiscussionPosts: 'mod_forum_get_forum_discussion_posts',
+  /**
+   * Perfil de los alumnos a partir de sus ids. Es opcional para Vega: sin ella
+   * la corrección funciona igual, sólo que la cola enseña `moodle-1234` en lugar
+   * del nombre del alumno.
+   */
+  getUsersByField: 'core_user_get_users_by_field',
   saveGrade: 'mod_assign_save_grade',
 } as const;
 
@@ -239,6 +245,65 @@ export const GetDiscussionPostsResponse = z.object({
   warnings: z.array(z.object({ item: z.string().optional(), message: z.string() })).optional(),
 });
 export type GetDiscussionPostsResponse = z.infer<typeof GetDiscussionPostsResponse>;
+
+/**
+ * Un campo de perfil propio de la instalación. `shortname` es la única clave
+ * estable —es el nombre técnico que le puso el administrador— y por eso es lo
+ * único que se exige; `name` es la etiqueta que se ve en la pantalla de Moodle y
+ * puede estar traducida o cambiar sin avisar.
+ *
+ * TODO(vega): sin verificar contra Moodle real — falta comprobar si `value`
+ * llega siempre como cadena. En los campos de tipo menú o checkbox Moodle
+ * podría mandar un número, y entonces la respuesta entera dejaría de validar y
+ * el conector se quedaría sin perfiles (sin romper la corrección, eso sí).
+ */
+export const MoodleUserCustomField = z.object({
+  type: z.string().optional(),
+  value: z.string().optional(),
+  name: z.string().optional(),
+  shortname: z.string(),
+});
+export type MoodleUserCustomField = z.infer<typeof MoodleUserCustomField>;
+
+/**
+ * El perfil de un usuario. Sólo `id` es obligatorio, y a propósito: Moodle
+ * recorta el perfil según las capacidades del token y según los ajustes de
+ * privacidad del sitio, así que un usuario del que sólo llega el `id` es una
+ * respuesta legítima. Exigir aquí el nombre o el correo convertiría una
+ * instalación prudente en un error de conexión.
+ *
+ * TODO(vega): sin verificar contra Moodle real — leer perfiles ajenos exige la
+ * capacidad `moodle/user:viewalldetails`, y `email` e `idnumber` además
+ * `moodle/site:viewuseridentity`. Sin ellas Moodle **no da error**: devuelve el
+ * perfil recortado y se queda tan ancho, de modo que la única forma de saber si
+ * el token las tiene es mirar qué campos llegan de verdad.
+ */
+export const MoodleUser = z.object({
+  id: z.number(),
+  username: z.string().optional(),
+  firstname: z.string().optional(),
+  lastname: z.string().optional(),
+  fullname: z.string().optional(),
+  email: z.string().optional(),
+  /** Moodle guarda dos teléfonos; `phone1` es el principal. */
+  phone1: z.string().optional(),
+  idnumber: z.string().optional(),
+  institution: z.string().optional(),
+  department: z.string().optional(),
+  city: z.string().optional(),
+  country: z.string().optional(),
+  customfields: z.array(MoodleUserCustomField).optional(),
+});
+export type MoodleUser = z.infer<typeof MoodleUser>;
+
+/**
+ * `core_user_get_users_by_field` devuelve un array pelado de usuarios, uno por
+ * cada id encontrado. Los ids que no existen —o que el token no puede ver— no
+ * salen en la respuesta, así que puede llegar más corta de lo que se pidió sin
+ * que eso sea un error.
+ */
+export const GetUsersByFieldResponse = z.array(MoodleUser);
+export type GetUsersByFieldResponse = z.infer<typeof GetUsersByFieldResponse>;
 
 /** Módulos de un curso. Se usa para resolver el nombre del curso del catálogo. */
 export const GetCourseContentsResponse = z.array(

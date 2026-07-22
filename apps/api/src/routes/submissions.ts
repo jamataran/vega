@@ -15,7 +15,7 @@ import {
 } from '@vega/shared';
 import { currentUser } from '../auth/plugin.js';
 import { schema } from '../db/client.js';
-import { toCorrection, toIso, toSubmission, toTranscription } from '../db/mappers.js';
+import { toCorrection, toIso, toStudent, toSubmission, toTranscription } from '../db/mappers.js';
 import { buildFeedbackPdf, feedbackFilename } from '../feedback/pdf.js';
 import { badRequest, conflict, notFound, parseOrThrow, unprocessable } from '../http/errors.js';
 import { asHttpError, connectorForUser } from '../lms/factory.js';
@@ -454,9 +454,20 @@ async function loadDetail(
         .orderBy(asc(schema.correctionItems.position))
     : [];
 
+  // La ficha del alumno la ve el profesor entera: es quien tiene que saber de
+  // quién es lo que firma. Al modelo va sólo el recorte de `studentContextFor()`.
+  const [student] = submission.studentId
+    ? await db
+        .select()
+        .from(schema.students)
+        .where(eq(schema.students.id, submission.studentId))
+        .limit(1)
+    : [];
+
   return {
     submission: toSubmission(submission),
     activity,
+    student: student ? toStudent(student) : null,
     transcription: transcription ? toTranscription(transcription) : null,
     correction: correctionRow ? toCorrection(correctionRow, items) : null,
     // Una actividad sin fichero del alumno (un foro) no tiene nada que escanear.

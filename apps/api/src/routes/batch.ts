@@ -3,6 +3,7 @@ import type { FastifyInstance } from 'fastify';
 import {
   hasStudentFile,
   routes,
+  studentContextFor,
   type AutonomyMode,
   type BatchRun,
   type BatchRunListResponse,
@@ -10,7 +11,7 @@ import {
   type UsageMetrics,
 } from '@vega/shared';
 import { gradeSubmission } from '@vega/core';
-import type { AiProvider, PageSource, ResolveContextInput } from '@vega/core';
+import type { AiProvider, PageSource, ResolveContextInput, StudentContext } from '@vega/core';
 import { currentUser } from '../auth/plugin.js';
 import { aiProviderForInstall } from '../ai/factory.js';
 import { schema } from '../db/client.js';
@@ -325,10 +326,17 @@ async function processOne(
 
   const pages: PageSource[] = withFile ? pagesOf(ctx, submission) : [];
 
+  // Lo que el modelo va a saber del alumno, ya recortado: nombre y comunidad
+  // autónoma, nunca su correo, su teléfono ni su NIF. El recorte lo hace
+  // `studentContextFor()` en `@vega/shared`, en un solo sitio y con pruebas que
+  // fallan si un dato de identidad se cuela.
+  const student = await studentContextOf(ctx, submission.studentId);
+
   const graded = await gradeSubmission({
     provider,
     submissionId: submission.id,
     studentRef: submission.studentRef,
+    student,
     activityKind: activity.kind,
     pages,
     textContent: submission.textContent,
@@ -433,6 +441,37 @@ async function processOne(
     Math.round((usageAccumulator.costCents + result.usage.costCents) * 10_000) / 10_000;
 
   return { autoPublished: decision === 'publish' };
+}
+
+/**
+ * El recorte del perfil del alumno que puede entrar en el prompt.
+ *
+ * Se lee por entrega y no se memoriza por actividad como el contexto: cada
+ * entrega es de un alumno distinto, así que no hay nada que compartir entre
+ * ellas. Y por eso mismo **no viaja dentro del contexto**, que es el prefijo
+ * cacheado de la actividad: meter ahí un dato que cambia en cada entrega
+ * invalidaría la caché en todas.
+ */
+async function studentContextOf(
+  ctx: AppContext,
+  studentId: string | null,
+): Promise<StudentContext | null> {
+  if (studentId === null) return null;
+
+  const [row] = await ctx.db
+    .select()
+    .from(schema.students)
+    .where(eq(schema.students.id, studentId))
+    .limit(1);
+  if (!row) return null;
+
+  const context = studentContextFor(row);
+  if (context === null) return null;
+
+  // `@vega/shared` devuelve arrays de sólo lectura —lo que impide que nadie le
+  // añada un campo por el camino— y el esquema Zod del motor los quiere
+  // mutables. Se copian aquí, en la frontera, y no se relaja el tipo de origen.
+  return { name: context.name, community: context.community, fields: [...context.fields] };
 }
 
 /**
