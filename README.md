@@ -100,7 +100,7 @@ the OCR path.
 
 ## The AI engine
 
-The design in [`docs/motor-ia.md`](docs/motor-ia.md) is built around one claim, and it is worth
+The design in [`docs/motor-ia.md`](docs/analisis/motor-ia.md) is built around one claim, and it is worth
 stating plainly because everything else follows from it:
 
 > **A language model will sometimes be wrong. The point is not to pretend otherwise — it is to make
@@ -136,7 +136,7 @@ was skipped, autonomous publishing is vetoed in code, not in a comment.
 
 The prompts *are* the product configuration, so this section is the closest thing Vega has to a
 manual. Full guidance lives in [`contexts/README.md`](contexts/README.md); the shape of each layer
-is in [`docs/motor-ia.md`](docs/motor-ia.md).
+is in [`docs/motor-ia.md`](docs/analisis/motor-ia.md).
 
 **Write instructions, not a syllabus.** The reader is a corrector, not a student. «Deduct 0.25 for
 not stating the domain» does work; «value rigour» does not. Every rule should be one you could

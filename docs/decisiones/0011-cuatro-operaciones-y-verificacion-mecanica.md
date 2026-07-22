@@ -14,7 +14,7 @@ lo dejó por escrito como una apuesta consciente: «si un proveedor futuro exige
 la interfaz se queda corta. Se asume; ampliar después es más barato que abstraer de más ahora».
 
 Ha llegado ese momento, por dos exigencias del cliente que el diseño del motor
-([`docs/motor-ia.md`](../motor-ia.md)) traduce en etapas nuevas:
+([`docs/motor-ia.md`](../analisis/motor-ia.md)) traduce en etapas nuevas:
 
 1. **«Que no alucine.»** La defensa que hace comprobable esa exigencia es una **segunda opinión con
    contexto disjunto**: un modelo que recibe la transcripción y la corrección propuesta, pero *no*

@@ -1,0 +1,211 @@
+\documentclass[12pt,a4paper, reqno]{article}
+
+% Paquete comun.
+\usepackage{common/common}
+
+% Paquetes específicos
+\usetikzlibrary{matrix}
+
+% Datos comunes titulo.
+\import{common/}{title-common.tex}
+\date{\href{https://preparadoroposicionesmatematicas.com}{https://preparadoroposicionesmatematicas.com/} $\cdot$ \text{Rev. 1.2}}
+
+% Titulo tema.
+\title{\textbf{Resolución Simulacro mes 7}}
+
+% Teoremas.
+\newtheorem{teorema-seccion}{Teorema}[section]
+\newtheorem{corolario-seccion}{Corolario}[section]
+\newtheorem{proposicion-seccion}{Proposición}[section]
+
+\begin{document}
+
+\maketitle
+
+
+
+\begin{enumerate}
+
+ \item %Galicia 2014
+   \textbf{ Tenemos un conjunto de fichas, numeradas de 1 a $n$. Se disponen en fila, al azar, una a continuación de la otra. Sea $P_n$ la probabilidad de que ninguna de ellas se encuentra en su posición de orden natural. Calcular el $\lim_{n \rightarrow \infty} P_n$.}\\
+
+   Sea $A_i=$ el número de la ficha extraída en la extracción i-ésima coincide con su posición. \\
+
+   $P_n=$ probabilidad de que ninguna de las fichas se encuentre en su posición de orden natural.\\
+
+   $P_n=P(\overline{A_1} \cap \overline{A_2} \cap ... \cap \overline{A_n})=_{\text{Leyes de De Morgan}}=P(\overline{A_1 \cup A_2 \cup ... \cup A_n)}=$\\
+
+   $=_{\text{P. del contrario}} 1 - P(A_1 \cup A_2 \cup ... \cup A_n)=_{\text{Ppio. de inclusión-exclusión}}$\\
+
+   $= 1- \sum_{i=1}^n P(A_i) + \sum_{i<j} P(A_i \cap A_j)-  \sum_{i<j<k} P(A_i \cap A_j \cap A_k)+ ...$\\
+
+   $... - (-1)^{n+1} P(A_1 \cap A_2 \cap ... \cap A_n)=$\\
+
+   $1-n \cdot \dfrac{1}{n}+ \displaystyle \binom{n}{2} \dfrac{1}{n} \cdot \dfrac{1}{n-1}- \displaystyle \binom{n}{3} \dfrac{1}{n} \cdot \dfrac{1}{n-1} \cdot \dfrac{1}{n-2}+...-(-1)^{n+1}\dfrac{1}{n} \cdot \dfrac{1}{n-1} \cdot \dfrac{1}{n-2} \cdot ... \cdot \dfrac{1}{2} \cdot 1 =$\\
+
+   $=\dfrac{1}{2!}-\dfrac{1}{3!}+\dfrac{1}{4!}-...+(-1)^n\dfrac{1}{n!}= \sum_{i=2}^n \dfrac{(-1)^i}{i!}$\\
+
+   $\lim_{n \rightarrow \infty} P_n =\lim_{n \rightarrow \infty} \sum_{i=2}^n \dfrac{(-1)^i}{i!} = \sum_{i=2}^{+\infty} \dfrac{(-1)^i}{i!}=e^{-1}-1-\dfrac{(-1)}{1!}= e^{-1}$
+
+
+
+    \item %Cantabria 2018
+
+    \begin{itemize}
+        \item [a)] \textbf{En una batalla participaron entre 8000 y 10000 soldados. Resultaron muertos $\dfrac{23}{165}$ del total y heridos $\dfrac{16}{65}$ del total. Calcular cuántos soldados resultaron ilesos. }\\
+
+        Sea $N$ el número de soldados totales. \\
+
+        $165= 3 \cdot 5 \cdot 11$\\
+        $65=5 \cdot 13$\\
+
+        Como $165|N$ y $65|N$, entonces el $mcm(165,5)=3 \cdot 5 \cdot 11 \cdot 13=2145|N$\\
+
+        Sabemos que $N$ pertenece a los múltiplos de $2145$ y que $8000<N<10000$, por tanto:\\
+
+        $2145 \cdot 3= 6435 <6000$\\
+        $2145 \cdot 4= 8580$\\
+        $2145 \cdot 5= 10725 >10000$\\
+
+        Por tanto, $N=8580$.\\
+
+        $\dfrac{23}{165}+\dfrac{16}{65}=\dfrac{299}{2145}+\dfrac{528}{2145}=\dfrac{827}{2145}$\\
+
+        $\dfrac{827}{21145}$ de $N= \dfrac{827}{2145} \cdot 8580=3308$ soldados muertos o heridos\\
+
+        $8580-3308=5272$ soldados ilesos\\
+
+
+        \item [b)] \textbf{Hallar el número $2^n \cdot 3^m$ sabiendo que la suma de todos los divisores es igual a 363.} \\
+
+        $N=2^n \cdot 3^m$\\
+
+        $S\dfrac{2^{n+1}-1}{2-1} \cdot \dfrac{3^{m+1}-1}{3-1}=(2^{n+1}-1) \cdot \dfrac{3^{m+1}-1}{2}= 3 \cdot 11^2$\\
+
+        \begin{itemize}
+            \item Caso I:\\
+        $2^{n+1}-1=1$ y $\dfrac{3^{m+1}-1}{2}=363$\\
+
+        Entonces:\\
+
+        $2^{n+1}=2 \Rightarrow n=0$\\
+
+        $3^{m+1}-1=726 \Rightarrow 3^{m+1}=727 \rightarrow \leftarrow$
+
+         \item Caso II:\\
+        $2^{n+1}-1=363$ y $\dfrac{3^{m+1}-1}{2}=1$\\
+
+        Entonces:\\
+
+        $2^{n+1}=364 \Rightarrow 2^{n}=182 \rightarrow \leftarrow$\\
+
+         \item Caso III:\\
+        $2^{n+1}-1=3$ y $\dfrac{3^{m+1}-1}{2}=121$\\
+
+        Entonces:\\
+
+        $2^{n+1}=4 \Rightarrow n=1$\\
+
+        $3^{m+1}-1=242 \Rightarrow 3^{m+1}=243=3^5 \Rightarrow m=4$\\
+
+        $N=2^1 \cdot 3^4=162$
+
+         \item Caso IV:\\
+        $2^{n+1}-1=121$ y $\dfrac{3^{m+1}-1}{2}=3$\\
+
+        Entonces:\\
+
+       $2^{n+1}=122 \Rightarrow 2^{n}=61 \rightarrow \leftarrow$\\
+
+        \item Caso V:\\
+        $2^{n+1}-1=33$ y $\dfrac{3^{m+1}-1}{2}=11$\\
+
+        Entonces:\\
+
+       $2^{n+1}=34 \Rightarrow 2^{n}=17 \rightarrow \leftarrow$\\
+
+        \item Caso VI:\\
+        $2^{n+1}-1=11$ y $\dfrac{3^{m+1}-1}{2}=33$\\
+
+        Entonces:\\
+
+       $2^{n+1}=12 \Rightarrow 2^{n}=6 \rightarrow \leftarrow$\\
+        \end{itemize}
+
+        Por tanto, la única solución válida es $N=2^1 \cdot 3^4=162$.
+    \end{itemize}
+
+     \item %Euskadi 2012
+    \textbf{$EM$ es un arco de circunferencia $C_1$ de radio unidad. En el espacio entre ese arco y las rectas $a$ y $b$ perpendiculares entre sí y tangentes al arco de circunferencia por $E$ y $M$, dibujamos una circunferencia $C_2$, tangente a las rectas y a $C_1$. En el nuevo espacio entre $C_2$ y las rectas, dibujamos una nueva circunferencia $C_3$, tangente a $C_2$ y a las rectas. Si repetimos el mismo proceso, se obtienen las circunferencias $C_4, C_5, C_6, ...$ ¿Cuál será el radio de la circunferencia $C_{10}$?}\\
+
+     \begin{center}
+            \includegraphics[scale=0.23]{simulacros-online/sim07/sim07_02.png}\\
+        \end{center}
+
+    Podemos observar que cada dos circunferencias consecutivas, encontramos la siguiente relación:
+
+        \begin{center}
+            \includegraphics[scale=0.4]{simulacros-online/sim07/sim07_01.png}\\
+        \end{center}
+
+
+    $\sin 45 = \dfrac{r_{n-1}-r_n}{r_{n-1}+r_n} \Rightarrow \dfrac{\sqrt{2}}{2} = \dfrac{r_{n-1}-r_n}{r_{n-1}+r_n}$\\
+
+    $\dfrac{\sqrt{2}}{2}(r_{n-1}+r_n)=r_{n-1}-r_n \Rightarrow \left( \dfrac{\sqrt{2}}{2}+1 \right) r_n = \left( 1- \dfrac{\sqrt{2}}{2} \right) r_{n-1}$ \\
+
+    $r_n= \dfrac{2-\sqrt{2}}{2+ \sqrt{2}} r_{n-1}$\\
+
+    Racionalizando: \\
+
+    $r_n= \dfrac{4-4\sqrt{2}+2}{4-2}r_{n-1}= (3-2\sqrt{2})r_{n-1}$\\
+
+    Deshaciendo la recurrencia: \\
+
+    $r_n=(3-2\sqrt{2})r_{n-1}= (3-2\sqrt{2})^2r_{n-2}=...=(3-2\sqrt{2})^{n-1}r_{1}$ $\forall n \in \mathbb{N}$\\
+
+    Por tanto, $r_{10}= (3-2\sqrt{2})^9 \cdot 1 = (3-2\sqrt{2})^9$
+
+
+     \item %Cantabria 1996
+    \textbf{Sea $f: \mathbb{R} \rightarrow \mathbb{R}$ una función derivable (con derivada finita), estrictamente creciente y tal que $f(t)=0 \leftrightarrow t=0$. Se considera ahora la función $F: \mathbb{R} \rightarrow \mathbb{R}$ definida por: }
+    $$F(x)=\int_0^{x^2-3x+2} f(t)dt$$
+    \begin{itemize}
+        \item [a)] \textbf{Demostrar que $F$ admite derivada primera y segunda y calcular las funciones $F'$ y $F''$.}\\
+
+        $f$ es continua por ser derivable, por tanto, por el Teorema Fundamental del Cálculo, $F$ es derivable, siendo $F'(x)$:\\
+        $$F'(x)=f(x^2-3x+2)\cdot (x^2-3x+2)'=f(x^2-3x+2) \cdot (2x-3)$$
+
+        Como $f$ es derivable, entonces, $F'(x)$ es el producto de dos funciones derivables, y por tanto, también será derivable, siendo $F''(x)$:
+        $$F''(x)=f'(x^2-3x+2) \cdot (2x-3) \cdot (2x-3) + f(x^2-3x+2) \cdot 2=$$
+        $$=f'(x^2-3x+2) \cdot (2x-3)^2+2f(x^2-3x+2)$$
+
+        \item [b)] \textbf{Estudiar el crecimiento y decrecimiento de $F$ y determinar sus extremos relativos. }\\
+
+        $F'(x)=0 \Leftrightarrow f(x^2-3x+2) \cdot (2x-3)=0$
+        \begin{itemize}
+            \item $f(x^2-3x+2)=0 \Leftrightarrow x^2-3x+2=0 \Leftrightarrow x=1 \text{ o } x=2$
+            \item $2x-3=0 \Leftrightarrow x= \dfrac{3}{2}$
+        \end{itemize}
+
+        Los intervalos de crecimiento y decrecimiento son: $(- \infty, 1), (1, \frac{3}{2}), (\frac{3}{2}, 2), (2, + \infty)$\\
+
+        Como $f(0)=0$ y $f$ es estrictamente creciente, entonces $f(t)>0$ $\forall t >0$ y $f(t)<0$ $\forall t <0$. Entonces: \\
+        \begin{itemize}
+            \item $F'(0)=f(2)\cdot (-3) <0 \Rightarrow F$ es estrictamente decreciente en  $(- \infty, 1)$.
+            \item $F'(\frac{5}{4})=f(-\frac{3}{16})\cdot (-\frac{1}{2}) >0 \Rightarrow F$ es estrictamente creciente en  $(1, \frac{3}{2})$.
+            \item $F'(\frac{7}{4})=f(-\frac{3}{16})\cdot (\frac{1}{2}) <0 \Rightarrow F$ es estrictamente decreciente en  $(\frac{3}{2}, 2)$.
+            \item $F'(3)=f(2)\cdot 3 >0 \Rightarrow F$ es estrictamente creciente en  $(2, + \infty)$.        \\
+        \end{itemize}
+
+        En consecuencia:
+        \begin{itemize}
+            \item Como $F$ es continua en $(- \infty, \frac{3}{2})$ y estrictamente decreciente en $(- \infty, 1)$ y estrictamente creciente en $(1, \frac{3}{2})$, hay un mínimo relativo en $x=1$.
+            \item Como $F$ es continua en $(1,2)$ y estrictamente creciente en $(1, \frac{3}{2})$ y estrictamente decreciente en $(\frac{3}{2},2)$, hay un máximo relativo en $x=\frac{3}{2}$.
+            \item Como $F$ es continua en $(\frac{3}{2}, + \infty)$ y estrictamente decreciente en $(\frac{3}{2}, 2)$ y estrictamente creciente en $(2, + \infty)$, hay un mínimo relativo en $x=2$.
+        \end{itemize}
+
+    \end{itemize}
+
+\end{enumerate}
+
+\end{document}
