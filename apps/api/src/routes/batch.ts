@@ -8,6 +8,7 @@ import {
   type AutonomyMode,
   type BatchRun,
   type BatchRunListResponse,
+  type BatchRunProblem,
   type TriggerBatchResponse,
   type UsageMetrics,
 } from '@vega/shared';
@@ -83,7 +84,7 @@ export async function batchRoutes(app: FastifyInstance, ctx: AppContext): Promis
         app.log.error({ err: error, batchRunId: run.id }, 'El lote en segundo plano ha fallado');
       });
       reply.code(202);
-      return { run: toBatchRun(run), queued: 0 };
+      return { run: toBatchRun(run) };
     },
   );
 }
@@ -109,6 +110,23 @@ const SILENT: Logger = { info: () => {}, warn: () => {}, error: () => {} };
 
 /** Todos los tipos: lo que barre un proceso forzado a mano. */
 const ALL_KINDS: readonly ActivityKind[] = ['assignment', 'forum'];
+
+/**
+ * Cuántas incidencias de ingesta se guardan con el proceso.
+ *
+ * Con veinte se ve el patrón —que suele ser el mismo fallo repetido— sin que
+ * un LMS caído convierta la fila del proceso en un volcado de log.
+ */
+const MAX_STORED_PROBLEMS = 20;
+
+function storedProblems(ingest: IngestReport): BatchRunProblem[] {
+  return ingest.problems.slice(0, MAX_STORED_PROBLEMS).map((problem) => ({
+    activityId: problem.activityId,
+    slug: problem.slug,
+    kind: problem.kind,
+    message: problem.message.slice(0, 500),
+  }));
+}
 
 /**
  * Corrige las entregas pendientes de las actividades activas.
@@ -253,6 +271,7 @@ export async function runBatch(
         submissionsAutoPublished: autoPublished,
         submissionsIngested: ingest.ingested,
         activitiesFailed: ingest.activitiesFailed,
+        problems: storedProblems(ingest),
         inputTokens: usage.inputTokens,
         outputTokens: usage.outputTokens,
         cachedInputTokens: usage.cachedInputTokens,
@@ -285,6 +304,7 @@ export async function runBatch(
         finishedAt: new Date(),
         submissionsIngested: ingest.ingested,
         activitiesFailed: ingest.activitiesFailed,
+        problems: storedProblems(ingest),
       })
       .where(eq(schema.batchRuns.id, run.id))
       .catch(() => {});

@@ -193,7 +193,7 @@ async function ingestActivity(
       // hace un año sería peor que no tenerla.
       const student = await upsertStudent(ctx, item.student);
 
-      const inserted = await insertIfNew(
+      const row = await insertOrFind(
         ctx,
         activity,
         item,
@@ -201,12 +201,18 @@ async function ingestActivity(
         student?.id ?? null,
         student?.fullName ?? null,
       );
-      if (inserted === null) continue;
-      created += 1;
+      if (row === null) continue;
+      if (row.created) created += 1;
 
       if (!withFile) continue;
+      // Una entrega que ya tiene su fichero no se vuelve a bajar: eso es lo que
+      // evita descargarse el examen entero de toda la clase en cada pasada.
+      // Pero una que quedó **registrada y sin fichero** sí se reintenta, aunque
+      // no sea nueva: antes esa entrega se quedaba clavada para siempre, porque
+      // sólo se descargaba lo recién insertado y nadie volvía a mirarla.
+      if (!needsFile(row)) continue;
 
-      await downloadInto(ctx, store, connector, inserted.id, item, log);
+      await downloadInto(ctx, store, connector, row.id, item, log);
     } catch (error) {
       log.warn(
         { err: error, slug: activity.slug, remoteId: item.ref.remoteId },
@@ -301,14 +307,35 @@ function communityOf(fields: readonly StudentCustomField[], shortname: string): 
  * —que es la que protege los foros, donde `original_filename` es `null` y en
  * PostgreSQL dos `null` no colisionan—.
  */
-async function insertIfNew(
+/** Una entrega ya en base de datos, con lo justo para decidir si le falta fichero. */
+export interface IngestedRow {
+  readonly id: string;
+  /** `true` si la ha creado esta pasada; `false` si ya estaba. */
+  readonly created: boolean;
+  readonly storagePath: string | null;
+  readonly status: string;
+}
+
+/**
+ * ¿Hay que traerle el fichero a esta entrega?
+ *
+ * Sólo si no lo tiene y sigue esperando: una entrega **aparcada** la apartó
+ * alguien a propósito y no se resucita sola, y una ya corregida o publicada no
+ * se toca. `error` sí entra: el fallo pudo ser transitorio —el LMS caído, el
+ * disco lleno— y la pasada siguiente es exactamente donde debe reintentarse.
+ */
+export function needsFile(row: IngestedRow): boolean {
+  return row.storagePath === null && (row.status === 'pending' || row.status === 'error');
+}
+
+async function insertOrFind(
   ctx: AppContext,
   activity: ActivityRow,
   item: RemoteSubmission,
   withFile: boolean,
   studentId: string | null,
   studentAlias: string | null,
-): Promise<{ id: string } | null> {
+): Promise<IngestedRow | null> {
   const [row] = await ctx.db
     .insert(schema.submissions)
     .values({
@@ -330,7 +357,38 @@ async function insertIfNew(
     .onConflictDoNothing()
     .returning({ id: schema.submissions.id });
 
-  return row ?? null;
+  if (row) return { id: row.id, created: true, storagePath: null, status: 'pending' };
+
+  // Ya existía. Se lee para saber si le falta el fichero, que es lo único que
+  // esta pasada puede arreglarle.
+  const [existing] = await ctx.db
+    .select({
+      id: schema.submissions.id,
+      storagePath: schema.submissions.storagePath,
+      status: schema.submissions.status,
+    })
+    .from(schema.submissions)
+    .where(
+      item.ref.remoteId === null
+        ? and(
+            eq(schema.submissions.activityId, activity.id),
+            eq(schema.submissions.studentRef, item.ref.studentRef),
+          )
+        : and(
+            eq(schema.submissions.activityId, activity.id),
+            eq(schema.submissions.remoteId, item.ref.remoteId),
+          ),
+    )
+    .limit(1);
+
+  return existing === undefined
+    ? null
+    : {
+        id: existing.id,
+        created: false,
+        storagePath: existing.storagePath,
+        status: existing.status,
+      };
 }
 
 /**
@@ -370,22 +428,36 @@ async function downloadInto(
 
   const counted = await countPages(bytes, mediaType, item.filename ?? filename);
 
-  const stored = await store.saveSubmissionFile(submissionId, filename, bytes);
+  // Guardar en disco también falla, y de formas que no son culpa del alumno:
+  // volumen sin permisos de escritura, disco lleno. Sin este `catch` la
+  // excepción subía al bucle de la actividad, que la escribía en el log y
+  // seguía — y la entrega se quedaba `pending` sin fichero y sin explicación,
+  // esperando una corrección que reventaba después en el motor.
+  try {
+    const stored = await store.saveSubmissionFile(submissionId, filename, bytes);
 
-  await ctx.db
-    .update(schema.submissions)
-    .set({
-      storagePath: stored.storagePath,
-      sizeBytes: stored.sizeBytes,
-      mediaType,
-      pageCount: counted.pages,
-      // Se guarda igualmente el fichero aunque no se pueda contar: es la prueba
-      // de lo que el alumno entregó, y el profesor puede querer abrirlo.
-      status: counted.failure === null ? 'pending' : 'error',
-      errorMessage: counted.message,
-      updatedAt: new Date(),
-    })
-    .where(eq(schema.submissions.id, submissionId));
+    await ctx.db
+      .update(schema.submissions)
+      .set({
+        storagePath: stored.storagePath,
+        sizeBytes: stored.sizeBytes,
+        mediaType,
+        pageCount: counted.pages,
+        // Se guarda igualmente el fichero aunque no se pueda contar: es la prueba
+        // de lo que el alumno entregó, y el profesor puede querer abrirlo.
+        status: counted.failure === null ? 'pending' : 'error',
+        errorMessage: counted.message,
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.submissions.id, submissionId));
+  } catch (error) {
+    await markError(
+      ctx,
+      submissionId,
+      `El fichero se ha descargado pero no se ha podido guardar: ${(error as Error).message}`,
+    );
+    log.error({ err: error, submissionId }, 'No se ha podido guardar el fichero de una entrega');
+  }
 }
 
 async function markError(ctx: AppContext, submissionId: string, message: string): Promise<void> {

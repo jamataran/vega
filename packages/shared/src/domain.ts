@@ -678,6 +678,24 @@ export type AppSettings = z.infer<typeof AppSettings>;
 
 // ── Lotes ───────────────────────────────────────────────────────────────────
 
+/**
+ * Una actividad que no se pudo leer del LMS, con el motivo en cristiano.
+ *
+ * `config` exige que alguien entre en Ajustes (token caducado, función que
+ * falta en el servicio web de Moodle) y no se arregla reintentando; `transient`
+ * sí, y por eso se distinguen: sin esa diferencia, un Moodle caído y un token
+ * mal puesto dan el mismo aviso y nadie sabe si esperar o actuar.
+ */
+export const BatchRunProblem = z.object({
+  /** Identificador de la actividad en Vega, para poder abrirla. */
+  activityId: z.string(),
+  /** Su `slug`, que es lo que se reconoce de un vistazo. */
+  slug: z.string(),
+  kind: z.enum(['config', 'transient']),
+  message: z.string(),
+});
+export type BatchRunProblem = z.infer<typeof BatchRunProblem>;
+
 export const BatchRun = z.object({
   id: Id,
   startedAt: IsoDate,
@@ -702,6 +720,12 @@ export const BatchRun = z.object({
   submissionsIngested: z.number().int().min(0),
   /** Actividades cuya ingesta falló entera: LMS caído, token o configuración. */
   activitiesFailed: z.number().int().min(0),
+  /**
+   * Qué le pasó a cada una de ellas. Sin esto, `activitiesFailed` es un número
+   * sin salida: dice que algo falló y obliga a ir al log del servidor para
+   * saber si es el token, una función que falta en Moodle o el LMS caído.
+   */
+  problems: z.array(BatchRunProblem),
   usage: UsageMetrics,
 });
 export type BatchRun = z.infer<typeof BatchRun>;
