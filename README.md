@@ -390,6 +390,14 @@ real message, so Settings checks them against the token's function catalogue ins
 whether the function is in the service — the usual failure — but not whether the owner has the
 capability. See below.
 
+**Add every reading function, not just the ones that make the import work.** Moodle adds no function
+at all when you create an external service, and the two halves fail at different moments: with
+`mod_assign_get_assignments` alone you can import an activity and still ingest nothing, because
+pulling the submissions needs `mod_assign_get_submissions`. The same trap applies to forums —
+listing them needs `mod_forum_get_forums_by_courses`, but reading what students asked needs
+`mod_forum_get_forum_discussions_paginated` and `mod_forum_get_forum_discussion_posts`. «Test
+connection» in Settings now exercises all of them, so a green report means ingestion will work.
+
 Downloading a submission is not a web service call: files come from `pluginfile.php` signed with the
 same token, so no extra function is involved. `core_course_get_contents` appears in the connector's
 function map but no code path calls it — don't bother adding it yet.

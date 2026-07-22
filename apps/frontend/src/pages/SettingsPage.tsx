@@ -273,6 +273,20 @@ function SystemStatus({
               }
             />
             <Row
+              label="Almacén de entregas"
+              value={
+                <span
+                  className={cn(
+                    health.storage === 'up' ? 'text-success-ink' : 'text-destructive-ink',
+                  )}
+                >
+                  {health.storage === 'up'
+                    ? 'Se puede escribir'
+                    : 'Sin permiso de escritura: las entregas llegarían sin fichero'}
+                </span>
+              }
+            />
+            <Row
               label="Proveedor de IA"
               value={<span className="font-mono text-ui">{health.aiProvider}</span>}
             />

@@ -365,6 +365,16 @@ docker build -f apps/frontend/Dockerfile -t vega-frontend:local .
 - La imagen del API termina en una etapa mínima generada con `pnpm deploy --prod`: sin
   pnpm, sin toolchain y sin devDependencies. Corre como usuario `vega`, no como root.
 - La imagen web corre nginx como usuario `nginx` y escucha en **8080**, no en 80.
+- **`/app/data` y `/app/contexts` se crean en la imagen, con dueño `vega`.** No es
+  cosmético: Docker crea el punto de montaje de un volumen con nombre como `root:root`
+  cuando el directorio no existe en la imagen, y entonces el proceso —que no corre como
+  root— no puede escribir dentro. Eso ya pasó en test: la ingesta registró un centenar de
+  entregas y no guardó ni un PDF. Un volumen **vacío** se siembra con los permisos de la
+  imagen al arrancar, así que basta con redesplegar; si el volumen ya tuviera contenido
+  con el dueño equivocado, hay que corregirlo desde el host
+  (`docker run --rm -v vega-test-data:/d alpine chown -R 100:101 /d`, con el uid/gid que
+  tenga `vega` en la imagen). Para comprobarlo sin adivinar: **Ajustes → Estado del
+  sistema → Almacén de entregas**, que lo verifica escribiendo de verdad.
 - Las migraciones quedan en `/app/migrations`, con un enlace simbólico en `/migrations`.
   El enlace existe porque `src/db/migrate.ts` resuelve el directorio como `../../migrations`
   respecto a su propia ubicación: en el árbol de fuentes eso da `apps/api/migrations`, pero
