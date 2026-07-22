@@ -292,7 +292,9 @@ hay nada.
 | El profesor ya ha contestado a mano en el foro | Vega no lo detecta: no lee lo que hay publicado, sólo las intervenciones de alumnos. Publicaría una segunda respuesta. Ver pregunta 4 |
 | La actividad de foro tiene `pointsAllocation` con apartados y `graded false` | El reparto se ignora: sin `graded` no hay items (`gradeSubmission` corta antes de `alignItems`). No es un error, pero la pantalla de configuración no debería ofrecerlo |
 | Se publica y el foro está cerrado o el alumno se ha dado de baja | Fallo de publicación con mensaje que lo nombra, entrega a `error`, reintentable. Es un fallo de configuración, no de red (ADR 0006) |
-| La misma intervención se ingiere dos veces | **Hoy se duplica.** La clave única es `(activity_id, student_ref, original_filename)` y en un foro `original_filename` es `NULL`: en Postgres dos `NULL` no colisionan. Ver pregunta 3, `[bloqueante]` |
+| Se reintenta la publicación de una respuesta que ya salió | No se reenvía: `grade_published_at` marca «esto ya está en el LMS». Dos respuestas a la misma duda, quizá distintas, son peores que ninguna (ADR 0014) |
+| Al servicio web del token le falta `mod_forum_add_discussion_post` | Ajustes lo señala **por su nombre** antes de que nadie valide nada. No se comprueba llamándola —publicaría un mensaje de verdad— sino leyendo el catálogo de funciones del token (ADR 0014) |
+| La misma intervención se ingiere dos veces | Se descarta contra el índice único parcial `(activity_id, remote_id)`, que en un foro es `<foro>:<debate>:<mensaje>` (ADR 0012). Antes se duplicaba: la clave natural no protegía nada con `original_filename` a `NULL` |
 | No existe `contexts/activity-kinds/forum.md` | `readContextLevel` devuelve cadena vacía **sin avisar**: el foro se corrige sólo con el contexto global y el de la actividad. Hoy es exactamente lo que pasa. Ver pregunta 7 |
 
 ## Fuera de alcance
@@ -333,12 +335,12 @@ valen tal cual. `QueueQuery.kind` permite filtrar la cola por `forum`.
 `items: []`, `score: null` y `maxScore: null`; y `overallConfidence` sin items ni transcripción usa
 la confianza que declara el proveedor (RN-8).
 
-**Lo que falta en la interfaz de conector.** `LmsConnector` tiene cinco operaciones y **ninguna
-publica en un foro**: `publishGrade(ref, grade)` y `publishFeedbackFile(ref, file)` son las dos de
-salida, y las dos son de una entrega. Publicar una respuesta con `publishGrade` y `score: null`
-funcionaría en Moodle —`mod_assign_save_grade` con `grade: -1`— pero **no es lo que se quiere**:
-escribiría en el libro de notas de una tarea, no en el foro. RN-4 exige el otro camino, y ese camino
-**no está en el contrato**. Ver pregunta 1, `[bloqueante]`.
+**La interfaz de conector ya tiene el otro camino.** `LmsConnector` gana `publishForumReply(ref,
+reply)` como octava operación, con su tipo propio `RemoteReply`. Publicar con `publishGrade` y
+`score: null` funcionaría en Moodle —`mod_assign_save_grade` con `grade: -1`— pero escribiría en el
+libro de notas de una tarea, que es justo lo que RN-4 prohíbe: ahora los conectores lo **rechazan**
+en las dos direcciones en lugar de apañárselas. Ver
+[ADR 0014](../decisiones/0014-publicar-en-foro-y-verificar-la-escritura.md).
 
 **Lo que falta en el conector de Moodle 3: ya no es la entrada, es la salida.**
 `listSubmissions` **ya lee** las intervenciones (`mod_forum_get_forum_discussions_paginated` más los
@@ -348,19 +350,30 @@ supuestos gordos: `mod_forum_get_forum_discussion_posts` quedó obsoleta en Mood
 `mod_forum_get_discussion_posts`, que devuelve otra forma; y la paginación asume que el sitio respeta
 `perpage`.
 
-Lo que sigue faltando es **publicar la respuesta**: `mod_forum_add_discussion_post` **no está
-declarado** en `WS_FUNCTIONS`, y `publishGrade` escribe en el libro de notas de una tarea, que no es
-el camino de un foro. Ver pregunta 1, `[bloqueante]`.
+**Publicar la respuesta ya está**, y lo que había antes era peor que un hueco.
+`publishToLms()` no bifurcaba: llamaba a `publishGrade()` para cualquier actividad, y como el
+`remoteId` de una duda —`<foro>:<debate>:<mensaje>`— tiene la misma forma que el de una entrega
+—`<tarea>:<usuario>:<intento>`—, la respuesta se publicaba como **nota de la tarea cuyo id coincidía
+con el del foro, a un alumno cualquiera**, sin error y sin aviso. Hoy hay una operación propia,
+`publishForumReply()`, `mod_forum_add_discussion_post` está declarada, y los conectores rechazan el
+cruce en las dos direcciones. Ver [ADR 0014](../decisiones/0014-publicar-en-foro-y-verificar-la-escritura.md).
+
+Lo que **sigue faltando es el formato**: el cuerpo de la respuesta es hoy el documento de corrección
+(`teacherLatex ?? aiLatex`), que es LaTeX/markdown porque nació para una entrega de matemáticas, y un
+mensaje de foro es prosa. El transporte está; **la decisión de qué se manda es de H3**, cuando el
+motor gane su operación para responder dudas ([ADR 0011](../decisiones/0011-cuatro-operaciones-y-verificacion-mecanica.md)).
 
 Lo que **sí** funciona: el conector `mock` genera intervenciones realistas
 (`connectors/lms/src/mock.ts`, `FORUM_POSTS`) y el `filesystem` deduce `kind: 'forum'` de los
 ficheros de texto. Los dos rechazan `download()` sobre un foro con un mensaje que lo explica.
 
-**Identidad de una intervención.** `submissions_natural_key` es
-`(activity_id, student_ref, original_filename)`. Con `original_filename` a `NULL` **el índice único
-no protege nada**: Postgres considera distintos dos `NULL`, así que reingerir el mismo foro duplica
-todas las intervenciones. La idempotencia que HU-08 (RN-2) da por garantizada **no se cumple en el
-camino de foro**. Ver pregunta 3, `[bloqueante]`.
+**Identidad de una intervención: resuelta.** `submissions_natural_key` —`(activity_id,
+student_ref, original_filename)`— no protegía nada en un foro, porque con `original_filename` a
+`NULL` Postgres considera distintos dos `NULL` y reingerir el mismo foro duplicaba todas las
+intervenciones. La migración `0005` añade `submissions.remote_id` con índice único parcial sobre
+`(activity_id, remote_id)`, y en `moodle3` el `remoteId` de una duda es `<foro>:<debate>:<mensaje>`.
+La idempotencia que HU-08 (RN-2) da por garantizada **ya se cumple también en el camino de foro**.
+Ver [ADR 0012](../decisiones/0012-ingesta-almacen-y-publicacion-en-dos-fases.md).
 
 **Contexto.** Falta `contexts/activity-kinds/forum.md`. El directorio sólo tiene `assignment.md` y
 `assignment-tema.md`, y `readContextLevel` devuelve `''` cuando no encuentra la fila, sin error y sin
@@ -379,16 +392,13 @@ verosímiles. Lo que queda fuera de la entrega mockeada es la publicación real.
 
 ## Preguntas abiertas
 
-1. **¿Cómo publica Vega una respuesta en un foro?** No hay operación en `LmsConnector` para ello, y
-   RN-4 prohíbe reutilizar `publishGrade`. Opciones: (a) sexta operación en la interfaz,
-   `publishForumReply(ref, texto)`, que la implementa `moodle3` con
-   `mod_forum_add_discussion_post` y los demás conectores como pueden —el `filesystem` escribiendo
-   un fichero, el `mock` guardándolo en memoria—, a cambio de romper la promesa del
-   [ADR 0006](../decisiones/0006-conectores-lms-interfaz-minima.md) de mantener la interfaz mínima;
-   (b) generalizar `publishGrade` a `publishOutcome` y que cada conector decida según el `kind`, lo
-   que mete lógica de dominio en el conector; (c) no publicar y que el profesor copie y pegue, lo
-   que convierte el caso de uso en un generador de borradores. **`[bloqueante]`: sin esto la HU
-   llega hasta `validated` y no más.**
+1. **~~¿Cómo publica Vega una respuesta en un foro?~~ Resuelto** por el
+   [ADR 0014](../decisiones/0014-publicar-en-foro-y-verificar-la-escritura.md): opción (a), una
+   operación propia `publishForumReply(ref, reply)` con su tipo `RemoteReply`, implementada en
+   `moodle3` con `mod_forum_add_discussion_post`, en `filesystem` escribiendo `respuesta.txt` y en
+   el `mock` en memoria. Se descartó (b) —generalizar `publishGrade`— porque mete una decisión de
+   dominio en el conector, y (c) —copiar y pegar— porque deja la HU sin cerrar. El coste aceptado es
+   la octava operación de la interfaz. **Queda abierto el formato del mensaje**, que decide H3.
 
 2. **¿Se puede leer un foro de Moodle 3 con un coste razonable?**
    `mod_forum_get_forum_discussions_paginated` devuelve debates, y los mensajes de cada debate son
@@ -410,9 +420,8 @@ verosímiles. Lo que queda fuera de la entrega mockeada es la publicación real.
    usar el `remoteId` del conector como parte de la clave, lo que exige columna nueva y migración; (b)
    guardar en `original_filename` un identificador sintético del hilo (`discussion-4711`), que abusa
    de una columna que significa otra cosa; (c) clave `(activity_id, student_ref)` para foros, lo que
-   impide que un alumno pregunte dos veces en la misma actividad. La (a) es la limpia y la más cara.
-   **`[bloqueante]`: sin resolverlo, cada lote duplica todas las intervenciones y responde otra vez
-   a lo mismo.**
+   impide que un alumno pregunte dos veces en la misma actividad. La (a) es la limpia y la más cara,
+   y es la que se implementó.
 
 4. **¿Qué pasa si el profesor ya ha contestado a mano?** Vega no lee las intervenciones del
    profesorado, así que publicaría una segunda respuesta a una duda ya resuelta —y el alumno vería

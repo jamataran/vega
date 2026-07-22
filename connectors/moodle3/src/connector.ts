@@ -10,6 +10,7 @@ import type {
   LmsConnectionInfo,
   LmsConnectorConfig,
   RemoteGrade,
+  RemoteReply,
   RemoteStudent,
   RemoteSubmission,
   SubmissionRef,
@@ -277,6 +278,23 @@ export class Moodle3Connector implements LmsConnector {
       ),
     );
 
+    // Las de escritura no se llaman: se leen del catálogo del token. Ver
+    // `#declared`.
+    checks.push(
+      this.#declared(
+        siteInfo,
+        WS_FUNCTIONS.saveGrade,
+        'Publicar la nota y el feedback',
+        'Sin ella el profesor validaría correcciones que no llegarían nunca al alumno.',
+      ),
+      this.#declared(
+        siteInfo,
+        WS_FUNCTIONS.addDiscussionPost,
+        'Responder en el foro',
+        'Sin ella las respuestas a dudas se quedan en Vega, revisadas y sin publicar.',
+      ),
+    );
+
     return {
       siteName: siteInfo?.sitename ?? '',
       username: siteInfo?.username ?? '',
@@ -303,6 +321,64 @@ export class Moodle3Connector implements LmsConnector {
     } catch (error) {
       return { name, label, status: 'failed', detail: describe(error), required };
     }
+  }
+
+  /**
+   * Comprobación de una función **de escritura**, que no se llama.
+   *
+   * `mod_assign_save_grade` calificaría a un alumno de verdad y
+   * `mod_forum_add_discussion_post` publicaría un mensaje en un foro con gente
+   * dentro: no hay forma de ensayarlas. Se mira en su lugar el catálogo de
+   * funciones que `core_webservice_get_site_info` devuelve para el token, que
+   * es exactamente donde está el fallo habitual —Moodle no añade ninguna
+   * función al crear un servicio externo—.
+   *
+   * Lo que esto comprueba y lo que no conviene no confundirlo, y por eso lo dice
+   * el detalle: **que la función esté en el servicio no garantiza que el usuario
+   * tenga la capacidad** (`mod/assign:grade`, `mod/forum:replypost`). Eso sólo
+   * se sabe publicando. Aun así vale la pena: sin este parte, el profesor da la
+   * configuración por buena y se entera de que falta la mitad la primera noche
+   * que corre el proceso, cuando no hay nadie mirando.
+   */
+  #declared(
+    siteInfo: GetSiteInfoResponse | undefined,
+    name: string,
+    label: string,
+    whyItMatters: string,
+  ): LmsConnectionCheck {
+    const declared = siteInfo?.functions;
+    if (declared === undefined) {
+      return {
+        name,
+        label,
+        status: 'skipped',
+        detail:
+          siteInfo === undefined
+            ? `No se ha podido comprobar: necesita el catálogo de funciones que devuelve ${WS_FUNCTIONS.getSiteInfo}.`
+            : 'Este Moodle no ha devuelto la lista de funciones del token, así que no se puede comprobar sin publicar de verdad.',
+        required: true,
+      };
+    }
+
+    if (declared.some((entry) => entry.name === name)) {
+      return {
+        name,
+        label,
+        status: 'ok',
+        detail:
+          'Está en el servicio web del token. No se ejecuta en la comprobación —escribiría en Moodle—, ' +
+          'así que queda por confirmar que el usuario tenga además la capacidad correspondiente.',
+        required: true,
+      };
+    }
+
+    return {
+      name,
+      label,
+      status: 'failed',
+      detail: `No está en el servicio web del token. ${whyItMatters} Añádela en Administración del sitio → Servidor → Servicios web → Servicios externos → Funciones.`,
+      required: true,
+    };
   }
 
   /**
@@ -661,6 +737,18 @@ export class Moodle3Connector implements LmsConnector {
    * un assignment sobre 100 se publica mal sin reescalar).
    */
   async publishGrade(ref: SubmissionRef, grade: RemoteGrade): Promise<void> {
+    // Un `remoteId` de foro es `<foro>:<debate>:<mensaje>`, tres números, y
+    // `parseRemoteId` lo aceptaría sin rechistar: publicaría la respuesta como
+    // nota de la tarea nº foro al usuario nº debate. No daría error, y la nota
+    // caería sobre un alumno cualquiera de una actividad cualquiera. De ahí que
+    // el corte esté aquí y no en la validación del identificador.
+    if (refersToForum(ref.activity)) {
+      throw new Error(
+        `La actividad "${ref.activity.slug}" es un foro y no tiene libro de notas: ` +
+          'una respuesta a una duda se publica con publishForumReply().',
+      );
+    }
+
     const { assignmentId, userId, attempt } = parseRemoteId(ref.remoteId);
 
     await this.#client.call(
@@ -702,6 +790,45 @@ export class Moodle3Connector implements LmsConnector {
         'Publicar el fichero de feedback en Moodle 3 todavía no está resuelto (área assignfeedback_file). ' +
           'Publica la nota con publishGrade, que ya incluye el feedback en HTML, y adjunta el PDF por otro canal.',
       ),
+    );
+  }
+
+  /**
+   * La respuesta se cuelga **del mensaje del alumno**, no del debate: así queda
+   * como respuesta a su duda y no como una intervención suelta al final del
+   * hilo, que es lo que vería quien entrase a leerlo.
+   *
+   * TODO(vega): sin verificar contra Moodle real — quedan tres cosas:
+   *  - el formato del mensaje. `mod_forum_add_discussion_post` no admite un
+   *    `messageformat` de primer nivel en 3.x; se manda HTML porque es lo que
+   *    el editor de Moodle guarda por defecto, pero un sitio configurado en
+   *    Markdown podría enseñar las etiquetas en crudo al alumno;
+   *  - si el sitio tiene activado el retardo de edición (`maxeditingtime`), que
+   *    no impide publicar pero sí cambia cuándo se notifica;
+   *  - si conviene pasar `options[discussionsubscribe]=0` para que el profesor
+   *    no acabe suscrito a todos los debates que Vega conteste.
+   */
+  async publishForumReply(ref: SubmissionRef, reply: RemoteReply): Promise<void> {
+    if (!refersToForum(ref.activity)) {
+      throw new Error(
+        `La actividad "${ref.activity.slug}" es una entrega, no un foro: ` +
+          'la nota y el feedback se publican con publishGrade().',
+      );
+    }
+
+    const { postId } = parseForumRemoteId(ref.remoteId);
+
+    await this.#client.call(
+      WS_FUNCTIONS.addDiscussionPost,
+      {
+        postid: postId,
+        // Vacío deja que Moodle componga el «Re: <asunto del hilo>» que sus
+        // usuarios reconocen; inventarlo aquí obligaría a Vega a conocer las
+        // convenciones de cada idioma del sitio.
+        subject: reply.subject ?? '',
+        message: renderReplyHtml(reply),
+      },
+      z.unknown(),
     );
   }
 }
@@ -974,6 +1101,36 @@ function parseRemoteId(remoteId: string): {
     throw new Error(`Identificador de entrega de Moodle mal formado: "${remoteId}".`);
   }
   return parsed;
+}
+
+/**
+ * El `<foro>:<debate>:<mensaje>` que fabrica `forumSubmission`. Lo único que
+ * hace falta para responder es el tercero, pero se validan los tres: un
+ * identificador con dos partes es un `remoteId` de entrega colado por el camino
+ * de foro, y contestar a un `postid` que en realidad es un `userid` publicaría
+ * la respuesta en un hilo cualquiera.
+ */
+function parseForumRemoteId(remoteId: string): { postId: number } {
+  const parts = remoteId.split(':');
+  const postId = Number.parseInt(parts[2] ?? '', 10);
+  if (parts.length !== 3 || !Number.isFinite(postId)) {
+    throw new Error(
+      `Identificador de intervención de foro mal formado: "${remoteId}". Se esperaba <foro>:<debate>:<mensaje>.`,
+    );
+  }
+  return { postId };
+}
+
+/**
+ * La respuesta en HTML, que es lo que el editor de Moodle guarda por defecto.
+ * Se respetan los saltos de línea del profesor: lo que escribió con dos párrafos
+ * tiene que llegarle al alumno con dos párrafos.
+ */
+function renderReplyHtml(reply: RemoteReply): string {
+  return reply.body
+    .split(/\n{2,}/)
+    .map((paragraph) => `<p>${escapeHtml(paragraph).replaceAll('\n', '<br>')}</p>`)
+    .join('');
 }
 
 function firstSubmissionFile(submission: MoodleSubmission) {

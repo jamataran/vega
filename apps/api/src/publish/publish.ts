@@ -8,7 +8,7 @@ import {
   type Submission,
   type Transcription,
 } from '@vega/shared';
-import type { LmsConnector, RemoteGrade, SubmissionRef } from '@vega/connector-lms';
+import type { LmsConnector, RemoteGrade, RemoteReply, SubmissionRef } from '@vega/connector-lms';
 import { schema } from '../db/client.js';
 import { buildFeedbackPdf, feedbackFilename } from '../feedback/pdf.js';
 import type { AppContext } from '../context.js';
@@ -98,6 +98,13 @@ export async function publishToLms(
   ref: SubmissionRef,
   input: PublishInput,
 ): Promise<PublishOutcome> {
+  // Un foro se publica por otro camino entero. Antes no se bifurcaba y una
+  // respuesta validada acababa en `publishGrade`, es decir, en el libro de notas
+  // de la tarea cuyo id coincidía con el del foro: lo que HU-20 (RN-4) prohíbe.
+  if (input.activity.kind === 'forum') {
+    return publishReply(connector, ref, input);
+  }
+
   const grade = toRemoteGrade(input);
 
   let gradePublished = input.alreadyPublished.grade;
@@ -149,6 +156,52 @@ export async function publishToLms(
         `${(error as Error).message}`,
     };
   }
+}
+
+/**
+ * Lo que se publica en un foro es **lo que el profesor dejó escrito**: su
+ * versión si la editó, la de la IA si la dio por buena. Igual que en una nota,
+ * lo que sustituyó no viaja a ninguna parte.
+ *
+ * ⚠️ El **formato** de este texto es el punto sin resolver. Hoy el documento de
+ * corrección se redacta en LaTeX/markdown porque nació para una entrega de
+ * matemáticas, y un mensaje de foro es prosa: publicar esto tal cual puede
+ * enseñarle al alumno la sintaxis en crudo. Quien lo tiene que arreglar es el
+ * motor de IA, que en H3 gana una operación propia para responder dudas
+ * (ADR 0011) y debe devolver prosa, no un documento. El transporte —esto— ya
+ * está; la decisión de formato es suya y no se disimula aquí.
+ */
+export function toRemoteReply(input: PublishInput): RemoteReply {
+  const { correction } = input;
+  return {
+    body: correction.teacherLatex ?? correction.aiLatex,
+    // Que lo componga el LMS: cada sitio tiene su convención de «Re: …».
+    subject: null,
+    validatedBy: correction.validatedBy,
+    ...(correction.validatedAt === null ? {} : { validatedAt: correction.validatedAt }),
+  };
+}
+
+/**
+ * Publicar en un foro es una sola operación, no dos: no hay nota que separar
+ * del fichero. Se reutiliza la marca `gradePublishedAt` como «esto ya salió
+ * hacia el LMS» —el reintento sigue siendo idempotente— y `filePublished` queda
+ * en `false` porque en un foro no hay fichero que adjuntar.
+ *
+ * Si falla, se lanza: no hay nada publicado, la entrega vuelve a `error` y el
+ * reintento no duplica ningún mensaje.
+ */
+async function publishReply(
+  connector: LmsConnector,
+  ref: SubmissionRef,
+  input: PublishInput,
+): Promise<PublishOutcome> {
+  if (input.alreadyPublished.grade) {
+    return { gradePublished: true, filePublished: false, complete: true, notice: null };
+  }
+
+  await connector.publishForumReply(ref, toRemoteReply(input));
+  return { gradePublished: true, filePublished: false, complete: true, notice: null };
 }
 
 /**

@@ -313,11 +313,19 @@ contrato.
 
 **Respuesta 200** — `CorrectionResponse` con `publishedAt` relleno y `status = 'published'`.
 
-Llama de verdad al conector: `publishGrade` con la nota y el feedback **efectivos**
-(`teacherPoints ?? aiPoints`) y, en una entrega con fichero, `publishFeedbackFile` con el PDF de
-corrección. Se publica con la credencial de **quien importó la actividad**, no con la de quien pulsa
-el botón: es la misma con la que se ingirió, y en un curso co-impartido puede que sólo una tenga
-permiso de calificación en Moodle.
+Llama de verdad al conector, y **por dos caminos distintos según el tipo de actividad**:
+
+- **Entrega**: `publishGrade` con la nota y el feedback **efectivos** (`teacherPoints ?? aiPoints`)
+  y, si hay fichero, `publishFeedbackFile` con el PDF de corrección. Cada una deja su marca
+  (`grade_published_at`, `feedback_file_published_at`) para que el reintento reenvíe sólo lo que
+  falta.
+- **Foro**: `publishForumReply` con el texto validado, colgando del mensaje del alumno. Una sola
+  operación y una sola marca; el libro de notas **no se toca**, y el conector rechaza el intento
+  ([ADR 0014](decisiones/0014-publicar-en-foro-y-verificar-la-escritura.md)).
+
+Se publica con la credencial de **quien importó la actividad**, no con la de quien pulsa el botón:
+es la misma con la que se ingirió, y en un curso co-impartido puede que sólo una tenga permiso de
+calificación en Moodle.
 
 **Errores**: 401, 403, 404; **409 `CONFLICT`** si la entrega no está en `validated` ni en `error`, o
 si no tiene `remote_id` —una entrega sembrada no viene del LMS y no hay dónde publicarla—. Publicar

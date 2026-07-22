@@ -12,6 +12,7 @@ import type {
   LmsConnectionInfo,
   LmsConnectorConfig,
   RemoteGrade,
+  RemoteReply,
   RemoteSubmission,
   SubmissionRef,
 } from '@vega/connector-lms';
@@ -60,6 +61,12 @@ const ActivityMeta = z.object({
 /** Ficheros de servicio que el conector escribe y que no son entregas. */
 const GRADE_FILENAME = 'nota.json';
 const PUBLISHED_MARKER = 'publicado.json';
+/**
+ * La respuesta publicada a una duda de foro. Cuenta como fichero de servicio:
+ * sin eso, la siguiente ingesta la leería como una intervención más del alumno
+ * —es un `.txt` dentro de su carpeta— y Vega acabaría respondiéndose a sí misma.
+ */
+const REPLY_FILENAME = 'respuesta.txt';
 const ACTIVITY_META_FILENAME = 'actividad.json';
 
 const SUBMISSION_EXTENSIONS = ['.pdf', '.png', '.jpg', '.jpeg', '.webp'];
@@ -301,6 +308,25 @@ export class FilesystemConnector implements LmsConnector {
     await writeFile(join(dir, safeFilename(file.filename)), content);
   }
 
+  /**
+   * Aquí no hay foro al que escribir, así que la respuesta se deja en un fichero
+   * de texto junto a la pregunta. No es publicar —nadie la va a leer salvo quien
+   * mire la carpeta— y por eso se guarda **en texto plano y con la fecha
+   * dentro**: este conector se usa para probar el circuito sin LMS, y lo que
+   * tiene que poder comprobarse es que la respuesta validada llegó hasta el
+   * final y con qué contenido.
+   */
+  async publishForumReply(ref: SubmissionRef, reply: RemoteReply): Promise<void> {
+    const dir = this.#studentDir(ref);
+    await mkdir(dir, { recursive: true });
+    const header = reply.subject === null ? '' : `${reply.subject}\n\n`;
+    const signature =
+      reply.validatedBy === null || reply.validatedBy === undefined
+        ? ''
+        : `\n\n— Validado por ${reply.validatedBy}`;
+    await writeFile(join(dir, REPLY_FILENAME), `${header}${reply.body}${signature}\n`, 'utf8');
+  }
+
   #studentDir(ref: SubmissionRef): string {
     return join(this.#root, ref.activity.slug, ref.studentRef);
   }
@@ -357,6 +383,7 @@ function isServiceFile(filename: string): boolean {
   return (
     filename === GRADE_FILENAME ||
     filename === PUBLISHED_MARKER ||
+    filename === REPLY_FILENAME ||
     filename === ACTIVITY_META_FILENAME
   );
 }
