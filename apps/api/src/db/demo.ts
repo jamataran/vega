@@ -575,9 +575,18 @@ async function main(): Promise<void> {
 }
 
 function mockPageImageUrl(page: number, latex: string): string {
-  const excerpt = latex.replace(/<[^>]*>/g, '').replace(/[<>&]/g, '').slice(0, 180);
+  const excerpt = escapeXmlText(latex).slice(0, 180);
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 1100"><rect width="800" height="1100" fill="#fff"/><text x="64" y="88" font-family="sans-serif" font-size="24" fill="#334155">Original simulado · página ${page}</text><foreignObject x="64" y="130" width="672" height="850"><div xmlns="http://www.w3.org/1999/xhtml" style="font:22px monospace;white-space:pre-wrap;color:#1e293b">${excerpt}</div></foreignObject></svg>`;
   return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
+function escapeXmlText(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
 }
 
 await main();

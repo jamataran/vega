@@ -1,0 +1,78 @@
+@import "tailwindcss";
+
+@theme {
+  --color-vega-ink: #080B14;
+  --color-vega-text: #0B1020;
+  --color-vega-cloud: #F7F9FC;
+  --color-vega-slate: #667085;
+  --color-vega-violet-400: #B98CFF;
+  --color-vega-violet-500: #8A5CFF;
+  --color-vega-violet-600: #5B39FF;
+  --color-vega-blue: #277BFF;
+  --color-vega-cyan: #22D7F6;
+  
+  --font-display: "Space Grotesk", "Inter", system-ui, sans-serif;
+  --font-sans: "Inter", system-ui, sans-serif;
+  
+  --radius-vega-sm: 8px;
+  --radius-vega-md: 12px;
+  --radius-vega-lg: 16px;
+  
+  --shadow-vega-raised: 0 8px 24px rgb(8 11 20 / 0.08);
+}
+
+:root {
+  /* Brand Tokens (from tokens.css) */
+  --vega-ink-950: #080b14;
+  --vega-ink-900: #0b1020;
+  --vega-surface-dark: #0f1424;
+  --vega-cloud-50: #f7f9fc;
+  --vega-white: #ffffff;
+  --vega-slate-500: #667085;
+  --vega-slate-400: #98a2b3;
+  --vega-slate-300: #d0d5dd;
+  --vega-slate-200: #eaecf0;
+
+  --vega-violet-400: #b98cff;
+  --vega-violet-500: #8a5cff;
+  --vega-violet-600: #5b39ff;
+  --vega-blue-500: #277bff;
+  --vega-cyan-400: #22d7f6;
+
+  --vega-success-600: #16a36a;
+  --vega-warning-600: #d97706;
+  --vega-danger-600: #dc2626;
+  --vega-info-600: #2563eb;
+
+  --vega-gradient-brand: linear-gradient(
+    135deg,
+    var(--vega-violet-400) 0%,
+    var(--vega-violet-500) 30%,
+    var(--vega-blue-500) 68%,
+    var(--vega-cyan-400) 100%
+  );
+
+  /* Semantic light theme */
+  --color-bg: var(--vega-cloud-50);
+  --color-surface: var(--vega-white);
+  --color-text: var(--vega-ink-900);
+  --color-text-muted: var(--vega-slate-500);
+  --color-border: var(--vega-slate-200);
+  --color-primary: var(--vega-violet-600);
+  --color-primary-hover: #4e2ee5;
+  --color-focus: var(--vega-blue-500);
+}
+
+html, body {
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+}
+
+.text-gradient {
+  background: var(--vega-gradient-brand);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  color: transparent;
+}

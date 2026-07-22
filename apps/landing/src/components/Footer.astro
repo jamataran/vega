@@ -1,0 +1,19 @@
+---
+import { getLangFromUrl, useTranslations } from '../i18n/utils';
+
+const lang = getLangFromUrl(Astro.url);
+const t = useTranslations(lang);
+---
+
+<footer class="w-full border-t border-[var(--color-border)] bg-[var(--color-bg)] py-8 mt-auto">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col md:flex-row items-center justify-between gap-4">
+    <div class="flex items-center gap-2">
+      <img src="/vega-icon.svg" alt="Vega Logo" class="h-6 w-6 opacity-50 grayscale" />
+      <span class="text-[var(--color-text-muted)] text-sm">{t('footer.rights')}</span>
+    </div>
+    <div class="flex gap-6">
+      <a href="https://github.com/jamataran/vega" class="text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors text-sm">GitHub</a>
+      <a href="https://moodle.org" class="text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors text-sm">Moodle Plugins</a>
+    </div>
+  </div>
+</footer>
