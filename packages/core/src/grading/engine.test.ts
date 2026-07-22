@@ -59,6 +59,12 @@ function stubProvider(
         ...grade,
       };
     },
+    async triage() {
+      return { label: 'sencilla', confidence: 1, reason: 'stub', model: 'stub', usage: NO_USAGE };
+    },
+    async verify() {
+      return { coherent: true, issues: [], confidence: 1, model: 'stub', usage: NO_USAGE };
+    },
     async verifyConnection() {
       return { ok: true, message: 'stub', model: 'stub-grader', usage: null };
     },
@@ -148,6 +154,8 @@ test('señala baja confianza, método alternativo y reparto que no cuadra', () =
         maxPoints: 2.5,
         aiPoints: 2.5,
         aiFeedback: 'Perfecto.',
+        aiQuote: null,
+        aiQuotePage: null,
         confidence: 0.95,
         alternativeMethod: true,
         position: 0,
@@ -158,6 +166,8 @@ test('señala baja confianza, método alternativo y reparto que no cuadra', () =
         maxPoints: 2.5,
         aiPoints: 1,
         aiFeedback: 'Regular.',
+        aiQuote: 'Regular.',
+        aiQuotePage: 1,
         confidence: LOW_CONFIDENCE_THRESHOLD - 0.2,
         alternativeMethod: false,
         position: 1,
@@ -182,6 +192,20 @@ test('señala baja confianza, método alternativo y reparto que no cuadra', () =
     maxScore: 9,
   });
   assert.equal(mismatch[0]?.reason, 'allocation_mismatch');
+
+  const customThreshold = detectReviewFlags({
+    items: [{
+      label: '1a', statement: '', maxPoints: 2.5, aiPoints: 2.5,
+      aiFeedback: 'Correcto.', aiQuote: null, aiQuotePage: null,
+      confidence: 0.8, alternativeMethod: false, position: 0,
+    }],
+    flags: [],
+    pointsAllocation: [],
+    maxScore: null,
+    graded: false,
+    lowConfidenceThreshold: 0.85,
+  });
+  assert.ok(customThreshold.some((flag) => flag.reason === 'low_confidence'));
 });
 
 // ── Orquestación completa ───────────────────────────────────────────────────
@@ -245,9 +269,9 @@ test('gradeSubmission normaliza, acota la nota y arrastra el contexto resuelto',
   // Contexto resuelto y consumo agregado viajan con el resultado.
   assert.ok(result.resolvedContext.merged.includes('Global.'));
   assert.ok(result.resolvedContext.merged.includes('Actividad.'));
-  assert.equal(result.usage.inputTokens, 500);
+  assert.equal(result.usage.inputTokens, 600);
   assert.equal(result.usage.cachedInputTokens, 200);
-  assert.equal(result.usage.costCents, 4);
+  assert.equal(result.usage.costCents, 5.5);
 
   const reasons = result.review.map((flag) => flag.reason);
   assert.ok(reasons.includes('low_confidence'), 'el apartado 1b va por debajo del umbral');
@@ -494,8 +518,8 @@ test('los datos del alumno viajan aparte y NO dentro del contexto cacheado', asy
   const input = provider.calls.grade[0];
   assert.equal(input?.student?.name, 'Ana Beltrán Ruiz');
   assert.equal(input?.student?.community, 'ANDALUCIA, MURCIA');
-  assert.doesNotMatch(input?.context ?? '', /Ana Beltrán/);
-  assert.doesNotMatch(input?.context ?? '', /ANDALUCIA/);
+  assert.doesNotMatch(JSON.stringify(input?.context ?? []), /Ana Beltrán/);
+  assert.doesNotMatch(JSON.stringify(input?.context ?? []), /ANDALUCIA/);
 });
 
 test('sin ficha del alumno el motor manda `null`, no un objeto vacío', async () => {

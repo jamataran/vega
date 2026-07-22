@@ -219,7 +219,7 @@ va $f$, un cuantificador en el orden equivocado): es error de concepto, §4.3.
 **7.8. Presentación**: el desorden, la falta de estructura o los tachones **no se penalizan por sí
 mismos** en un simulacro de problema. Sí se comentan en el feedback si dificultan seguir el
 razonamiento. En un simulacro de tema la presentación sí puntúa: ver
-`task-types/simulacro_tema.md`.
+la plantilla activa del formato de actividad.
 
 ---
 

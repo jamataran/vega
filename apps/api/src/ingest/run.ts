@@ -1,6 +1,6 @@
-import { and, eq, isNotNull } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull } from 'drizzle-orm';
 import { hasStudentFile } from '@vega/shared';
-import type { StudentCustomField } from '@vega/shared';
+import type { ActivityKind, StudentCustomField } from '@vega/shared';
 import type {
   LmsConnector,
   RemoteStudent,
@@ -72,8 +72,15 @@ const SILENT: Logger = { info: () => {}, warn: () => {}, error: () => {} };
  * No lanza: un fallo de una actividad no puede impedir la ingesta de las demás
  * (HU-08, RN-5), y menos aún tumbar el lote entero. Todo lo que sale mal vuelve
  * en `problems`.
+ *
+ * `kinds` acota la pasada a esos tipos de actividad: la pasada frecuente de
+ * foros no debe consultar en Moodle todas las entregas cada pocos minutos.
  */
-export async function ingestAll(ctx: AppContext, log: Logger = SILENT): Promise<IngestReport> {
+export async function ingestAll(
+  ctx: AppContext,
+  log: Logger = SILENT,
+  kinds: readonly ActivityKind[] = ['assignment', 'forum'],
+): Promise<IngestReport> {
   const { db } = ctx;
   const store = new FileStore(ctx.config.STORAGE_ROOT);
 
@@ -82,7 +89,13 @@ export async function ingestAll(ctx: AppContext, log: Logger = SILENT): Promise<
   const activities = await db
     .select()
     .from(schema.activities)
-    .where(and(eq(schema.activities.enabled, true), isNotNull(schema.activities.moodleRef)));
+    .where(
+      and(
+        eq(schema.activities.enabled, true),
+        isNotNull(schema.activities.moodleRef),
+        inArray(schema.activities.kind, [...kinds]),
+      ),
+    );
 
   let ingested = 0;
   let activitiesFailed = 0;

@@ -154,7 +154,7 @@ la migración `0005` y el [ADR 0012](decisiones/0012-ingesta-almacen-y-publicaci
 | m | **Foros de Moodle** | **Hecho.** `listSubmissions()` ya no lanza: primera duda sin responder de cada debate. Sin verificar contra Moodle real |
 | n | **Orquestación** | **Hecho.** Recuperación al arrancar de lo que quedó a medias, un solo lote a la vez (`409`) y disparo manual restringido a administración |
 | o | **Ficha del alumno y contexto al modelo** | **Hecho.** Tabla `students`, migración `0006`: la ingesta trae el perfil de Moodle y la **comunidad autónoma** (`CCAA`), que es el dato que cambia el criterio de corrección y que hasta ahora el modelo no veía. Enmienda HU-08 RN-4; ver [ADR 0013](decisiones/0013-ficha-del-alumno-y-contexto-al-modelo.md) |
-| ñ | **Persistencia de prompts** | **Sigue abierto, y es lo que hay que decidir antes del motor.** Los ocho ficheros de `prompts/` no los lee nadie: no hay tabla, ni versionado, ni edición |
+| ñ | **Persistencia de prompts** | **Hecho en H3.** Tabla `prompts` versionada, edición desde la pantalla «Prompts» y semillas embebidas en `apps/api/src/prompts/seeds.ts`. La carpeta `prompts/` del repositorio se eliminó: la base de datos es la única fuente de verdad en ejecución |
 
 ### Lo que H2 deja sin cerrar
 
@@ -198,10 +198,21 @@ el prompt caching), HU-10 (transcripción).
 tiene fichero y debe ir `pending → grading` directo. El código ya lo distingue con `hasStudentFile()`;
 la documentación no, y ninguna HU describe ese camino. Se arregla aquí.
 
-**Lo primero de H3 no es código, es una decisión**: dónde viven los prompts de `prompts/`. Y con la
-ingesta cerrada aparece la segunda: un PDF real llega al motor como **un documento**, no como N
-páginas, porque trocearlo exigiría rasterizar. Ver
+**Lo primero de H3 no era código, era una decisión**: dónde viven los prompts. **Decidido y hecho:
+en la base de datos** (tabla `prompts` versionada, editable desde la aplicación), con las semillas
+embebidas en el código. La segunda decisión —el PDF llega al motor como documento, no como N
+páginas— se resolvió troceando sin rasterizar con `pdf-lib` y un manifiesto exacto de páginas. Ver
 [`revision/h2-preparacion-motor-ia.md`](revision/h2-preparacion-motor-ia.md) §5.
+
+**Implementado en el motor IA**: doble lectura, troceado PDF con manifiesto, cuatro operaciones,
+contextos y prompts versionados, triaje de foros, verificación mecánica/IA y ledger. La validación
+T14 contra corpus y clave reales es la puerta de salida antes de considerar H4 cerrado.
+
+**Decisión de alcance (2026-07-22)**: mientras la publicación en Moodle esté fuera de alcance
+(motor-ia.md D15), el «modo de autonomía» desaparece de la interfaz — nada se publica solo y toda
+actividad opera como `review_all`. La columna y el enum se conservan para cuando la publicación
+vuelva al alcance. Las rúbricas y criterios de corrección viven en el contexto de la actividad,
+no en una sección propia de la ficha.
 
 ---
 

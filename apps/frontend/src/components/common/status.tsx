@@ -1,5 +1,9 @@
-import { ACTIVITY_KIND_LABEL, AUTONOMY_MODE_LABEL, SUBMISSION_STATUS_LABEL } from '@vega/shared';
-import type { ActivityKind, AutonomyMode, SubmissionStatus } from '@vega/shared';
+import {
+  ACTIVITY_KIND_LABEL,
+  LOW_CONFIDENCE_THRESHOLD,
+  SUBMISSION_STATUS_LABEL,
+} from '@vega/shared';
+import type { ActivityKind, SubmissionStatus } from '@vega/shared';
 import { Badge } from '@/components/ui/badge';
 import type { BadgeProps } from '@/components/ui/badge';
 
@@ -16,6 +20,7 @@ export const STATUS_VARIANT: Record<SubmissionStatus, StatusVariant> = {
   transcribed: 'default',
   grading: 'default',
   graded: 'primary',
+  parked: 'warning',
   validated: 'success',
   published: 'quiet',
   error: 'destructive',
@@ -40,23 +45,8 @@ export function ActivityKindBadge({ kind }: { kind: ActivityKind }) {
   return <Badge variant="outline">{ACTIVITY_KIND_LABEL[kind]}</Badge>;
 }
 
-/**
- * Variante por modo de autonomía. `autonomous` publica sin que nadie mire, y
- * eso merece destacarse: es la única configuración en la que el profesor deja
- * de estar en el circuito.
- */
-const AUTONOMY_VARIANT: Record<AutonomyMode, StatusVariant> = {
-  review_all: 'default',
-  review_low_confidence: 'info',
-  autonomous: 'warning',
-};
-
-export function AutonomyBadge({ mode }: { mode: AutonomyMode }) {
-  return <Badge variant={AUTONOMY_VARIANT[mode]}>{AUTONOMY_MODE_LABEL[mode]}</Badge>;
-}
-
 /** Umbral del contrato: por debajo de 0,75 la transcripción o la corrección se señala. */
-export const LOW_CONFIDENCE = 0.75;
+export const LOW_CONFIDENCE = LOW_CONFIDENCE_THRESHOLD;
 
 /**
  * La confianza no se comunica sólo con color: la etiqueta lleva siempre el

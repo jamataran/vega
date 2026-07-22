@@ -1,5 +1,10 @@
 import { useMemo, useState } from 'react';
-import type { Transcription, TranscriptionFlag, TranscriptionPage } from '@vega/shared';
+import type {
+  Transcription,
+  TranscriptionFlag,
+  TranscriptionFlagKind,
+  TranscriptionPage,
+} from '@vega/shared';
 import { cn } from '@/lib/cn';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
@@ -16,13 +21,17 @@ import { EmptyState } from '@/components/common/Feedback';
 import { ConfidenceBadge, LOW_CONFIDENCE } from '@/components/common/status';
 import { Latex, tokenizeLatex } from '@/components/Latex';
 import { ZoomableImage } from './ZoomableImage';
+import { PdfPage } from './PdfPage';
+import type { PDFDocumentProxy } from 'pdfjs-dist';
 
 export function TranscriptionView({
   transcription,
   studentLabel,
+  originalDocument,
 }: {
   transcription: Transcription | null;
   studentLabel: string;
+  originalDocument?: PDFDocumentProxy;
 }) {
   const [openFlag, setOpenFlag] = useState<TranscriptionFlag | null>(null);
 
@@ -61,6 +70,16 @@ export function TranscriptionView({
           </Alert>
         ) : null}
 
+        {transcription.discrepancies.map((discrepancy) => (
+          <Alert key={discrepancy.page} variant="warning">
+            <AlertDescription>
+              <strong>Página {discrepancy.page}: las dos lecturas no coinciden.</strong>
+              <span className="mt-2 block break-words font-mono text-ui [overflow-wrap:anywhere]">Lectura A: {discrepancy.readingA}</span>
+              <span className="mt-1 block break-words font-mono text-ui [overflow-wrap:anywhere]">Lectura B: {discrepancy.readingB}</span>
+            </AlertDescription>
+          </Alert>
+        ))}
+
         {transcription.pages.map((page) => (
           <PageBlock
             key={page.page}
@@ -68,6 +87,7 @@ export function TranscriptionView({
             flags={transcription.flags.filter((flag) => flag.page === page.page)}
             studentLabel={studentLabel}
             onFlagClick={setOpenFlag}
+            originalDocument={originalDocument}
           />
         ))}
       </div>
@@ -76,12 +96,18 @@ export function TranscriptionView({
         <SheetContent>
           <SheetHeader>
             <SheetTitle>
-              {openFlag?.kind === 'ILEGIBLE' ? 'Fragmento ilegible' : 'Duda de transcripción'}
+              {openFlag?.kind === 'ILEGIBLE'
+                ? 'Fragmento ilegible'
+                : openFlag?.kind === 'DISCREPANCIA'
+                  ? 'Lecturas discrepantes'
+                  : 'Duda de transcripción'}
             </SheetTitle>
             <SheetDescription>
               {openFlag?.kind === 'ILEGIBLE'
                 ? 'El OCR no ha podido leer este trozo del manuscrito.'
-                : 'El OCR ha leído algo, pero no está seguro de haberlo entendido bien.'}
+                : openFlag?.kind === 'DISCREPANCIA'
+                  ? 'Las dos lecturas independientes no coinciden. Contrasta este fragmento con el original.'
+                  : 'El OCR ha leído algo, pero no está seguro de haberlo entendido bien.'}
             </SheetDescription>
           </SheetHeader>
 
@@ -113,21 +139,24 @@ function PageBlock({
   flags,
   studentLabel,
   onFlagClick,
+  originalDocument,
 }: {
   page: TranscriptionPage;
   flags: readonly TranscriptionFlag[];
   studentLabel: string;
   onFlagClick: (flag: TranscriptionFlag) => void;
+  originalDocument?: PDFDocumentProxy;
 }) {
   return (
     <Card asChild>
       <section className="overflow-hidden">
         <h2 className="eyebrow border-b border-border px-3 py-2">Página {page.page}</h2>
         <div className="grid gap-4 p-3 md:grid-cols-2">
-          <ZoomableImage
-            src={page.imageUrl}
-            alt={`Página ${page.page} escaneada del examen de ${studentLabel}`}
-          />
+          {originalDocument ? (
+            <PdfPage document={originalDocument} page={page.page} label={`Página ${page.page} escaneada del examen de ${studentLabel}`} />
+          ) : (
+            <ZoomableImage src={page.imageUrl} alt={`Página ${page.page} escaneada del examen de ${studentLabel}`} />
+          )}
           <TranscribedText latex={page.latex} flags={flags} onFlagClick={onFlagClick} />
         </div>
       </section>
@@ -153,11 +182,16 @@ function TranscribedText({
     () => ({
       ILEGIBLE: flags.filter((flag) => flag.kind === 'ILEGIBLE'),
       DUDA: flags.filter((flag) => flag.kind === 'DUDA'),
+      DISCREPANCIA: flags.filter((flag) => flag.kind === 'DISCREPANCIA'),
     }),
     [flags],
   );
 
-  const used = { ILEGIBLE: 0, DUDA: 0 };
+  const used: Record<TranscriptionFlagKind, number> = {
+    ILEGIBLE: 0,
+    DUDA: 0,
+    DISCREPANCIA: 0,
+  };
 
   return (
     <div className="whitespace-pre-wrap break-words font-mono text-ui leading-relaxed text-muted-foreground">
@@ -198,7 +232,7 @@ function TranscribedText({
             type="button"
             onClick={() => onFlagClick(flag)}
             className={cn(className, 'transition-opacity hover:opacity-80')}
-            aria-label={`${segment.value === 'ILEGIBLE' ? 'Fragmento ilegible' : 'Duda'}: ver detalle`}
+            aria-label={`${segment.value === 'ILEGIBLE' ? 'Fragmento ilegible' : segment.value === 'DISCREPANCIA' ? 'Lecturas discrepantes' : 'Duda'}: ver detalle`}
           >
             {label}
           </button>

@@ -5,3 +5,5 @@ packages:
 # esbuild compila su binario nativo al instalar; lo necesitan Vite y tsx.
 allowBuilds:
   esbuild: true
+minimumReleaseAgeExclude:
+  - '@anthropic-ai/sdk@0.112.5'

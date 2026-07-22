@@ -1,5 +1,10 @@
 # Backlog de implementación con Claude Code — Corrector v1.1
 
+> **Documento histórico.** Para el motor de IA manda
+> [`motor-ia.md`](motor-ia.md). En particular, T03 queda sustituida por T4 de ese documento: los
+> contextos se siembran una vez y después viven, con historial, en PostgreSQL. No se implementan
+> commits Git desde la aplicación.
+
 Tareas secuenciales. Cada una está redactada para pegarla como prompt de arranque en Claude Code. No empezar una tarea sin cumplir los criterios de aceptación de la anterior.
 
 ## Stack técnico (decidido)
@@ -71,9 +76,12 @@ Tabla `usuarios` (email, hash argon2, rol `admin|profesor`, activo), login JWT c
 
 ## T03 — Gestión de contextos
 
-CRUD de buzones y editor real de contextos: markdown global + por buzón (config, solución, instrucciones, rúbrica), guardado con commit git automático (autor = usuario), historial de versiones consultable, preview KaTeX, edición cómoda en móvil (toolbar mínima: negrita, LaTeX inline, listas).
+**Sustituida por [T4 de `motor-ia.md`](motor-ia.md#t4--registro-versionado-niveles-y-permisos-de-contextos).**
+El diseño anterior de guardar con commits Git no debe implementarse. La tarea vigente define
+semilla inicial, versiones inmutables en PostgreSQL y permisos por nivel; la pantalla administrativa
+del historial queda para una fase posterior.
 
-**Aceptación**: crear buzón "tema04", pegar una solución real con LaTeX, verla renderizada; `git log` en `contexts/` refleja los cambios con autor.
+**Aceptación**: la de la T4 vigente.
 
 ## T04 — Motor de corrección en `core/`
 

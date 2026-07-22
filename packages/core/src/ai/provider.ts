@@ -1,10 +1,13 @@
 import { z } from 'zod';
 import {
   ActivityKind,
+  ContextSegment,
   Id,
   PointsAllocation,
   TranscriptionFlag,
   TranscriptionPage,
+  TranscriptionDiscrepancy,
+  TriageLabel,
   UsageMetrics,
 } from '@vega/shared';
 
@@ -33,6 +36,8 @@ export type PageMediaType = z.infer<typeof PageMediaType>;
 export const PageSource = z
   .object({
     page: z.number().int().positive(),
+    /** Páginas originales incluidas en este bloque PDF. */
+    pageNumbers: z.array(z.number().int().positive()).min(1).optional(),
     mediaType: PageMediaType.optional(),
     bytes: z.instanceof(Uint8Array).optional(),
     path: z.string().min(1).optional(),
@@ -52,6 +57,8 @@ export const TranscribeInput = z.object({
    * siquiera llama aquí cuando `hasStudentFile(activityKind)` es `false`.
    */
   activityKind: ActivityKind,
+  /** Identifica la pasada sin exponer una lectura a la otra. */
+  reading: z.enum(['a', 'b']).optional(),
   pages: z.array(PageSource).min(1),
 });
 export type TranscribeInput = z.infer<typeof TranscribeInput>;
@@ -71,6 +78,8 @@ export type TranscribeResult = z.infer<typeof TranscribeResult>;
 export const TranscriptionSummary = z.object({
   pages: z.array(TranscriptionPage),
   flags: z.array(TranscriptionFlag),
+  discrepancies: z.array(TranscriptionDiscrepancy),
+  passCount: z.number().int().positive(),
   confidence: z.number().min(0).max(1),
 });
 export type TranscriptionSummary = z.infer<typeof TranscriptionSummary>;
@@ -101,6 +110,8 @@ export const GradeInput = z.object({
    * (foros): ahí no hay nada que transcribir y se corrige sobre `textContent`.
    */
   transcription: TranscriptionSummary.nullable(),
+  /** Original visual: autoridad ante cualquier discrepancia de lectura. */
+  document: z.array(PageSource),
   /**
    * Lo que el alumno ha escrito cuando no hay fichero: sus mensajes del foro ya
    * concatenados. `null` en actividades con entrega.
@@ -112,7 +123,9 @@ export const GradeInput = z.object({
    * cachearlo entero: es lo que se repite entre todas las entregas de una
    * misma actividad.
    */
-  context: z.string(),
+  context: z.array(ContextSegment),
+  /** Solución de referencia y adjuntos de texto, separados del historial versionado. */
+  material: z.string(),
   /**
    * Lo que el modelo puede saber del alumno: su nombre, su comunidad autónoma y
    * poco más. **No es la ficha del alumno**, sino el recorte que produce
@@ -134,8 +147,38 @@ export const GradeInput = z.object({
   graded: z.boolean(),
   /** Nota máxima. `null` cuando la actividad no se puntúa. */
   maxScore: z.number().positive().nullable(),
+  /** En foros permite intentar primero el modelo estándar sin anclar al experto. */
+  route: z.enum(['standard', 'expert']).optional(),
+  /**
+   * Plantilla de la actividad (`activities.template_key`). Decide qué prompt de
+   * corrección se aplica: los temas se corrigen con otras instrucciones que los
+   * problemas.
+   */
+  templateKey: z.string().nullable().optional(),
+  /** Genera notas internas para el profesorado; nunca se publican al alumno. */
+  explanations: z.boolean().optional(),
 });
 export type GradeInput = z.infer<typeof GradeInput>;
+
+/**
+ * Qué prompt del registro corresponde a una llamada de corrección. Vive aquí
+ * —y no en el proveedor— porque el ledger tiene que registrar exactamente la
+ * misma clave que el proveedor aplica; dos copias de esta regla acabarían
+ * discrepando.
+ */
+export function gradePromptKey(
+  input: Pick<GradeInput, 'activityKind' | 'route' | 'templateKey'>,
+): string {
+  if (input.activityKind === 'forum') {
+    // Sin ruta explícita se asume la experta: es la que cubre el caso general.
+    return input.route === 'standard'
+      ? 'forum.answer.simple.system'
+      : 'forum.answer.expert.system';
+  }
+  return (input.templateKey ?? '').includes('tema')
+    ? 'grading.topic.system'
+    : 'grading.problem.system';
+}
 
 /**
  * Apartado corregido tal y como lo devuelve la IA: sin normalizar y sin ids.
@@ -146,6 +189,8 @@ export const GradedItem = z.object({
   maxPoints: z.number().min(0),
   aiPoints: z.number().min(0),
   aiFeedback: z.string(),
+  aiQuote: z.string().nullable().optional(),
+  aiQuotePage: z.number().int().positive().nullable().optional(),
   confidence: z.number().min(0).max(1),
   /** El alumno resuelve por una vía válida distinta a la solución de referencia. */
   alternativeMethod: z.boolean(),
@@ -162,11 +207,58 @@ export const GradeResult = z.object({
    */
   aiLatex: z.string(),
   aiSummary: z.string(),
+  teacherNotes: z.string().nullable().optional(),
+  confidence: z.number().min(0).max(1),
+  model: z.string().min(1),
+  usage: UsageMetrics,
+  escalate: z.boolean().optional(),
+  noEsDuda: z.boolean().optional(),
+});
+export type GradeResult = z.infer<typeof GradeResult>;
+
+// ── Triaje de foros ────────────────────────────────────────────────────────
+
+export const TriageInput = z.object({
+  submissionId: Id,
+  message: z.string(),
+  thread: z.array(z.string()).default([]),
+});
+export type TriageInput = z.infer<typeof TriageInput>;
+
+export const TriageResult = z.object({
+  label: TriageLabel,
+  confidence: z.number().min(0).max(1),
+  reason: z.string(),
+  model: z.string().min(1),
+  usage: UsageMetrics,
+});
+export type TriageResult = z.infer<typeof TriageResult>;
+
+// ── Verificación ───────────────────────────────────────────────────────────
+
+export const VerifyInput = z.object({
+  submissionId: Id,
+  transcription: TranscriptionSummary.nullable(),
+  items: z.array(GradedItem),
+  aiSummary: z.string(),
+  aiLatex: z.string(),
+});
+export type VerifyInput = z.infer<typeof VerifyInput>;
+
+export const VerifyResult = z.object({
+  coherent: z.boolean(),
+  issues: z.array(
+    z.object({
+      kind: z.string(),
+      itemLabel: z.string().nullable(),
+      detail: z.string(),
+    }),
+  ),
   confidence: z.number().min(0).max(1),
   model: z.string().min(1),
   usage: UsageMetrics,
 });
-export type GradeResult = z.infer<typeof GradeResult>;
+export type VerifyResult = z.infer<typeof VerifyResult>;
 
 // ── Prueba de conexión ──────────────────────────────────────────────────────
 
@@ -192,6 +284,8 @@ export interface AiProvider {
   readonly name: string;
   transcribe(input: TranscribeInput): Promise<TranscribeResult>;
   grade(input: GradeInput): Promise<GradeResult>;
+  triage(input: TriageInput): Promise<TriageResult>;
+  verify(input: VerifyInput): Promise<VerifyResult>;
   /**
    * Comprueba que el proveedor responde con la configuración actual. Pensada
    * para el botón «Probar conexión» de Ajustes; no corrige nada.

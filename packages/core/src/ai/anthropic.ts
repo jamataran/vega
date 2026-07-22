@@ -1,17 +1,22 @@
 import { readFile } from 'node:fs/promises';
 import Anthropic from '@anthropic-ai/sdk';
-import { z } from 'zod';
-import { TranscriptionFlagKind } from '@vega/shared';
+import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
+import { z } from 'zod/v4';
 import type { TranscriptionFlag, TranscriptionPage } from '@vega/shared';
 import { estimateCostCents } from '../cost/pricing.js';
+import { gradePromptKey } from './provider.js';
 import type {
   AiProvider,
   GradedItem,
   GradeInput,
   GradeResult,
   PageSource,
+  TriageInput,
+  TriageResult,
   TranscribeInput,
   TranscribeResult,
+  VerifyInput,
+  VerifyResult,
   VerifyConnectionResult,
 } from './provider.js';
 
@@ -36,16 +41,52 @@ import type {
 
 export const DEFAULT_TRANSCRIPTION_MODEL = 'claude-opus-4-8';
 export const DEFAULT_GRADING_MODEL = 'claude-opus-4-8';
+export const DEFAULT_TRIAGE_MODEL = 'claude-haiku-4-5';
+export const DEFAULT_VERIFY_MODEL = 'claude-sonnet-5';
 
 /** Sin streaming el SDK corta por timeout mucho antes de 128k. */
 const MAX_TOKENS = 16_000;
+
+/**
+ * Timeout explícito para las llamadas largas (transcripción y corrección).
+ * Sin él, el SDK **rechaza** una petición no-streaming cuyo `max_tokens`
+ * implique más de ~10 minutos de generación; con un timeout explícito acepta
+ * y espera. Una corrección con razonamiento extendido puede tardar varios
+ * minutos con toda normalidad.
+ */
+const LONG_CALL_TIMEOUT_MS = 60 * 60 * 1_000;
+
+/** Haiku 4.5 es de una generación anterior: `thinking: adaptive` y `effort` devuelven 400. */
+function supportsExtendedReasoning(model: string): boolean {
+  return !model.includes('haiku');
+}
+
+/**
+ * `effort: 'xhigh'` sólo está garantizado en los modelos de gama alta y exige
+ * `max_tokens ≥ 64k`. Para el resto se degrada a `high`, que es válido en toda
+ * la familia con razonamiento.
+ */
+function clampEffort(model: string, effort: 'high' | 'xhigh'): 'high' | 'xhigh' {
+  if (effort === 'xhigh' && !(model.includes('opus-4-8') || model.includes('fable'))) {
+    return 'high';
+  }
+  return effort;
+}
+
+/** Suelo de `max_tokens` que impone el nivel de esfuerzo pedido. */
+function minTokensFor(effort: 'high' | 'xhigh'): number {
+  return effort === 'xhigh' ? 64_000 : 16_000;
+}
 
 export interface AnthropicAiProviderOptions {
   readonly apiKey?: string;
   readonly transcriptionModel?: string;
   readonly gradingModel?: string;
+  readonly triageModel?: string;
+  readonly verifyModel?: string;
   /** Tope de tokens de respuesta. Lo fija el administrador en Ajustes. */
   readonly maxTokens?: number;
+  readonly systemPrompts?: Readonly<Record<string, string>>;
   /** Inyectable para poder testear sin red. */
   readonly client?: Anthropic;
 }
@@ -55,39 +96,56 @@ export interface AnthropicAiProviderOptions {
 const TranscriptionAnswer = z.object({
   pages: z.array(
     z.object({
-      page: z.number().int().positive(),
+      page: z.number(),
       latex: z.string(),
     }),
   ),
-  flags: z
-    .array(
-      z.object({
-        kind: TranscriptionFlagKind,
-        page: z.number().int().positive(),
-        excerpt: z.string(),
-        note: z.string(),
-      }),
-    )
-    .default([]),
-  confidence: z.number().min(0).max(1),
+  flags: z.array(
+    z.object({
+      kind: z.enum(['ILEGIBLE', 'DUDA', 'DISCREPANCIA']),
+      page: z.number(),
+      excerpt: z.string(),
+      note: z.string(),
+    }),
+  ),
+  confidence: z.number(),
 });
 
 const GradingAnswer = z.object({
   /** Vacío cuando la actividad no se puntúa. */
-  items: z
-    .array(
-      z.object({
-        label: z.string().min(1),
-        aiPoints: z.number().min(0),
-        aiFeedback: z.string(),
-        confidence: z.number().min(0).max(1),
-        alternativeMethod: z.boolean(),
-      }),
-    )
-    .default([]),
+  items: z.array(
+    z.object({
+      label: z.string(),
+      aiPoints: z.number(),
+      aiFeedback: z.string(),
+      aiQuote: z.string().nullable(),
+      aiQuotePage: z.number().nullable(),
+      confidence: z.number(),
+      alternativeMethod: z.boolean(),
+    }),
+  ),
   aiLatex: z.string(),
   aiSummary: z.string(),
-  confidence: z.number().min(0).max(1),
+  teacherNotes: z.string().nullable(),
+  confidence: z.number(),
+  escalate: z.boolean(),
+  noEsDuda: z.boolean(),
+});
+
+const TriageAnswer = z.object({
+  label: z.enum(['errata', 'administrativa', 'no_es_duda', 'sencilla', 'dificil']),
+  confidence: z.number(),
+  reason: z.string(),
+});
+
+const VerificationAnswer = z.object({
+  coherent: z.boolean(),
+  issues: z.array(z.object({
+    kind: z.string(),
+    itemLabel: z.string().nullable(),
+    detail: z.string(),
+  })),
+  confidence: z.number(),
 });
 
 // ── Prompts ─────────────────────────────────────────────────────────────────
@@ -100,12 +158,11 @@ errores: no corrijas, no completes y no reordenes nada.
 Formato de \`latex\` (lo pinta KaTeX, que no compone documentos enteros):
 - Texto normal en Markdown y cada fórmula delimitada entre $$ ... $$.
 - Una fórmula por línea del desarrollo, separadas por una línea en blanco.
-- Si un fragmento no se lee, marca [ILEGIBLE]; si admite dos lecturas, [DUDA] y
-  elige la más coherente con el paso siguiente. Las marcas van FUERA de los $$:
+- Si un fragmento no se lee, marca [ILEGIBLE]; si admite dos lecturas, marca
+  [DUDA] y registra las dos posibilidades sin elegir. Las marcas van FUERA de los $$:
   dentro, KaTeX las interpretaría como matemáticas.
 
-Responde exclusivamente con un objeto JSON con esta forma:
-{"pages":[{"page":1,"latex":"..."}],"flags":[{"kind":"ILEGIBLE","page":1,"excerpt":"...","note":"..."}],"confidence":0.0}`;
+La respuesta debe ajustarse al esquema estructurado indicado por la API.`;
 
 const GRADING_SYSTEM = `Eres un profesor de matemáticas de una academia de oposiciones corrigiendo la entrega de un alumno.
 
@@ -123,14 +180,19 @@ puntos que se te dan. Reglas:
 - Si la actividad es un foro, no hay fichero ni transcripción: valoras el texto
   que ha escrito el alumno (argumentación, uso de fuentes, diálogo con los
   compañeros), no su cálculo.
+- Si descuentas puntos en un apartado, incluye una cita literal del alumno y su
+  página. Si no puedes citar el error, no descuentes.
 
 "aiLatex" es la corrección redactada como documento LaTeX completo y compilable
 (\\documentclass … \\begin{document} … \\end{document}), en español y con coma
 decimal. Es lo que el profesor edita y lo que se imprime como páginas de
 feedback, así que se devuelve siempre, se puntúe o no la actividad.
 
-Responde exclusivamente con un objeto JSON con esta forma:
-{"items":[{"label":"1a","aiPoints":0,"aiFeedback":"...","confidence":0.0,"alternativeMethod":false}],"aiLatex":"...","aiSummary":"...","confidence":0.0}`;
+La respuesta debe ajustarse al esquema estructurado indicado por la API.`;
+
+const TRIAGE_SYSTEM = `Clasifica una intervención de foro sin usar contexto externo. Distingue errata, consulta administrativa, texto que no es una duda, duda sencilla y duda difícil. No respondas a la duda. Devuelve solo la salida estructurada.`;
+
+const VERIFY_SYSTEM = `Audita una propuesta de corrección usando únicamente el trabajo transcrito y la propuesta. Comprueba coherencia entre citas, descuentos, puntuaciones, feedback y conclusión. No rehagas la corrección y no supongas criterios que no están presentes. Devuelve solo la salida estructurada.`;
 
 // ── Proveedor ───────────────────────────────────────────────────────────────
 
@@ -140,33 +202,72 @@ export class AnthropicAiProvider implements AiProvider {
   readonly #client: Anthropic;
   readonly #transcriptionModel: string;
   readonly #gradingModel: string;
+  readonly #triageModel: string;
+  readonly #verifyModel: string;
   readonly #maxTokens: number;
+  readonly #systemPrompts: Readonly<Record<string, string>>;
 
   constructor(options: AnthropicAiProviderOptions = {}) {
     this.#client = options.client ?? new Anthropic({ apiKey: options.apiKey });
     this.#transcriptionModel = options.transcriptionModel ?? DEFAULT_TRANSCRIPTION_MODEL;
     this.#gradingModel = options.gradingModel ?? DEFAULT_GRADING_MODEL;
+    this.#triageModel = options.triageModel ?? DEFAULT_TRIAGE_MODEL;
+    this.#verifyModel = options.verifyModel ?? DEFAULT_VERIFY_MODEL;
+    this.#systemPrompts = options.systemPrompts ?? {};
     // El tope configurado manda; `MAX_TOKENS` es sólo el valor por defecto de
     // una instalación que aún no lo ha tocado.
     this.#maxTokens = options.maxTokens && options.maxTokens > 0 ? options.maxTokens : MAX_TOKENS;
   }
 
-  async transcribe(input: TranscribeInput): Promise<TranscribeResult> {
-    const attachments = await Promise.all(input.pages.map((page) => toContentBlock(page)));
+  /**
+   * Bloques de sistema de una operación: primero las instrucciones globales
+   * (`global.system`, si el administrador las ha escrito) y después las
+   * específicas de la operación, que llevan el punto de caché porque son el
+   * final del prefijo estable.
+   */
+  #systemBlocks(key: string, fallback: string): Anthropic.TextBlockParam[] {
+    const blocks: Anthropic.TextBlockParam[] = [];
+    const global = (this.#systemPrompts['global.system'] ?? '').trim();
+    if (global !== '') blocks.push({ type: 'text', text: global });
+    blocks.push({
+      type: 'text',
+      text: this.#systemPrompts[key] ?? fallback,
+      cache_control: { type: 'ephemeral' },
+    });
+    return blocks;
+  }
 
+  async transcribe(input: TranscribeInput): Promise<TranscribeResult> {
+    const attachments = await Promise.all(
+      input.pages.map(async (page): Promise<Anthropic.ContentBlockParam[]> => [
+        {
+          type: 'text',
+          text: `Bloque del original: páginas ${(page.pageNumbers ?? [page.page]).join(', ')}. Conserva esta numeración en la salida.`,
+        },
+        await toContentBlock(page),
+      ]),
+    );
+
+    const model = this.#transcriptionModel;
     // TODO(vega): sin verificar contra la API real — límites de tamaño de
     // petición (32 MB) y de páginas por PDF; un simulacro largo escaneado a
     // 300 ppp puede pasarse y habrá que trocearlo.
-    const response = await this.#client.messages.create(
-      buildParams({
-        model: this.#transcriptionModel,
-        max_tokens: this.#maxTokens,
-        system: [{ type: 'text', text: TRANSCRIPTION_SYSTEM, cache_control: { type: 'ephemeral' } }],
+    const response = await withStopRetry(
+      (maxTokens) =>
+        this.#client.messages.parse({
+        model,
+        max_tokens: maxTokens,
+        ...(supportsExtendedReasoning(model) ? { thinking: { type: 'adaptive' as const } } : {}),
+        output_config: {
+          ...(supportsExtendedReasoning(model) ? { effort: clampEffort(model, 'high') } : {}),
+          format: zodOutputFormat(TranscriptionAnswer),
+        },
+        system: this.#systemBlocks('transcription.system', TRANSCRIPTION_SYSTEM),
         messages: [
           {
             role: 'user',
             content: [
-              ...attachments,
+              ...attachments.flat(),
               {
                 type: 'text',
                 text: `Transcribe las ${input.pages.length} páginas del examen (referencia interna del alumno: ${input.studentRef}).`,
@@ -174,28 +275,36 @@ export class AnthropicAiProvider implements AiProvider {
             ],
           },
         ],
-      }),
+        }, { timeout: LONG_CALL_TIMEOUT_MS }),
+      // Un bloque de 4 páginas densas no cabe en topes pequeños: se garantiza
+      // un mínimo razonable aunque el ajuste de la instalación sea más bajo.
+      Math.max(this.#maxTokens, MAX_TOKENS),
     );
 
-    const answer = TranscriptionAnswer.parse(JSON.parse(extractText(response)));
+    const answer = response.parsed_output;
+    if (answer === null) throw new AiResponseError('invalid_output', 'La transcripción no contiene una salida estructurada.');
 
     const pages: TranscriptionPage[] = answer.pages.map((page) => ({
-      page: page.page,
+      page: Math.max(1, Math.trunc(page.page)),
       latex: page.latex,
-      imageUrl: `/api/scans/${input.submissionId}/${page.page}.svg`,
+      imageUrl: `/api/submissions/${input.submissionId}/original`,
     }));
-    const flags: TranscriptionFlag[] = answer.flags.map((flag) => ({ ...flag }));
+    const flags: TranscriptionFlag[] = answer.flags.map((flag) => ({
+      ...flag,
+      page: Math.max(1, Math.trunc(flag.page)),
+    }));
 
     return {
       pages,
       flags,
-      confidence: answer.confidence,
-      model: this.#transcriptionModel,
-      usage: toUsage(this.#transcriptionModel, response.usage),
+      confidence: clamp01(answer.confidence),
+      model: response.model,
+      usage: toUsage(response.model, response.usage),
     };
   }
 
   async grade(input: GradeInput): Promise<GradeResult> {
+    const originals = await Promise.all(input.document.map((page) => toContentBlock(page)));
     const allocation = input.pointsAllocation
       .map((entry) => `- ${entry.label} (${entry.maxPoints} puntos): ${entry.statement}`)
       .join('\n');
@@ -226,33 +335,58 @@ export class AnthropicAiProvider implements AiProvider {
 
     // El orden importa para el caché: instrucciones fijas → contexto de la actividad
     // (con el punto de caché) → transcripción, que cambia en cada entrega.
-    const response = await this.#client.messages.create(
-      buildParams({
-        model: this.#gradingModel,
-        max_tokens: this.#maxTokens,
-        system: [
-          { type: 'text', text: GRADING_SYSTEM },
-          {
-            type: 'text',
-            text: `Contexto de corrección de esta actividad:\n\n${input.context}\n\n${scoring}`,
-            // TODO(vega): sin verificar contra la API real — hay que comprobar
-            // que `usage.cache_read_input_tokens > 0` a partir de la segunda
-            // entrega de la misma actividad. Por debajo de ~1024 tokens el prefijo no
-            // se cachea y el ahorro no aparece.
-            cache_control: { type: 'ephemeral' },
-          },
-        ],
-        messages: [{ role: 'user', content: [{ type: 'text', text: `${about}${work}` }] }],
-      }),
+    // La clave del prompt la decide `gradePromptKey`, la misma regla que
+    // registra el ledger: problema/tema según la plantilla, sencilla/experta
+    // según la ruta del foro.
+    const system: Anthropic.TextBlockParam[] = [
+      ...this.#systemBlocks(gradePromptKey(input), GRADING_SYSTEM),
+      ...input.context.map((segment) => ({
+        type: 'text' as const,
+        text: `## Contexto · ${segment.level} · ${segment.key}\n\n${segment.content}`,
+        ...(segment.level === 'template' ? { cache_control: { type: 'ephemeral' as const } } : {}),
+      })),
+      ...(input.material.trim() === ''
+        ? []
+        : [{ type: 'text' as const, text: input.material }]),
+      {
+        type: 'text',
+        text: scoring,
+        cache_control: { type: 'ephemeral' },
+      },
+    ];
+
+    const model = input.route === 'standard' ? this.#verifyModel : this.#gradingModel;
+    // `xhigh` exige max_tokens ≥ 64k; si el modelo no lo admite se corrige con
+    // `high`, que sigue siendo razonamiento extendido.
+    const effort = clampEffort(model, 'xhigh');
+    const response = await withStopRetry(
+      (maxTokens) =>
+        this.#client.messages.parse({
+        model,
+        max_tokens: maxTokens,
+        ...(supportsExtendedReasoning(model) ? { thinking: { type: 'adaptive' as const } } : {}),
+        output_config: {
+          ...(supportsExtendedReasoning(model) ? { effort } : {}),
+          format: zodOutputFormat(GradingAnswer),
+        },
+        system,
+        messages: [{ role: 'user', content: [...originals, { type: 'text', text: `${about}AI_TEACHER_NOTES=${input.explanations === false ? 'false' : 'true'}\n\n${work}` }] }],
+        }, { timeout: LONG_CALL_TIMEOUT_MS }),
+      Math.max(this.#maxTokens, 32_000, minTokensFor(effort)),
     );
 
-    const answer = GradingAnswer.parse(JSON.parse(extractText(response)));
+    const answer = response.parsed_output;
+    if (answer === null) throw new AiResponseError('invalid_output', 'La corrección no contiene una salida estructurada.');
 
     // El máximo de cada apartado lo pone el profesor, no el modelo: lo
     // recuperamos del reparto en lugar de fiarnos de lo que devuelva la IA.
     const maxByLabel = new Map(input.pointsAllocation.map((entry) => [entry.label, entry.maxPoints]));
     const items: GradedItem[] = answer.items.map((item) => ({
       ...item,
+      aiPoints: Math.max(0, item.aiPoints),
+      aiQuotePage:
+        item.aiQuotePage === null ? null : Math.max(1, Math.trunc(item.aiQuotePage)),
+      confidence: clamp01(item.confidence),
       maxPoints: maxByLabel.get(item.label) ?? 0,
     }));
 
@@ -260,16 +394,77 @@ export class AnthropicAiProvider implements AiProvider {
       items,
       aiLatex: answer.aiLatex,
       aiSummary: answer.aiSummary,
-      confidence: answer.confidence,
-      model: this.#gradingModel,
-      usage: toUsage(this.#gradingModel, response.usage),
+      teacherNotes: input.explanations === false ? null : answer.teacherNotes,
+      confidence: clamp01(answer.confidence),
+      model: response.model,
+      usage: toUsage(response.model, response.usage),
+      escalate: answer.escalate,
+      noEsDuda: answer.noEsDuda,
+    };
+  }
+
+  async triage(input: TriageInput): Promise<TriageResult> {
+    // Sin `thinking` ni `effort` a propósito: el modelo de triaje por defecto
+    // es Haiku 4.5, de una generación que responde 400 a ambos parámetros.
+    const response = await withStopRetry(
+      (maxTokens) => this.#client.messages.parse({
+        model: this.#triageModel,
+        max_tokens: maxTokens,
+        output_config: { format: zodOutputFormat(TriageAnswer) },
+        system: this.#systemBlocks('triage.system', TRIAGE_SYSTEM),
+        messages: [{
+          role: 'user',
+          content: `Hilo previo:\n${input.thread.join('\n---\n') || '(vacío)'}\n\nMensaje nuevo:\n${input.message}`,
+        }],
+      }),
+      1_000,
+    );
+    const answer = response.parsed_output;
+    if (answer === null) throw new AiResponseError('invalid_output', 'El triaje no contiene una salida estructurada.');
+    return {
+      ...answer,
+      confidence: clamp01(answer.confidence),
+      model: response.model,
+      usage: toUsage(response.model, response.usage),
+    };
+  }
+
+  async verify(input: VerifyInput): Promise<VerifyResult> {
+    const transcript = input.transcription?.pages
+      .map((page) => `Página ${page.page}:\n${page.latex}`)
+      .join('\n\n') ?? '(sin transcripción; intervención de foro)';
+    const model = this.#verifyModel;
+    const response = await withStopRetry(
+      (maxTokens) => this.#client.messages.parse({
+        model,
+        max_tokens: maxTokens,
+        ...(supportsExtendedReasoning(model) ? { thinking: { type: 'adaptive' as const } } : {}),
+        output_config: {
+          ...(supportsExtendedReasoning(model) ? { effort: clampEffort(model, 'high') } : {}),
+          format: zodOutputFormat(VerificationAnswer),
+        },
+        system: this.#systemBlocks('verify.system', VERIFY_SYSTEM),
+        messages: [{
+          role: 'user',
+          content: `Trabajo:\n${transcript}\n\nApartados propuestos:\n${JSON.stringify(input.items)}\n\nResumen:\n${input.aiSummary}\n\nDocumento de corrección:\n${input.aiLatex}`,
+        }],
+      }),
+      Math.min(this.#maxTokens, 8_000),
+    );
+    const answer = response.parsed_output;
+    if (answer === null) throw new AiResponseError('invalid_output', 'La verificación no contiene una salida estructurada.');
+    return {
+      ...answer,
+      confidence: clamp01(answer.confidence),
+      model: response.model,
+      usage: toUsage(response.model, response.usage),
     };
   }
 
   /**
    * Prueba mínima de conexión: un mensaje de coste ínfimo que valida clave y
-   * modelo. NO usa `buildParams` a propósito —ni thinking ni effort— porque aquí
-   * sólo se comprueba que la tubería responde, no se corrige nada. Nunca lanza:
+   * modelo. No activa thinking ni effort porque aquí sólo se comprueba que la
+   * tubería responde, no se corrige nada. Nunca lanza:
    * un fallo de credencial se devuelve como `ok: false` con un mensaje accionable.
    */
   async verifyConnection(): Promise<VerifyConnectionResult> {
@@ -298,22 +493,52 @@ export class AnthropicAiProvider implements AiProvider {
 
 // ── Utilidades ──────────────────────────────────────────────────────────────
 
+export type AiResponseErrorCode = 'refusal' | 'max_tokens' | 'invalid_output';
+
+export class AiResponseError extends Error {
+  constructor(readonly code: AiResponseErrorCode, message: string) {
+    super(message);
+    this.name = 'AiResponseError';
+  }
+}
+
 /**
- * `thinking: {type:"adaptive"}` y `output_config.effort` son parámetros más
- * nuevos que los tipos del SDK fijado en el package.json. Los añadimos en un
- * único punto, en vez de repartir conversiones de tipo por todo el fichero.
+ * Reintenta UNA vez, y sólo cuando la respuesta se cortó por `max_tokens`.
  *
- * TODO(vega): sin verificar contra la API real — al subir el SDK habrá que
- * quitar esta función y pasar los parámetros directamente.
+ * Un `refusal` no se reintenta jamás: repetir la misma petición tras un
+ * rechazo no cambia el resultado y va contra la guía de uso de la API. Se
+ * lanza directamente para que el ledger lo registre y el profesor lo vea.
  */
-function buildParams(
-  base: Anthropic.MessageCreateParamsNonStreaming,
-): Anthropic.MessageCreateParamsNonStreaming {
-  const extra: Record<string, unknown> = {
-    thinking: { type: 'adaptive' },
-    output_config: { effort: 'high' },
-  };
-  return { ...base, ...extra } as Anthropic.MessageCreateParamsNonStreaming;
+async function withStopRetry<T extends Anthropic.Message>(
+  request: (maxTokens: number) => Promise<T>,
+  initialMaxTokens: number,
+): Promise<T> {
+  let maxTokens = initialMaxTokens;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const response = await request(maxTokens);
+    if (response.stop_reason === 'refusal') {
+      throw new AiResponseError(
+        'refusal',
+        'El modelo ha rechazado esta petición. No se reintenta: revisa el contenido de la entrega y los prompts.',
+      );
+    }
+    if (response.stop_reason !== 'max_tokens') {
+      return response;
+    }
+    if (attempt === 0) {
+      maxTokens = Math.min(Math.max(maxTokens * 2, 32_000), 128_000);
+      continue;
+    }
+    throw new AiResponseError(
+      'max_tokens',
+      'El modelo ha agotado el límite de salida después de un reintento controlado.',
+    );
+  }
+  throw new AiResponseError('invalid_output', 'La llamada no ha producido una respuesta.');
+}
+
+function clamp01(value: number): number {
+  return Math.max(0, Math.min(1, value));
 }
 
 /** Lee la página del disco si hace falta y la envuelve en el bloque adecuado. */
@@ -335,25 +560,6 @@ async function toContentBlock(page: PageSource): Promise<Anthropic.ContentBlockP
 }
 
 /**
- * Concatena los bloques de texto de la respuesta. Se comprueba antes
- * `stop_reason`: en `refusal` el contenido puede venir vacío y leerlo a ciegas
- * revienta con un error que no dice nada.
- */
-function extractText(response: Anthropic.Message): string {
-  if (response.stop_reason === 'refusal') {
-    throw new Error('El modelo ha rechazado la petición; revisa el contenido de la entrega.');
-  }
-  const text = response.content
-    .filter((block): block is Anthropic.TextBlock => block.type === 'text')
-    .map((block) => block.text)
-    .join('');
-  if (text.trim() === '') {
-    throw new Error('La respuesta del modelo no contiene texto.');
-  }
-  return text;
-}
-
-/**
  * `input_tokens` sólo cuenta lo que NO venía de caché; los tokens leídos de
  * caché van en su propio campo y se facturan a ~0,1×. Sumarlos aquí inflaría el
  * coste, así que se guardan por separado.
@@ -366,6 +572,7 @@ function toUsage(model: string, usage: Anthropic.Usage) {
     inputTokens: usage.input_tokens,
     outputTokens: usage.output_tokens,
     cachedInputTokens: usage.cache_read_input_tokens ?? 0,
+    cacheCreationTokens: usage.cache_creation_input_tokens ?? 0,
   };
   return { ...tokens, costCents: estimateCostCents(model, tokens) };
 }

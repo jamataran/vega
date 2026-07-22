@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { type HealthResponse, routes } from '@vega/shared';
 import type { AppContext } from '../context.js';
+import { getSettings } from '../settings/service.js';
 
 export async function healthRoutes(app: FastifyInstance, ctx: AppContext): Promise<void> {
   // Pública a propósito: la usa el proxy inverso y el HEALTHCHECK de Docker.
@@ -15,12 +16,16 @@ export async function healthRoutes(app: FastifyInstance, ctx: AppContext): Promi
       database = 'down';
     }
 
+    const settings = database === 'up' ? await getSettings(ctx).catch(() => null) : null;
     const body: HealthResponse = {
       status: database === 'up' ? 'ok' : 'degraded',
       version: ctx.config.version,
       database,
-      aiProvider: ctx.config.AI_PROVIDER,
-      lmsConnector: ctx.config.LMS_CONNECTOR,
+      aiProvider: settings?.anthropic.provider ?? ctx.config.AI_PROVIDER,
+      aiTransport: settings?.ai.transport ?? 'sync',
+      readingModel: settings?.anthropic.readingModel ?? ctx.config.AI_MODEL_TRANSCRIPTION,
+      gradingModel: settings?.anthropic.gradingModel ?? ctx.config.AI_MODEL_GRADING,
+      lmsConnector: settings?.moodle.connector ?? ctx.config.LMS_CONNECTOR,
       uptimeSeconds: Math.round((Date.now() - ctx.startedAt) / 1000),
     };
 

@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import {
   ActivityFileContentResponse,
+  AiCallListResponse,
+  AiCallResponse,
   ActivityFileListResponse,
   ActivityFileResponse,
   ActivityListResponse,
@@ -22,12 +24,13 @@ import {
   AnthropicConnectionResponse,
   MoodleConnectionResponse,
   OverviewResponse,
+  PromptListResponse,
+  PromptResponse,
   QueueCounts,
   QueueResponse,
   ResolvedContextResponse,
   SettingsResponse,
   SubmissionDetail,
-  SubmissionResponse,
   TriggerBatchResponse,
   UserListResponse,
   UserResponse,
@@ -48,11 +51,16 @@ import type {
   AppendActivityFileChunkRequest,
   BeginActivityFileUploadRequest,
   UpdateMoodleTokenRequest,
+  UpdatePromptRequest,
   UpdateSettingsRequest,
   UpdateUserRequest,
+  AiCallQuery,
+  ParkSubmissionRequest,
+  ReprocessSubmissionRequest,
 } from '@vega/shared';
 
 const TOKEN_KEY = 'vega.token';
+const QueuedResponse = z.object({ queued: z.boolean() });
 
 /** El contrato no exporta el tipo del código de error por separado; lo derivamos. */
 export type ApiErrorCode = ApiError['error']['code'];
@@ -271,6 +279,16 @@ export async function downloadFile(path: string, fallbackName: string): Promise<
   URL.revokeObjectURL(url);
 }
 
+async function fetchBlob(path: string, signal?: AbortSignal): Promise<Blob> {
+  const response = await fetch(path, { headers: authHeaders(), signal });
+  if (response.status === 401) handleUnauthorized(path);
+  if (!response.ok) {
+    const raw: unknown = await response.json().catch(() => null);
+    throw toClientError(response.status, raw);
+  }
+  return response.blob();
+}
+
 // ── Parámetros de la cola ───────────────────────────────────────────────────
 
 /** Alias de tipo (no interfaz) para que sea asignable a `Record<string, QueryValue>`. */
@@ -309,6 +327,8 @@ export const api = {
   submission: (id: string, signal?: AbortSignal) =>
     request(routes.submission(id), { schema: SubmissionDetail, signal }),
 
+  original: (id: string, signal?: AbortSignal) => fetchBlob(routes.original(id), signal),
+
   saveCorrection: (id: string, body: SaveCorrectionRequest) =>
     request(routes.saveCorrection(id), { schema: CorrectionResponse, method: 'PATCH', body }),
 
@@ -319,8 +339,11 @@ export const api = {
   publish: (id: string) =>
     request(routes.publish(id), { schema: CorrectionResponse, method: 'POST' }),
 
-  reprocess: (id: string) =>
-    request(routes.reprocess(id), { schema: SubmissionResponse, method: 'POST' }),
+  reprocess: (id: string, body: ReprocessSubmissionRequest) =>
+    request(routes.reprocess(id), { schema: QueuedResponse, method: 'POST', body }),
+
+  park: (id: string, body: ParkSubmissionRequest) =>
+    request(routes.park(id), { schema: QueuedResponse, method: 'POST', body }),
 
   downloadFeedback: (id: string, fallbackName: string) =>
     downloadFile(routes.feedbackFile(id), fallbackName),
@@ -423,6 +446,27 @@ export const api = {
 
   resolvedContext: (activityId: string, signal?: AbortSignal) =>
     request(routes.resolvedContext(activityId), { schema: ResolvedContextResponse, signal }),
+
+  // ── Prompts del sistema (administración) ────────────────────────────────
+
+  prompts: (signal?: AbortSignal) =>
+    request(routes.prompts, { schema: PromptListResponse, signal }),
+
+  updatePrompt: (key: string, body: UpdatePromptRequest) =>
+    request(routes.prompt(key), { schema: PromptResponse, method: 'PUT', body }),
+
+  restorePrompt: (key: string, expectedVersion: number) =>
+    request(routes.restorePrompt(key), {
+      schema: PromptResponse,
+      method: 'POST',
+      body: { expectedVersion },
+    }),
+
+  aiCalls: (params: Partial<AiCallQuery>, signal?: AbortSignal) =>
+    request(routes.aiCalls, { schema: AiCallListResponse, query: params, signal }),
+
+  aiCall: (id: string, signal?: AbortSignal) =>
+    request(routes.aiCall(id), { schema: AiCallResponse, signal }),
 
   // ── Usuarios ──────────────────────────────────────────────────────────────
 

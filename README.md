@@ -77,14 +77,15 @@ review forever.
 
 ## Any subject, not just maths
 
-Vega has no subject baked in. What the AI knows about your course lives entirely in Markdown files
-you write — **the prompts are the personalisation**, and they layer in three levels:
+Vega has no subject baked in. What the AI knows about your course lives in **grading contexts**
+you write — **the contexts are the personalisation** — layered from general to specific: global →
+activity kind → template → course → activity. The `contexts/` folder only seeds a fresh install;
+after that the database rules and everything is edited in the app (Contexts screen), versioned,
+with the effective combination always visible before it is sent.
 
-```
-contexts/global.md                     department-wide policy: tone, rounding, how strict to be
-contexts/activity-kinds/<kind>.md      what matters in this format of work
-contexts/activities/<slug>.md          this specific assignment or forum
-```
+The engine's own operating instructions (how to transcribe, grade, triage, verify) are a separate
+thing: **prompts**, also stored versioned in the database and editable from the admin Prompts
+screen. Step-by-step setup guide (Spanish): [`docs/configuracion.md`](docs/configuracion.md).
 
 More specific layers add to and qualify the general ones; they never erase them. So a maths
 department writes rules about method marks and algebraic rigour, while a Spanish literature
@@ -100,7 +101,7 @@ the OCR path.
 
 ## The AI engine
 
-The design in [`docs/motor-ia.md`](docs/motor-ia.md) is built around one claim, and it is worth
+The design in [`docs/motor-ia.md`](docs/analisis/motor-ia.md) is built around one claim, and it is worth
 stating plainly because everything else follows from it:
 
 > **A language model will sometimes be wrong. The point is not to pretend otherwise — it is to make
@@ -134,7 +135,7 @@ was skipped, autonomous publishing is vetoed in code, not in a comment.
 
 ## Writing contexts: what actually changes the output
 
-The prompts *are* the product configuration, so this section is the closest thing Vega has to a
+The contexts *are* the product configuration, so this section is the closest thing Vega has to a
 manual. Full guidance lives in [`contexts/README.md`](contexts/README.md); the shape of each layer
 is in [`docs/motor-ia.md`](docs/motor-ia.md).
 
@@ -245,8 +246,8 @@ The API creates an initial admin on first boot **only when the database has no u
 boot until you do. Everyone else is created from the Users screen.
 
 **A fresh install starts empty**: no courses, no activities, no submissions. Nothing is ever seeded
-automatically beyond the grading contexts from `contexts/`, which are configuration rather than
-sample data. To get demo content while working on the UI without a Moodle in front of you:
+automatically beyond the grading contexts from `contexts/` and the engine prompts embedded in the
+code, which are configuration rather than sample data. To get demo content while working on the UI without a Moodle in front of you:
 
 ```bash
 pnpm db:demo                    # WIPES the database, then loads sample data

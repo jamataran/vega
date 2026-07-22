@@ -228,6 +228,7 @@ erDiagram
     timestamptz finished_at "nullable"
     text status "running | done | failed"
     uuid triggered_by FK "nullable · NULL si fue el planificador"
+    text_array kinds "tipos barridos · el planificador corre por tipo"
     integer submissions_processed
     integer submissions_failed
     integer submissions_auto_published
@@ -385,28 +386,26 @@ hay arista de `transcribing` a `grading`.
 | `pending` | `transcribing` | El lote toma una entrega de actividad `assignment` | `status`, `updated_at` |
 | `pending` | `grading` | El lote toma una entrega de actividad `forum` | `status`, `updated_at` |
 | `transcribing` / `grading` | `graded` | `gradeSubmission()` termina y la autonomía decide `review` | `INSERT corrections` (+ `correction_items` si se puntúa), `INSERT transcriptions` si hubo fichero, `usage` |
-| `transcribing` / `grading` | `published` | Ídem, pero la autonomía decide `publish` | Lo anterior más `published_at` y `published_automatically = true`. **Sin `validated_at`** |
+| `transcribing` / `grading` | `parked` | El triaje confirma con ≥ 0,9 que no requiere respuesta | Etiqueta, confianza y motivo; no crea corrección |
 | `graded` | `graded` | `PATCH /api/submissions/{id}/correction` | `teacher_points`, `teacher_feedback`, `teacher_summary`, `teacher_latex`. **No** toca `validated_*` |
 | `graded` | `validated` | `POST /api/submissions/{id}/validate` | Guarda los cambios pendientes + `validated_by`, `validated_at` |
 | `validated` | `published` | `POST /api/submissions/{id}/publish` con éxito en el conector | `published_at`, `grade_published_at`, `feedback_file_published_at` si procede, `published_automatically = false` |
 | `validated` / `error` | `error` | Falla `publishGrade`: no ha llegado nada al alumno | `error_message`. Se reintenta sin volver a validar |
 | cualquiera | `error` | Excepción no recuperable en el paso en curso | `error_message` con texto legible en español |
-| cualquiera salvo `published` | `pending` | `POST /api/submissions/{id}/reprocess` | Limpia `error_message`. El siguiente lote la recoge y **sustituye** transcripción y corrección |
+| cualquiera salvo `published` | `pending` / `grading` | `POST /api/submissions/{id}/reprocess` | `full` repite todo; `grade_only` conserva la doble lectura |
 
 ### Invariantes de estado
 
 1. `status = 'graded'` implica que existe fila en `corrections`. Con al menos un `correction_item`
    **sólo si la actividad se puntúa**: en una no puntuable la corrección es únicamente `ai_latex`.
 2. `status = 'validated'` implica `corrections.validated_at IS NOT NULL` y `validated_by IS NOT NULL`.
-3. `status = 'published'` implica `published_at IS NOT NULL`. **No implica `validated_at`**: una
-   publicación autónoma se salta la validación y se distingue por
-   `published_automatically = true`. Por la ruta manual (`POST .../publish`) la validación previa
-   sigue siendo obligatoria y se comprueba en el API.
+3. `status = 'published'` implica `published_at IS NOT NULL` y una publicación explícita posterior
+   al motor. El procesamiento IA termina siempre en `graded` o `parked`.
 4. `status = 'error'` implica `error_message IS NOT NULL`.
 5. `published` es terminal. No se puede editar la corrección, ni validar, ni reprocesar; las tres
    rutas devuelven 409. Republicar exige reabrir explícitamente, y eso no está resuelto — ver
    preguntas abiertas de `HU-17`.
-6. `REVIEWABLE_STATUSES = ['graded', 'validated', 'error']` es lo que la cola muestra por defecto.
+6. `REVIEWABLE_STATUSES = ['graded', 'parked', 'validated', 'error']` es lo que la cola muestra por defecto.
    `pending`, `transcribing`, `transcribed` y `grading` son estados de máquina: se ven filtrando
    explícitamente, no en la bandeja de trabajo del profesor.
 7. `transcriptions` sólo tiene filas de entregas de actividades `assignment`. En un foro,
@@ -426,10 +425,13 @@ El SQL usa `snake_case`; el contrato HTTP, `camelCase`. La capa de acceso a dato
 | `activity_files` | `ActivityFile` | `storage_path` sigue siempre a `null` (los ficheros de contexto binarios no tienen almacén) y no se expone; en su lugar la API calcula `url`. `content` tampoco: se resume en `hasContent` (`content IS NOT NULL`) y se lee aparte con `GET .../content` |
 | `students` | `Student` | Sale **entera** hacia el profesor. Lo que llega al modelo es otra cosa: el recorte de `studentContextFor()`, que deja fuera correo, teléfono, NIF y domicilio |
 | `submissions` | `Submission` | `remote_id`, `storage_path`, `media_type`, `size_bytes` y `student_id` **no se exponen**: son fontanería. La ficha del alumno se sirve aparte en `SubmissionDetail.student` |
-| `transcriptions` | `Transcription` | `pages` y `flags` son jsonb ↔ `TranscriptionPage[]` / `TranscriptionFlag[]` |
+| `transcriptions` | `Transcription` | `pages`, `flags`, `discrepancies` y `pass_count = 2` conservan la doble lectura consolidada |
 | `corrections` | `Correction` | Las cuatro columnas de consumo se agrupan en `usage: UsageMetrics`; los apartados llegan en `items`. De las tres columnas de publicación sólo sale `publish_notice`: las dos fechas parciales son internas |
 | `correction_items` | `CorrectionItem` | Se sirven ordenados por `position` |
-| `grading_contexts` | `GradingContext` | |
+| `grading_contexts` + `grading_context_versions` | `GradingContext` | Identidad y versiones inmutables; sólo se lee `active_version` |
+| `prompts` | `Prompt` | Historial por clave con una sola versión activa |
+| `ai_batches` | — | Estado durable de cada fase del transporte por lotes |
+| `ai_calls` | `AiCall` | Ledger por intento: modelo, prompt, contexto, petición saneada, respuesta, uso y coste |
 | `batch_runs` | `BatchRun` | Mismo agrupamiento de `usage` |
 | `app_settings` | `AppSettings` | **No es 1:1**: la tabla es clave/valor plana y el DTO va anidado (`anthropic.apiKey` ↔ `{ anthropic: { … } }`). Los valores con `is_secret` se sustituyen por un booleano `…Configured` |
 

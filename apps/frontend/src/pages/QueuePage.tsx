@@ -25,6 +25,7 @@ import { QueueRow, QueueRowSkeleton } from '@/components/queue/QueueRow';
 /** Lo que reclama al profesor va primero; el resto sigue el orden del ciclo de vida. */
 const TAB_ORDER: readonly SubmissionStatus[] = [
   'graded',
+  'parked',
   'error',
   'validated',
   'pending',
@@ -38,6 +39,10 @@ const EMPTY_COPY: Record<SubmissionStatus, { title: string; description: string 
   graded: {
     title: 'Nada por revisar',
     description: 'Cuando termine el próximo proceso, las propuestas de feedback aparecerán aquí.',
+  },
+  parked: {
+    title: 'Nada aparcado',
+    description: 'Las entregas omitidas o clasificadas para revisión posterior aparecerán aquí.',
   },
   error: {
     title: 'Ninguna entrega ha fallado',

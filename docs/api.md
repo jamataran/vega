@@ -687,11 +687,8 @@ se corrige aunque Moodle no responda.
 `running`. Sin ese cerrojo, dos disparos seguidos corrigen las mismas entregas dos veces y **pagan
 dos veces**.
 
-> **Sigue sin ser asíncrono, aunque el nombre lo sugiera.** La ruta **espera a que el proceso
-> termine** y devuelve el `BatchRun` ya cerrado; no hay 202. Con `AI_PROVIDER=mock` es tolerable;
-> con llamadas reales una petición puede quedarse colgada varios minutos y morir en el proxy
-> inverso. Es el hueco de orquestación que queda antes del motor (HU-09 RN-8); hay un diseño
-> propuesto en [`revision/h2-preparacion-motor-ia.md`](revision/h2-preparacion-motor-ia.md) §4.5.
+La ruta responde **202** con el `BatchRun` abierto y el trabajo continúa en segundo plano. Las
+llamadas quedan trazadas por intento en `ai_calls`.
 
 ---
 
@@ -711,7 +708,9 @@ dos veces**.
 | `saveCorrection` | PATCH | `/api/submissions/{id}/correction` | Profesor · por curso | `SaveCorrectionRequest` | `CorrectionResponse` |
 | `validate` | POST | `/api/submissions/{id}/validate` | Profesor · por curso | `SaveCorrectionRequest` | `CorrectionResponse` |
 | `publish` | POST | `/api/submissions/{id}/publish` | Profesor · por curso | — | `CorrectionResponse` |
-| `reprocess` | POST | `/api/submissions/{id}/reprocess` | Profesor · por curso | — | `CorrectionResponse` |
+| `reprocess` | POST | `/api/submissions/{id}/reprocess` | Profesor · por curso | `ReprocessSubmissionRequest` | `{ queued }` |
+| `park` | POST | `/api/submissions/{id}/park` | Profesor · por curso | `ParkSubmissionRequest` | `{ queued: false }` |
+| `original` | GET | `/api/submissions/{id}/original` | Profesor · por curso | — | Fichero original con su MIME real |
 | `activities` | GET | `/api/activities` | Profesor · por curso | — | `ActivityListResponse` |
 | `discoverCourses` | GET | `/api/courses/discover` | Autenticado | — | `DiscoverCoursesResponse` |
 | `discoverActivities` | GET | `/api/activities/discover` | Autenticado | `DiscoverActivitiesQuery` (query) | `DiscoverActivitiesResponse` |
@@ -725,8 +724,8 @@ dos veces**.
 | `activityFileContent` | GET | `/api/activities/{id}/files/{fileId}/content` | Profesor · por curso | — | `ActivityFileContentResponse` |
 | `activityFile` | GET | `/api/activities/{id}/files/{fileId}` | Profesor · por curso | — | `text/plain` |
 | `activityFile` | DELETE | `/api/activities/{id}/files/{fileId}` | Profesor · por curso | — | 204 |
-| `contexts` | GET | `/api/contexts` | Profesor · **sin acotar** | — | `ContextListResponse` |
-| `context` | PUT | `/api/contexts/{level}/{key}` | Profesor · **sin acotar** | `UpdateContextRequest` | `ContextResponse` |
+| `contexts` | GET | `/api/contexts` | Profesor · por nivel/curso | — | `ContextListResponse` |
+| `context` | PUT | `/api/contexts/{level}/{key}` | Profesor · por nivel/curso | `UpdateContextRequest` | `ContextResponse` |
 | `resolvedContext` | GET | `/api/contexts/resolved/{activityId}` | Profesor · por curso | — | `ResolvedContextResponse` |
 | `users` | GET | `/api/users` | Admin | — | `UserListResponse` |
 | `users` | POST | `/api/users` | Admin | `CreateUserRequest` | `UserResponse` (201) |
@@ -739,9 +738,13 @@ dos veces**.
 | `costBreakdown` | GET | `/api/stats/cost` | Profesor · por curso | *query* | `CostBreakdownResponse` |
 | `batchRuns` | GET | `/api/batch/runs` | Profesor | — | `BatchRunListResponse` |
 | `triggerBatch` | POST | `/api/batch/run` | **Administrador** | — | `TriggerBatchResponse` |
+| `prompts` | GET | `/api/prompts` | Admin | — | `PromptListResponse` |
+| `prompt` | PUT | `/api/prompts/{key}` | Admin | `UpdatePromptRequest` | `PromptResponse` |
+| `aiCalls` | GET | `/api/ai-calls` | Admin | `AiCallQuery` | `AiCallListResponse` |
+| `aiCall` | GET | `/api/ai-calls/{id}` | Admin | — | `AiCallResponse` |
 
-Fuera del objeto `routes`, hay una ruta más que el contrato no declara: `GET /api/scans/{id}/{page}.svg`,
-que genera al vuelo las páginas escaneadas de demostración.
+El original real se sirve por `GET /api/submissions/{id}/original`, con autenticación y alcance por
+curso. La interfaz lo descarga con `Authorization` y renderiza sus páginas con pdf.js.
 
 ## Huecos del contrato
 
@@ -754,12 +757,8 @@ la necesita; no se implementa ninguna sin ampliar antes el contrato.
 | No hay **`GET /api/courses`** que lea la tabla | Los cursos sólo se enumeran preguntando a Moodle. Sin conexión no hay lista de cursos | `HU-19` |
 | El **borrado de usuario** no existe | Falta decidir borrado real vs. desactivación | `HU-02` |
 | No hay **`GET` de un contexto suelto** ni validación de la `key` | Se puede crear un contexto de nivel `activity` para un `slug` que no existe | `HU-06` |
-| **El alcance por curso no llega a los contextos** | Cualquier profesor lee y reescribe el contexto de nivel `activity` de un curso que no imparte, y con él el criterio de corrección de alumnos que no son suyos | `HU-06`, ADR 0010 |
-| **`reprocess`** no tiene esquema de petición | No se puede elegir el alcance (OCR completo vs. sólo corrección) | `HU-11` |
 | No existe endpoint para **editar la transcripción** | El profesor no puede arreglar un `[ILEGIBLE]` y recorregir con su lectura | `HU-11` |
 | No hay **cierre de sesión** ni refresh token | La sesión muere con el JWT; sin revocación en servidor | `HU-01` |
-| El **umbral de confianza** y el destinatario del resumen nocturno no son ajustes | Siguen siendo constantes en el código | `HU-03` |
+| El destinatario del resumen nocturno no es un ajuste | Falta decidir destinatarios por instalación | `HU-03` |
 | No hay **validación en bloque** | Validar 20 entregas de alta confianza exige 20 llamadas | `HU-16` |
-| `scanUrls` e `imageUrl` son `string` sin política de acceso definida | Hay que decidir si son URLs firmadas, rutas protegidas por JWT o públicas por oscuridad | `HU-15` |
-| Nada en el contrato dice que el sistema está en **modo simulado** | El panel no puede distinguir un cero real de un cero de `mock` | `HU-18` |
 | No hay **exportación CSV** de métricas | Prevista en la hoja de ruta | `HU-18` |

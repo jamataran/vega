@@ -1,4 +1,4 @@
-import { AUTONOMY_MODE_LABEL, hasStudentFile } from '@vega/shared';
+import { AUTONOMY_MODE_LABEL, hasStudentFile, LOW_CONFIDENCE_THRESHOLD } from '@vega/shared';
 import type {
   ActivityKind,
   AutonomyMode,
@@ -7,10 +7,12 @@ import type {
   TranscriptionFlag,
   TranscriptionPage,
   UsageMetrics,
+  CorrectionVerification,
 } from '@vega/shared';
 import { resolveContext } from '../context/resolve.js';
 import type { ResolveContextInput } from '../context/resolve.js';
 import type { AiProvider, GradedItem, PageSource, StudentContext } from '../ai/provider.js';
+import { consolidateTranscriptions, normalizeCanonical, sumUsage } from './verification.js';
 
 /**
  * Motor de corrección: transcribir → resolver contexto → corregir → devolver un
@@ -28,7 +30,7 @@ import type { AiProvider, GradedItem, PageSource, StudentContext } from '../ai/p
 export const POINT_STEP = 0.25;
 
 /** Por debajo de aquí, la UI señala el apartado. Coincide con `Transcription.confidence`. */
-export const LOW_CONFIDENCE_THRESHOLD = 0.75;
+export { LOW_CONFIDENCE_THRESHOLD } from '@vega/shared';
 
 /** Peso de la transcripción en la confianza global. */
 const TRANSCRIPTION_WEIGHT = 0.4;
@@ -49,6 +51,14 @@ export type ReviewReason =
   | 'missing_item'
   /** El reparto de puntos de la actividad no suma la nota máxima. */
   | 'allocation_mismatch'
+  /** Se han descontado puntos sin una cita comprobable. */
+  | 'missing_quote'
+  /** La cita no aparece en la página indicada de la lectura consolidada. */
+  | 'fabricated_quote'
+  /** El texto anuncia un descuento que no cuadra con los puntos. */
+  | 'score_feedback_mismatch'
+  /** El segundo modelo detecta una incoherencia que debe mirar el profesor. */
+  | 'ai_verification'
   /**
    * El modo de autonomía dejaría publicar esto sin que lo viera nadie, pero la
    * confianza global no da para tanto. Es el aviso que evita que el modo
@@ -71,6 +81,8 @@ export interface NormalizedItem {
   readonly maxPoints: number;
   readonly aiPoints: number;
   readonly aiFeedback: string;
+  readonly aiQuote: string | null;
+  readonly aiQuotePage: number | null;
   readonly confidence: number;
   readonly alternativeMethod: boolean;
   readonly position: number;
@@ -83,6 +95,15 @@ export interface GradeSubmissionInput {
   readonly activityKind: ActivityKind;
   /** Páginas escaneadas. Se ignoran si la actividad no trae fichero del alumno. */
   readonly pages: readonly PageSource[];
+  /** Lectura ya pagada para un reproceso `grade_only`. */
+  readonly existingTranscription?: {
+    readonly pages: readonly TranscriptionPage[];
+    readonly flags: readonly TranscriptionFlag[];
+    readonly discrepancies: readonly import('@vega/shared').TranscriptionDiscrepancy[];
+    readonly passCount: number;
+    readonly confidence: number;
+    readonly model: string;
+  } | null;
   /** Texto de la entrega cuando no hay fichero (mensajes del foro). */
   readonly textContent?: string | null;
   readonly context: ResolveContextInput;
@@ -99,8 +120,16 @@ export interface GradeSubmissionInput {
   readonly graded: boolean;
   /** Nota máxima. `null` cuando la actividad no se puntúa. */
   readonly maxScore: number | null;
+  /** Plantilla de la actividad: decide el prompt de corrección (problema/tema). */
+  readonly templateKey?: string | null;
   /** Cuánta autonomía tiene Vega sobre la actividad. Por defecto, revisarlo todo. */
   readonly autonomy?: AutonomyMode;
+  /** Apaga sólo la llamada con tokens; la verificación mecánica siempre corre. */
+  readonly verifyWithAi?: boolean;
+  /** Umbral operativo; el valor compartido se usa sólo como reserva. */
+  readonly lowConfidenceThreshold?: number;
+  readonly forumRoute?: 'standard' | 'expert';
+  readonly explanations?: boolean;
 }
 
 export interface GradeSubmissionResult {
@@ -108,6 +137,8 @@ export interface GradeSubmissionResult {
   readonly transcription: {
     readonly pages: readonly TranscriptionPage[];
     readonly flags: readonly TranscriptionFlag[];
+    readonly discrepancies: readonly import('@vega/shared').TranscriptionDiscrepancy[];
+    readonly passCount: 2;
     readonly confidence: number;
     readonly model: string;
   } | null;
@@ -117,9 +148,13 @@ export interface GradeSubmissionResult {
     /** La corrección redactada en LaTeX. Siempre viene, se puntúe o no. */
     readonly aiLatex: string;
     readonly aiSummary: string;
+    readonly teacherNotes: string | null;
     readonly confidence: number;
     readonly model: string;
     readonly maxScore: number | null;
+    readonly verification: CorrectionVerification;
+    readonly escalate: boolean;
+    readonly noEsDuda: boolean;
   };
   /**
    * Nota propuesta, ya normalizada y acotada a la nota máxima. `null` cuando la
@@ -137,14 +172,36 @@ export interface GradeSubmissionResult {
 export async function gradeSubmission(input: GradeSubmissionInput): Promise<GradeSubmissionResult> {
   // Sólo las actividades con fichero del alumno pasan por OCR. En un foro no
   // hay nada que transcribir: se corrige directamente sobre el texto.
-  const transcription = hasStudentFile(input.activityKind)
-    ? await input.provider.transcribe({
+  const transcriptionInput = {
         submissionId: input.submissionId,
         studentRef: input.studentRef,
         activityKind: input.activityKind,
         pages: [...input.pages],
-      })
-    : null;
+      };
+  let transcription: ReturnType<typeof consolidateTranscriptions> | null = null;
+  if (input.existingTranscription) {
+    if (input.existingTranscription.passCount !== 2) {
+      throw new Error('La lectura persistida no contiene las dos pasadas requeridas.');
+    }
+    transcription = {
+      pages: [...input.existingTranscription.pages],
+      flags: [...input.existingTranscription.flags],
+      discrepancies: [...input.existingTranscription.discrepancies],
+      passCount: 2,
+      confidence: input.existingTranscription.confidence,
+      model: input.existingTranscription.model,
+      usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, cacheCreationTokens: 0, costCents: 0 },
+    };
+  } else if (hasStudentFile(input.activityKind)) {
+    const [rawA, rawB] = await Promise.all([
+      input.provider.transcribe({ ...transcriptionInput, reading: 'a' }),
+      input.provider.transcribe({ ...transcriptionInput, reading: 'b' }),
+    ]);
+    transcription = consolidateTranscriptions(
+      validatePageAssembly(rawA, input.pages),
+      validatePageAssembly(rawB, input.pages),
+    );
+  }
 
   const resolvedContext = resolveContext(input.context);
 
@@ -158,22 +215,73 @@ export async function gradeSubmission(input: GradeSubmissionInput): Promise<Grad
         : {
             pages: transcription.pages,
             flags: transcription.flags,
+            discrepancies: transcription.discrepancies,
+            passCount: transcription.passCount,
             confidence: transcription.confidence,
           },
+    document: [...input.pages],
     textContent: input.textContent ?? null,
-    context: resolvedContext.merged,
+    context: resolvedContext.segments,
+    material: renderActivityMaterial(input.context),
     pointsAllocation: [...input.pointsAllocation],
     graded: input.graded,
     maxScore: input.maxScore,
+    templateKey: input.templateKey ?? null,
+    route: input.forumRoute,
+    explanations: input.explanations ?? true,
   });
 
   const flags = transcription?.flags ?? [];
 
   // Actividad no puntuable: ni apartados ni nota. Todo el valor está en el
   // documento de corrección, así que no se normaliza nada que no exista.
-  const { items, missingLabels } = input.graded
+  const aligned = input.graded
     ? alignItems(graded.items, input.pointsAllocation, input.maxScore ?? 0)
     : { items: [] as readonly NormalizedItem[], missingLabels: [] as readonly string[] };
+
+  const mechanical = verifyMechanically(aligned.items, transcription?.pages ?? []);
+  const items = mechanical.items;
+  const missingLabels = aligned.missingLabels;
+  const aiVerification = input.verifyWithAi === false
+    ? null
+    : await input.provider.verify({
+        submissionId: input.submissionId,
+        transcription: transcription === null
+          ? null
+          : {
+              pages: [...transcription.pages],
+              flags: [...transcription.flags],
+              discrepancies: [...transcription.discrepancies],
+              passCount: transcription.passCount,
+              confidence: transcription.confidence,
+            },
+        items: items.map((item) => ({
+          label: item.label,
+          maxPoints: item.maxPoints,
+          aiPoints: item.aiPoints,
+          aiFeedback: item.aiFeedback,
+          aiQuote: item.aiQuote,
+          aiQuotePage: item.aiQuotePage,
+          confidence: item.confidence,
+          alternativeMethod: item.alternativeMethod,
+        })),
+        aiSummary: graded.aiSummary,
+        aiLatex: graded.aiLatex,
+      });
+  const verification: CorrectionVerification = {
+    coherent: mechanical.review.length === 0 && (aiVerification?.coherent ?? true),
+    confidence: aiVerification?.confidence ?? null,
+    aiEnabled: input.verifyWithAi !== false,
+    issues: [
+      ...mechanical.review.map((issue) => ({
+        kind: issue.reason,
+        itemLabel: issue.label,
+        detail: issue.detail,
+        source: 'mechanical' as const,
+      })),
+      ...(aiVerification?.issues ?? []).map((issue) => ({ ...issue, source: 'ai' as const })),
+    ],
+  };
 
   const score =
     input.graded && input.maxScore !== null
@@ -187,7 +295,14 @@ export async function gradeSubmission(input: GradeSubmissionInput): Promise<Grad
     graded.confidence,
   );
 
-  const review = detectReviewFlags({
+  const review = [
+    ...mechanical.review,
+    ...(aiVerification?.issues ?? []).map((issue): ReviewFlag => ({
+      label: issue.itemLabel,
+      reason: 'ai_verification',
+      detail: issue.detail,
+    })),
+    ...detectReviewFlags({
     items,
     missingLabels,
     flags,
@@ -196,7 +311,9 @@ export async function gradeSubmission(input: GradeSubmissionInput): Promise<Grad
     maxScore: input.maxScore,
     autonomy: input.autonomy ?? 'review_all',
     confidence,
-  });
+    lowConfidenceThreshold: input.lowConfidenceThreshold,
+    }),
+  ];
 
   return {
     transcription:
@@ -205,6 +322,8 @@ export async function gradeSubmission(input: GradeSubmissionInput): Promise<Grad
         : {
             pages: transcription.pages,
             flags: transcription.flags,
+            discrepancies: transcription.discrepancies,
+            passCount: transcription.passCount,
             confidence: transcription.confidence,
             model: transcription.model,
           },
@@ -212,16 +331,56 @@ export async function gradeSubmission(input: GradeSubmissionInput): Promise<Grad
       items,
       aiLatex: graded.aiLatex,
       aiSummary: graded.aiSummary,
+      teacherNotes: graded.teacherNotes ?? null,
       confidence,
       model: graded.model,
       maxScore: input.graded ? input.maxScore : null,
+      verification,
+      escalate: graded.escalate ?? false,
+      noEsDuda: graded.noEsDuda ?? false,
     },
     score,
     resolvedContext,
-    usage:
-      transcription === null ? graded.usage : sumUsage(transcription.usage, graded.usage),
+    usage: aiVerification === null
+      ? transcription === null ? graded.usage : sumUsage(transcription.usage, graded.usage)
+      : sumUsage(
+          transcription === null ? graded.usage : sumUsage(transcription.usage, graded.usage),
+          aiVerification.usage,
+        ),
     review,
   };
+}
+
+function validatePageAssembly(
+  reading: import('../ai/provider.js').TranscribeResult,
+  sources: readonly PageSource[],
+): import('../ai/provider.js').TranscribeResult {
+  const manifested = sources.some((source) => source.pageNumbers !== undefined);
+  if (!manifested) return reading;
+  const expected = sources.flatMap((source) => source.pageNumbers ?? [source.page]);
+  const actual = reading.pages.map((page) => page.page);
+  const unique = new Set(actual);
+  const missing = expected.filter((page) => !unique.has(page));
+  const duplicates = actual.filter((page, index) => actual.indexOf(page) !== index);
+  const unexpected = actual.filter((page) => !expected.includes(page));
+  if (missing.length > 0 || duplicates.length > 0 || unexpected.length > 0) {
+    throw new Error(
+      `Ensamblado de transcripción inválido: faltan [${missing.join(', ')}], duplicadas [${duplicates.join(', ')}], inesperadas [${unexpected.join(', ')}].`,
+    );
+  }
+  return reading;
+}
+
+function renderActivityMaterial(context: ResolveContextInput): string {
+  const parts: string[] = [];
+  const reference = context.referenceSolution?.trim();
+  if (reference) {
+    parts.push(`## ${context.graded === false ? 'Material asociado' : 'Solución de referencia'}\n\n${reference}`);
+  }
+  for (const file of context.fileContents ?? []) {
+    if (file.content.trim() !== '') parts.push(`## Material adjunto · ${file.filename}\n\n${file.content.trim()}`);
+  }
+  return parts.join('\n\n');
 }
 
 // ── Normalización de puntos ─────────────────────────────────────────────────
@@ -264,6 +423,8 @@ export function alignItems(
         maxPoints: max,
         aiPoints: normalizePoints(item.aiPoints, max),
         aiFeedback: item.aiFeedback,
+        aiQuote: item.aiQuote ?? null,
+        aiQuotePage: item.aiQuotePage ?? null,
         confidence: clamp(item.confidence, 0, 1),
         alternativeMethod: item.alternativeMethod,
         position,
@@ -286,6 +447,8 @@ export function alignItems(
         aiPoints: 0,
         aiFeedback:
           'La IA no ha devuelto corrección para este apartado. Se puntúa a cero a la espera de que lo revise el profesor.',
+        aiQuote: null,
+        aiQuotePage: null,
         confidence: 0,
         alternativeMethod: false,
         position,
@@ -297,6 +460,8 @@ export function alignItems(
       maxPoints: entry.maxPoints,
       aiPoints: normalizePoints(match.aiPoints, entry.maxPoints),
       aiFeedback: match.aiFeedback,
+      aiQuote: match.aiQuote ?? null,
+      aiQuotePage: match.aiQuotePage ?? null,
       confidence: clamp(match.confidence, 0, 1),
       alternativeMethod: match.alternativeMethod,
       position,
@@ -304,6 +469,55 @@ export function alignItems(
   });
 
   return { items, missingLabels };
+}
+
+export interface MechanicalVerification {
+  readonly items: readonly NormalizedItem[];
+  readonly review: readonly ReviewFlag[];
+}
+
+/** Capa gratuita y no desconectable: una cita inexistente nunca pasa en silencio. */
+export function verifyMechanically(
+  items: readonly NormalizedItem[],
+  pages: readonly TranscriptionPage[],
+): MechanicalVerification {
+  const pageByNumber = new Map(pages.map((page) => [page.page, normalizeCanonical(page.latex)]));
+  const review: ReviewFlag[] = [];
+  const verifiedItems = items.map((item) => {
+    let confidence = item.confidence;
+    if (item.aiPoints < item.maxPoints) {
+      if (item.aiQuote === null || item.aiQuote.trim() === '' || item.aiQuotePage === null) {
+        confidence = Math.min(confidence, 0.49);
+        review.push({
+          label: item.label,
+          reason: 'missing_quote',
+          detail: `El apartado ${item.label} descuenta puntos sin una cita del trabajo del alumno.`,
+        });
+      } else {
+        const source = pageByNumber.get(item.aiQuotePage) ?? '';
+        if (!source.includes(normalizeCanonical(item.aiQuote))) {
+          confidence = Math.min(confidence, 0.49);
+          review.push({
+            label: item.label,
+            reason: 'fabricated_quote',
+            detail: `La cita del apartado ${item.label} no aparece en la página ${item.aiQuotePage}.`,
+          });
+        }
+      }
+    }
+
+    if (item.aiPoints === item.maxPoints && /(?:[-−–—]\s*\d+(?:[,.]\d+)?|descuent(?:o|a)|pierde\s+\d)/iu.test(item.aiFeedback)) {
+      confidence = Math.min(confidence, 0.49);
+      review.push({
+        label: item.label,
+        reason: 'score_feedback_mismatch',
+        detail: `El feedback del apartado ${item.label} anuncia un descuento, pero conserva la puntuación máxima.`,
+      });
+    }
+    return { ...item, confidence };
+  });
+
+  return { items: verifiedItems, review };
 }
 
 /** "1.a" y "1a" son el mismo apartado para el profesor; que lo sean también aquí. */
@@ -361,6 +575,7 @@ export interface DetectInput {
   readonly autonomy?: AutonomyMode;
   /** Confianza global ya calculada, para contrastarla con la autonomía. */
   readonly confidence?: number;
+  readonly lowConfidenceThreshold?: number;
 }
 
 /**
@@ -370,6 +585,7 @@ export interface DetectInput {
  */
 export function detectReviewFlags(input: DetectInput): readonly ReviewFlag[] {
   const review: ReviewFlag[] = [];
+  const lowConfidenceThreshold = input.lowConfidenceThreshold ?? LOW_CONFIDENCE_THRESHOLD;
   const flaggedPages = new Set(input.flags.map((flag) => flag.page));
   const missing = new Set(input.missingLabels ?? []);
 
@@ -382,7 +598,7 @@ export function detectReviewFlags(input: DetectInput): readonly ReviewFlag[] {
       });
       return;
     }
-    if (item.confidence < LOW_CONFIDENCE_THRESHOLD) {
+    if (item.confidence < lowConfidenceThreshold) {
       review.push({
         label: item.label,
         reason: 'low_confidence',
@@ -429,7 +645,7 @@ export function detectReviewFlags(input: DetectInput): readonly ReviewFlag[] {
   if (
     autonomy !== 'review_all' &&
     confidence !== undefined &&
-    confidence < LOW_CONFIDENCE_THRESHOLD
+    confidence < lowConfidenceThreshold
   ) {
     review.push({
       label: null,
@@ -442,15 +658,6 @@ export function detectReviewFlags(input: DetectInput): readonly ReviewFlag[] {
 }
 
 // ── Utilidades ──────────────────────────────────────────────────────────────
-
-function sumUsage(a: UsageMetrics, b: UsageMetrics): UsageMetrics {
-  return {
-    inputTokens: a.inputTokens + b.inputTokens,
-    outputTokens: a.outputTokens + b.outputTokens,
-    cachedInputTokens: a.cachedInputTokens + b.cachedInputTokens,
-    costCents: Math.round((a.costCents + b.costCents) * 10_000) / 10_000,
-  };
-}
 
 function formatConfidence(value: number): string {
   return `${Math.round(value * 100)} %`;

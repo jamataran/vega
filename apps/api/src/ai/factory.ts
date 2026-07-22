@@ -2,6 +2,7 @@ import { createAiProvider } from '@vega/core';
 import type { AiProvider } from '@vega/core';
 import { getSettings, readSecret } from '../settings/service.js';
 import type { AppContext } from '../context.js';
+import { listActivePrompts } from '../prompts/service.js';
 
 /**
  * Construcción del proveedor de IA de la instalación.
@@ -21,12 +22,16 @@ import type { AppContext } from '../context.js';
 export async function aiProviderForInstall(ctx: AppContext): Promise<AiProvider> {
   const settings = await getSettings(ctx);
   const apiKey = (await readSecret(ctx, 'anthropic.apiKey')) ?? ctx.config.ANTHROPIC_API_KEY;
+  const prompts = await listActivePrompts(ctx);
 
   return createAiProvider({
     provider: settings.anthropic.provider,
     ...(apiKey ? { apiKey } : {}),
-    transcriptionModel: settings.anthropic.transcriptionModel,
+    transcriptionModel: settings.anthropic.readingModel,
     gradingModel: settings.anthropic.gradingModel,
+    triageModel: settings.anthropic.triageModel,
+    verifyModel: settings.anthropic.verifyModel,
     maxTokens: settings.anthropic.maxTokens,
+    systemPrompts: Object.fromEntries(prompts.map((prompt) => [prompt.key, prompt.content])),
   });
 }

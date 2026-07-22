@@ -31,19 +31,34 @@ test('el modelo simulado se valora con la tarifa del modelo real', () => {
     estimateCostCents('mock-claude-opus-4-8', usage),
     estimateCostCents('claude-opus-4-8', usage),
   );
-  assert.deepEqual(pricingFor('mock-claude-opus-4-8'), MODEL_PRICING['claude-opus-4-8']);
+  assert.deepEqual(pricingFor('mock-claude-opus-4-8'), MODEL_PRICING['claude-opus-4-8']?.[0]);
 });
 
-test('un modelo desconocido no rompe la corrección: coste cero', () => {
+test('un modelo desconocido queda señalado y nunca figura como coste cero', () => {
   assert.equal(pricingFor('modelo-inventado'), undefined);
-  assert.equal(
+  assert.throws(() =>
     estimateCostCents('modelo-inventado', {
       inputTokens: 50_000,
       outputTokens: 10_000,
       cachedInputTokens: 0,
     }),
-    0,
   );
+});
+
+test('contabiliza la creación de caché y aplica el descuento de lote', () => {
+  const sync = estimateCostCents('claude-opus-4-8', {
+    inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, cacheCreationTokens: 100_000,
+  });
+  const batch = estimateCostCents('claude-opus-4-8', {
+    inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, cacheCreationTokens: 100_000, transport: 'batch',
+  });
+  assert.ok(sync > 0);
+  assert.equal(batch, sync / 2);
+});
+
+test('Sonnet 5 conserva la tarifa introductoria hasta septiembre de 2026', () => {
+  assert.equal(pricingFor('claude-sonnet-5', new Date('2026-08-31'))?.inputPerMillionUsd, 2);
+  assert.equal(pricingFor('claude-sonnet-5', new Date('2026-09-01'))?.inputPerMillionUsd, 3);
 });
 
 test('el importe se formatea en español', () => {

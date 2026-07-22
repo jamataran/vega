@@ -9,8 +9,12 @@ export interface AiProviderConfig {
   readonly apiKey?: string;
   readonly transcriptionModel?: string;
   readonly gradingModel?: string;
+  readonly triageModel?: string;
+  readonly verifyModel?: string;
   /** Tope de tokens de respuesta del proveedor real. */
   readonly maxTokens?: number;
+  /** Prompts activos leídos del registro versionado de la instalación. */
+  readonly systemPrompts?: Readonly<Record<string, string>>;
   /** Sólo para el mock: retardo simulado por llamada. */
   readonly mockDelayMs?: number;
 }
@@ -25,6 +29,8 @@ export function aiConfigFromEnv(env: NodeJS.ProcessEnv = process.env): AiProvide
     apiKey: env['ANTHROPIC_API_KEY'],
     transcriptionModel: env['AI_MODEL_TRANSCRIPTION'],
     gradingModel: env['AI_MODEL_GRADING'],
+    triageModel: env['AI_MODEL_TRIAGE'],
+    verifyModel: env['AI_MODEL_VERIFY'],
   };
 }
 
@@ -48,15 +54,28 @@ export function createAiProvider(config: AiProviderConfig = {}): AiProvider {
         ? { transcriptionModel: config.transcriptionModel }
         : {}),
       ...(config.gradingModel !== undefined ? { gradingModel: config.gradingModel } : {}),
+      ...(config.triageModel !== undefined ? { triageModel: config.triageModel } : {}),
+      ...(config.verifyModel !== undefined ? { verifyModel: config.verifyModel } : {}),
       ...(config.maxTokens !== undefined ? { maxTokens: config.maxTokens } : {}),
+      ...(config.systemPrompts !== undefined ? { systemPrompts: config.systemPrompts } : {}),
     });
   }
 
-  return new MockAiProvider(
-    config.mockDelayMs !== undefined ? { delayMs: config.mockDelayMs } : {},
-  );
+  return new MockAiProvider({
+    ...(config.mockDelayMs !== undefined ? { delayMs: config.mockDelayMs } : {}),
+    ...(config.systemPrompts !== undefined
+      ? { promptSalt: Object.entries(config.systemPrompts).sort().flat().join('\n') }
+      : {}),
+  });
 }
 
 export { MockAiProvider } from './mock.js';
-export { AnthropicAiProvider, DEFAULT_GRADING_MODEL, DEFAULT_TRANSCRIPTION_MODEL } from './anthropic.js';
+export {
+  AnthropicAiProvider,
+  DEFAULT_GRADING_MODEL,
+  DEFAULT_TRANSCRIPTION_MODEL,
+  DEFAULT_TRIAGE_MODEL,
+  DEFAULT_VERIFY_MODEL,
+} from './anthropic.js';
+export * from '../grading/verification.js';
 export * from './provider.js';

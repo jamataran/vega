@@ -1,6 +1,8 @@
 import type { FastifyBaseLogger } from 'fastify';
+import type { ActivityKind } from '@vega/shared';
 import { getSettings, markScheduleRun } from '../settings/service.js';
 import type { AppContext } from '../context.js';
+import { purgeAiCalls } from '../ai/ledger.js';
 
 /**
  * Planificador de los procesos de corrección.
@@ -10,6 +12,11 @@ import type { AppContext } from '../context.js';
  * réplicas, sólo una ejecuta el lote y la otra se lo salta sin bloquearse. Es
  * el mismo mecanismo que usan las migraciones al arrancar, así que no añade
  * infraestructura nueva.
+ *
+ * La planificación es **por tipo de actividad**: los foros suelen ir con una
+ * cadencia corta (una duda no espera a la noche) y las entregas, más caras,
+ * espaciadas. Si a un tick le tocan los dos tipos, corre un único proceso que
+ * barre ambos en vez de dos procesos que se pisarían el cerrojo.
  */
 
 /** Distinto al de las migraciones: son cerrojos independientes. */
@@ -22,12 +29,15 @@ export interface Scheduler {
   stop: () => void;
 }
 
+const KINDS: readonly ActivityKind[] = ['assignment', 'forum'];
+
 export function startScheduler(
   ctx: AppContext,
-  runBatch: (triggeredBy: string | null) => Promise<{ processed: number }>,
+  runBatch: (kinds: readonly ActivityKind[]) => Promise<{ processed: number }>,
   log: FastifyBaseLogger,
 ): Scheduler {
   let running = false;
+  let lastPurgeAt = 0;
 
   const tick = async (): Promise<void> => {
     // Una ejecución larga no debe solaparse con la siguiente.
@@ -41,12 +51,19 @@ export function startScheduler(
       return;
     }
 
-    if (!settings.schedule.enabled) return;
+    if (Date.now() - lastPurgeAt >= 86_400_000) {
+      lastPurgeAt = Date.now();
+      void purgeAiCalls(ctx, settings.ai.logRetentionDays).catch((error) =>
+        log.error({ err: error }, 'No se ha podido purgar el registro de IA'),
+      );
+    }
 
-    const due =
-      settings.schedule.nextRunAt === null ||
-      new Date(settings.schedule.nextRunAt).getTime() <= Date.now();
-    if (!due) return;
+    const due = KINDS.filter((kind) => {
+      const slot = settings.schedule[kind];
+      if (!slot.enabled) return false;
+      return slot.nextRunAt === null || new Date(slot.nextRunAt).getTime() <= Date.now();
+    });
+    if (due.length === 0) return;
 
     // Sólo una instancia corre el lote. `try` y no `lock` para no dejar la otra
     // esperando: si no le toca, se va y ya lo intentará en el siguiente tick.
@@ -60,10 +77,12 @@ export function startScheduler(
       const startedAt = new Date();
       // Se marca antes de empezar: si el lote falla, no queremos que el
       // siguiente tick lo reintente inmediatamente en bucle.
-      await markScheduleRun(ctx, startedAt);
-      const result = await runBatch(null);
+      for (const kind of due) {
+        await markScheduleRun(ctx, kind, startedAt);
+      }
+      const result = await runBatch(due);
       log.info(
-        { processed: result.processed, everyMinutes: settings.schedule.everyMinutes },
+        { processed: result.processed, kinds: due },
         'Proceso de corrección ejecutado por el planificador',
       );
     } catch (error) {

@@ -2,21 +2,32 @@ import { z } from 'zod';
 import {
   Activity,
   ActivityFile,
+  AiCall,
   AppSettings,
   BatchRun,
   Correction,
   DiscoveredCourse,
   GradingContext,
+  ContextSegment,
   Id,
   IsoDate,
   PointsAllocation,
+  Prompt,
   Student,
   Submission,
   Transcription,
   UsageMetrics,
   User,
 } from './domain.js';
-import { ActivityKind, AutonomyMode, ContextLevel, SubmissionStatus, UserRole } from './enums.js';
+import {
+  ActivityKind,
+  AiOperation,
+  AiTransport,
+  AutonomyMode,
+  ContextLevel,
+  SubmissionStatus,
+  UserRole,
+} from './enums.js';
 
 /**
  * Contrato HTTP entre `apps/api` y `apps/frontend`.
@@ -78,6 +89,9 @@ export const HealthResponse = z.object({
   version: z.string(),
   database: z.enum(['up', 'down']),
   aiProvider: z.string(),
+  aiTransport: AiTransport,
+  readingModel: z.string(),
+  gradingModel: z.string(),
   lmsConnector: z.string(),
   uptimeSeconds: z.number().min(0),
 });
@@ -119,10 +133,13 @@ export const QueueItem = z.object({
   score: z.number().nullable(),
   maxScore: z.number().nullable(),
   confidence: z.number().min(0).max(1).nullable(),
+  /** Decisión calculada con el umbral activo de la instalación. */
+  lowConfidence: z.boolean(),
   /** Número de marcas [ILEGIBLE]/[DUDA] en la transcripción. */
   flagCount: z.number().int().min(0),
   /** Apartados que la IA marca con baja confianza. */
   lowConfidenceItems: z.number().int().min(0),
+  verificationIssueCount: z.number().int().min(0).default(0),
 });
 export type QueueItem = z.infer<typeof QueueItem>;
 
@@ -187,6 +204,16 @@ export type SaveCorrectionRequest = z.infer<typeof SaveCorrectionRequest>;
 export const CorrectionResponse = z.object({ correction: Correction, submission: Submission });
 export type CorrectionResponse = z.infer<typeof CorrectionResponse>;
 
+export const ReprocessSubmissionRequest = z.object({
+  scope: z.enum(['full', 'grade_only']).default('full'),
+});
+export type ReprocessSubmissionRequest = z.infer<typeof ReprocessSubmissionRequest>;
+
+export const ParkSubmissionRequest = z.object({
+  reason: z.string().trim().min(1, 'Explica brevemente por qué se omite esta entrega'),
+});
+export type ParkSubmissionRequest = z.infer<typeof ParkSubmissionRequest>;
+
 // ── Actividades ─────────────────────────────────────────────────────────────
 
 export const ActivityListResponse = z.object({ items: z.array(Activity) });
@@ -202,6 +229,7 @@ export const UpdateActivityRequest = z.object({
   maxScore: z.number().positive().nullable().optional(),
   pointsAllocation: z.array(PointsAllocation).optional(),
   referenceSolution: z.string().nullable().optional(),
+  templateKey: z.string().trim().min(1).nullable().optional(),
   autonomy: AutonomyMode.optional(),
 });
 export type UpdateActivityRequest = z.infer<typeof UpdateActivityRequest>;
@@ -343,20 +371,44 @@ export type ContextListResponse = z.infer<typeof ContextListResponse>;
 export const ContextResponse = z.object({ context: GradingContext });
 export type ContextResponse = z.infer<typeof ContextResponse>;
 
-export const UpdateContextRequest = z.object({ content: z.string() });
+export const UpdateContextRequest = z.object({
+  content: z.string(),
+  /** Bloqueo optimista: evita que dos ediciones silenciosamente se pisen. */
+  expectedVersion: z.number().int().positive(),
+});
 export type UpdateContextRequest = z.infer<typeof UpdateContextRequest>;
 
-/** Contexto efectivo de una actividad: los tres niveles ya resueltos. */
+/** Contexto efectivo de una actividad: los cinco niveles ya resueltos. */
 export const ResolvedContextResponse = z.object({
   global: z.string(),
   activityKind: z.string(),
+  template: z.string(),
+  course: z.string(),
   activity: z.string(),
+  segments: z.array(ContextSegment),
   /** Lo que realmente se enviaría al modelo. */
   merged: z.string(),
   /** Ficheros que acompañan al contexto. */
   files: z.array(ActivityFile),
 });
 export type ResolvedContextResponse = z.infer<typeof ResolvedContextResponse>;
+
+// ── Prompts del sistema (sólo administrador) ───────────────────────────────
+
+export const PromptWithPrevious = Prompt.extend({ previousContent: z.string().nullable() });
+export type PromptWithPrevious = z.infer<typeof PromptWithPrevious>;
+
+export const PromptListResponse = z.object({ items: z.array(PromptWithPrevious) });
+export type PromptListResponse = z.infer<typeof PromptListResponse>;
+
+export const PromptResponse = z.object({ prompt: PromptWithPrevious });
+export type PromptResponse = z.infer<typeof PromptResponse>;
+
+export const UpdatePromptRequest = z.object({
+  content: z.string().min(1),
+  expectedVersion: z.number().int().positive(),
+});
+export type UpdatePromptRequest = z.infer<typeof UpdatePromptRequest>;
 
 // ── Usuarios (sólo administrador) ───────────────────────────────────────────
 
@@ -396,6 +448,12 @@ export type UpdateUserRequest = z.infer<typeof UpdateUserRequest>;
 export const SettingsResponse = z.object({ settings: AppSettings });
 export type SettingsResponse = z.infer<typeof SettingsResponse>;
 
+/** Parche de la planificación de un tipo de actividad. */
+const ScheduleSlotPatch = z.object({
+  enabled: z.boolean().optional(),
+  everyMinutes: z.number().int().positive().optional(),
+});
+
 /**
  * Los secretos se escriben pero no se leen. Enviar `null` en un secreto lo
  * borra; omitirlo lo deja como está.
@@ -405,9 +463,22 @@ export const UpdateSettingsRequest = z.object({
     .object({
       apiKey: z.string().nullable().optional(),
       transcriptionModel: z.string().optional(),
+      readingModel: z.string().optional(),
       gradingModel: z.string().optional(),
+      verifyModel: z.string().optional(),
+      triageModel: z.string().optional(),
       maxTokens: z.number().int().positive().optional(),
       provider: z.enum(['mock', 'anthropic']).optional(),
+    })
+    .optional(),
+  ai: z
+    .object({
+      transport: AiTransport.optional(),
+      verify: z.boolean().optional(),
+      explanations: z.boolean().optional(),
+      lowConfidenceThreshold: z.number().min(0).max(1).optional(),
+      pagesPerChunk: z.number().int().positive().optional(),
+      logRetentionDays: z.number().int().positive().optional(),
     })
     .optional(),
   moodle: z
@@ -427,8 +498,8 @@ export const UpdateSettingsRequest = z.object({
     .optional(),
   schedule: z
     .object({
-      enabled: z.boolean().optional(),
-      everyMinutes: z.number().int().positive().optional(),
+      assignment: ScheduleSlotPatch.optional(),
+      forum: ScheduleSlotPatch.optional(),
     })
     .optional(),
   branding: z.object({ name: z.string().min(1).optional() }).optional(),
@@ -543,6 +614,14 @@ export const OverviewResponse = z.object({
   avgTeacherDeviation: z.number(),
   /** Proporción de correcciones que el profesor no ha tocado, 0–1. */
   untouchedRatio: z.number().min(0).max(1),
+  reliability: z.object({
+    score: z.number().min(0).max(1),
+    citationsVerified: z.number().min(0).max(1),
+    readingsWithoutDiscrepancy: z.number().min(0).max(1),
+    verificationsWithoutIssues: z.number().min(0).max(1),
+  }),
+  aiMode: z.enum(['none', 'simulated', 'real', 'mixed']),
+  unpricedCalls: z.number().int().min(0),
   lastBatchRun: BatchRun.nullable(),
 });
 export type OverviewResponse = z.infer<typeof OverviewResponse>;
@@ -557,7 +636,7 @@ export const CostPeriod = z.enum(['this_month', 'last_30_days', 'this_quarter', 
 export type CostPeriod = z.infer<typeof CostPeriod>;
 
 /** Eje por el que se desglosa el gasto del periodo. */
-export const CostDimension = z.enum(['activity_kind', 'course', 'activity']);
+export const CostDimension = z.enum(['activity_kind', 'course', 'activity', 'operation']);
 export type CostDimension = z.infer<typeof CostDimension>;
 
 export const CostGroup = z.object({
@@ -599,6 +678,25 @@ export type BatchRunListResponse = z.infer<typeof BatchRunListResponse>;
 export const TriggerBatchResponse = z.object({ run: BatchRun, queued: z.number().int().min(0) });
 export type TriggerBatchResponse = z.infer<typeof TriggerBatchResponse>;
 
+// ── Ledger de IA (sólo administrador) ─────────────────────────────────────
+
+export const AiCallQuery = z.object({
+  submissionId: Id.optional(),
+  batchRunId: Id.optional(),
+  operation: AiOperation.optional(),
+  transport: AiTransport.optional(),
+  errorsOnly: z.coerce.boolean().optional(),
+  page: z.coerce.number().int().positive().default(1),
+  pageSize: z.coerce.number().int().positive().max(100).default(50),
+});
+export type AiCallQuery = z.infer<typeof AiCallQuery>;
+
+export const AiCallListResponse = paginated(AiCall);
+export type AiCallListResponse = z.infer<typeof AiCallListResponse>;
+
+export const AiCallResponse = z.object({ call: AiCall });
+export type AiCallResponse = z.infer<typeof AiCallResponse>;
+
 // ── Rutas ───────────────────────────────────────────────────────────────────
 
 /** Fuente única de verdad de las rutas, para que el front no las escriba a mano. */
@@ -615,6 +713,8 @@ export const routes = {
   validate: (id: string) => `/api/submissions/${id}/validate`,
   publish: (id: string) => `/api/submissions/${id}/publish`,
   reprocess: (id: string) => `/api/submissions/${id}/reprocess`,
+  park: (id: string) => `/api/submissions/${id}/park`,
+  original: (id: string) => `/api/submissions/${id}/original`,
   /** Descarga del PDF de feedback (original + páginas de corrección). */
   feedbackFile: (id: string) => `/api/submissions/${id}/feedback.pdf`,
 
@@ -638,6 +738,13 @@ export const routes = {
   contexts: '/api/contexts',
   context: (level: ContextLevel, key: string) => `/api/contexts/${level}/${key}`,
   resolvedContext: (activityId: string) => `/api/contexts/resolved/${activityId}`,
+
+  prompts: '/api/prompts',
+  prompt: (key: string) => `/api/prompts/${encodeURIComponent(key)}`,
+  restorePrompt: (key: string) => `/api/prompts/${encodeURIComponent(key)}/restore`,
+
+  aiCalls: '/api/ai-calls',
+  aiCall: (id: string) => `/api/ai-calls/${id}`,
 
   users: '/api/users',
   user: (id: string) => `/api/users/${id}`,

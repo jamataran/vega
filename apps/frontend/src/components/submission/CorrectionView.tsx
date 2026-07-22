@@ -23,6 +23,7 @@ export function CorrectionView({
   graded,
   draft,
   readOnly,
+  onQuoteOpen,
 }: {
   correction: Correction | null;
   submissionId: string;
@@ -32,6 +33,7 @@ export function CorrectionView({
   graded: boolean;
   draft: CorrectionDraftController;
   readOnly: boolean;
+  onQuoteOpen: (page: number) => void;
 }) {
   const download = useMutation({
     mutationFn: () => api.downloadFeedback(submissionId, feedbackName),
@@ -58,8 +60,7 @@ export function CorrectionView({
           <Alert variant="info">
             <AlertTitle>Publicada sin revisión docente</AlertTitle>
             <AlertDescription className="mt-1">
-              Se publicó sola por el modo de autonomía de la actividad. Nadie la revisó antes de que
-              llegara al alumno.
+              Se publicó automáticamente: ningún profesor la revisó antes de que llegara al alumno.
             </AlertDescription>
           </Alert>
         ) : null}
@@ -110,6 +111,7 @@ export function CorrectionView({
               <CorrectionItemCard
                 key={item.id}
                 item={item}
+                onQuoteOpen={onQuoteOpen}
                 readOnly={readOnly}
                 onPointsChange={(points) => draft.setPoints(item.id, points)}
                 onFeedbackChange={(feedback) => draft.setFeedback(item.id, feedback)}
@@ -117,6 +119,27 @@ export function CorrectionView({
               />
             ))
           : null}
+
+        {correction.verification ? (
+          <Alert variant={correction.verification.coherent ? 'success' : 'warning'}>
+            <AlertTitle>
+              {correction.verification.coherent
+                ? 'Sin avisos de verificación'
+                : `Verificación: ${correction.verification.issues.length} ${correction.verification.issues.length === 1 ? 'aviso' : 'avisos'}`}
+            </AlertTitle>
+            <AlertDescription className="mt-1">
+              {correction.verification.issues.length === 0
+                ? 'Las citas, la aritmética y la coherencia de la propuesta no presentan avisos.'
+                : <ul className="list-disc space-y-1 pl-5">{correction.verification.issues.map((issue) => (
+                    <li key={`${issue.source}-${issue.kind}-${issue.itemLabel ?? ''}`}>{issue.itemLabel ? `${issue.itemLabel}: ` : ''}{issue.detail}</li>
+                  ))}</ul>}
+            </AlertDescription>
+          </Alert>
+        ) : null}
+
+        {correction.teacherNotes ? (
+          <Alert variant="info"><AlertTitle>Notas para el profesor</AlertTitle><AlertDescription className="mt-1">{correction.teacherNotes}</AlertDescription></Alert>
+        ) : null}
 
         <Card asChild>
           <section className="p-4">
