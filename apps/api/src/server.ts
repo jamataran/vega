@@ -1,4 +1,5 @@
 import cors from '@fastify/cors';
+import rateLimit from '@fastify/rate-limit';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { registerAuth } from './auth/plugin.js';
 import { startScheduler } from './batch/scheduler.js';
@@ -67,6 +68,7 @@ export async function buildServer(config: Config): Promise<BuiltServer> {
     origin: config.NODE_ENV === 'development' ? true : config.WEB_ORIGIN.split(',').map((o) => o.trim()),
     credentials: true,
   });
+  await app.register(rateLimit, { global: false });
 
   await registerAuth(app, config);
 

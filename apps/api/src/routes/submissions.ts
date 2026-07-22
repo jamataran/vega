@@ -462,7 +462,15 @@ export async function submissionRoutes(app: FastifyInstance, ctx: AppContext): P
 
   app.get<{ Params: { id: string } }>(
     routes.original(':id'),
-    { preHandler: app.authenticate },
+    {
+      preHandler: app.authenticate,
+      config: {
+        rateLimit: {
+          max: 30,
+          timeWindow: '1 minute',
+        },
+      },
+    },
     async (request, reply) => {
       const [submission] = await db
         .select()

@@ -21,6 +21,7 @@
     "@anthropic-ai/sdk": "^0.112.5",
     "@fastify/cors": "^10.0.2",
     "@fastify/jwt": "^9.0.3",
+    "@fastify/rate-limit": "^11.1.0",
     "@vega/connector-filesystem": "workspace:*",
     "@vega/connector-lms": "workspace:*",
     "@vega/connector-moodle3": "workspace:*",
