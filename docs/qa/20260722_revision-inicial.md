@@ -22,3 +22,5 @@ forum-36·Moodle ha rechazado la llamada a mod_forum_get_forum_discussions_pagin
 7. En [ajustes](https://vega-test.opo-mates.es/ajustes), "Motor de IA", Transporte pone "Síncrono" y la otra opción aparece pendiente.
 7.1 Si esto va a ahorrar habría que valorar hacerlo ya. ¿Qué necesitas más?
 7.2 Recuerda que en esta fase buscamos algo medio estable. Lo demas... GH y creamos ticket. Tenlo en cuenta para el motor de IA.
+
+# Segunda revisión.
