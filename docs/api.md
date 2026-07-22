@@ -680,8 +680,15 @@ actividades activas con `moodle_ref`, y corregir lo que quede en `pending` (tope
 ejecución, `MAX_PER_RUN`). Que la ingesta falle no cancela la corrección: lo que ya estaba pendiente
 se corrige aunque Moodle no responda.
 
-**Respuesta 200** — `TriggerBatchResponse`: `{ run, queued }`. El `BatchRun` trae
-`submissionsIngested` y `activitiesFailed` además de los recuentos de corrección.
+**Respuesta 202** — `TriggerBatchResponse`: `{ run }`, el proceso recién abierto. **No hay ningún
+recuento todavía**: el trabajo acaba de empezar y corre en segundo plano, así que el resultado se
+lee releyendo la lista. Aquí hubo un `queued` que valía cero por construcción y que la interfaz
+traducía a «no había entregas pendientes» — justo lo contrario de lo que ocurría.
+
+El `BatchRun` trae, además de los recuentos de corrección, `submissionsIngested`,
+`activitiesFailed`, `kinds` (los tipos de actividad barridos) y `problems`: el motivo por el que
+falló la ingesta de cada actividad, con `kind` `config` (hay que arreglar algo en Ajustes) o
+`transient` (se reintenta solo).
 
 **Errores**: 401; **403** si no eres administrador; **409 `CONFLICT`** si ya hay un lote en
 `running`. Sin ese cerrojo, dos disparos seguidos corrigen las mismas entregas dos veces y **pagan

@@ -14,6 +14,7 @@ import {
 import type {
   AiOperation,
   AiTransport,
+  BatchRunProblem,
   ContextLevel,
   CorrectionVerification,
   PointsAllocation,
@@ -320,6 +321,8 @@ export const batchRuns = pgTable('batch_runs', {
   submissionsIngested: integer('submissions_ingested').notNull().default(0),
   /** Actividades cuya ingesta falló entera (LMS caído, token, configuración). */
   activitiesFailed: integer('activities_failed').notNull().default(0),
+  /** El motivo de cada una, para poder leerlo sin entrar en el log del servidor. */
+  problems: jsonb('problems').$type<BatchRunProblem[]>().notNull().default([]),
   inputTokens: integer('input_tokens').notNull().default(0),
   outputTokens: integer('output_tokens').notNull().default(0),
   cachedInputTokens: integer('cached_input_tokens').notNull().default(0),

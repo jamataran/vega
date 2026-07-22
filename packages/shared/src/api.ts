@@ -675,7 +675,17 @@ export type CostBreakdownResponse = z.infer<typeof CostBreakdownResponse>;
 export const BatchRunListResponse = z.object({ items: z.array(BatchRun) });
 export type BatchRunListResponse = z.infer<typeof BatchRunListResponse>;
 
-export const TriggerBatchResponse = z.object({ run: BatchRun, queued: z.number().int().min(0) });
+/**
+ * Respuesta a «forzar proceso»: **202**, no un resultado.
+ *
+ * El proceso corre en segundo plano —transcribir y corregir lleva minutos, no
+ * milisegundos—, así que cuando esto se responde todavía no hay nada procesado.
+ * Aquí hubo un `queued` que siempre valía cero y la interfaz lo traducía a «no
+ * había entregas pendientes»: justo lo contrario de lo que estaba pasando. Lo
+ * que se devuelve es el proceso recién abierto; el resultado se mira en la lista
+ * conforme avanza.
+ */
+export const TriggerBatchResponse = z.object({ run: BatchRun });
 export type TriggerBatchResponse = z.infer<typeof TriggerBatchResponse>;
 
 // ── Ledger de IA (sólo administrador) ─────────────────────────────────────
