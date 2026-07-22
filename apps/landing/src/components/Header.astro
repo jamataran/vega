@@ -1,0 +1,40 @@
+---
+import { getLangFromUrl, useTranslations } from '../i18n/utils';
+import { languages } from '../i18n/ui';
+
+const lang = getLangFromUrl(Astro.url);
+const t = useTranslations(lang);
+---
+
+<header class="w-full border-b border-[var(--color-border)] bg-[var(--color-surface)]/80 backdrop-blur-md sticky top-0 z-50">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+    <div class="flex items-center gap-2">
+      <img src="/vega-icon.svg" alt="Vega Logo" class="h-8 w-8" />
+      <span class="font-display font-semibold text-lg tracking-tight">Vega</span>
+    </div>
+    
+    <nav class="hidden md:flex gap-8">
+      <a href={`/${lang}/#features`} class="text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors text-sm font-medium">{t('nav.features')}</a>
+      <a href="https://github.com/jamataran/vega" target="_blank" rel="noopener noreferrer" class="text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors text-sm font-medium">{t('nav.github')}</a>
+    </nav>
+    
+    <div class="flex items-center gap-4">
+      <div class="relative group">
+        <button class="flex items-center gap-1 text-sm font-medium text-[var(--color-text-muted)] hover:text-[var(--color-text)]">
+          {languages[lang as keyof typeof languages]}
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+        </button>
+        <div class="absolute right-0 mt-2 w-32 bg-[var(--color-surface)] border border-[var(--color-border)] rounded-[var(--radius-vega-md)] shadow-[var(--shadow-vega-raised)] opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all">
+          {Object.entries(languages).map(([code, name]) => (
+            <a href={`/${code}`} class="block px-4 py-2 text-sm text-[var(--color-text-muted)] hover:text-[var(--color-text)] hover:bg-[var(--color-bg)] first:rounded-t-[var(--radius-vega-md)] last:rounded-b-[var(--radius-vega-md)]">
+              {name}
+            </a>
+          ))}
+        </div>
+      </div>
+      <a href="https://github.com/jamataran/vega" class="bg-[var(--color-primary)] hover:bg-[var(--color-primary-hover)] text-white px-4 py-2 rounded-[var(--radius-vega-sm)] text-sm font-medium transition-colors shadow-sm">
+        {t('hero.cta')}
+      </a>
+    </div>
+  </div>
+</header>

@@ -1,0 +1,19 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Header from '../components/Header.astro';
+import Hero from '../components/Hero.astro';
+import Features from '../components/Features.astro';
+import Footer from '../components/Footer.astro';
+import { useTranslations } from '../i18n/utils';
+
+const t = useTranslations('en');
+---
+
+<Layout title="Vega | AI that grades. You who teach." description={t('hero.subtitle')} lang="en">
+	<Header />
+	<main class="flex-1">
+		<Hero />
+		<Features />
+	</main>
+	<Footer />
+</Layout>
