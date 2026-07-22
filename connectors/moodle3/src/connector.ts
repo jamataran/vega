@@ -60,6 +60,15 @@ export type Moodle3Config = z.infer<typeof Moodle3Config>;
 const SUBMISSION_FILE_AREA = 'submission_files';
 
 /**
+ * Detalle de «ok» cuando una función **de lectura** se comprueba contra el
+ * catálogo en vez de llamarla: no es que escribiera nada, es que sin datos a la
+ * vista (ningún foro, ningún debate) no hay llamada representativa que hacer.
+ */
+const READ_NOT_REHEARSED =
+  'Está en el servicio web del token. No se ha podido ensayar con una llamada real porque este ' +
+  'token aún no ve ningún foro o debate con el que probarla.';
+
+/**
  * Tamaño de página al recorrer los debates de un foro. Cincuenta es un
  * compromiso: bastante alto para que la mayoría de foros quepan en una sola
  * llamada y bastante bajo para que una respuesta no ocupe megas de HTML.
@@ -228,29 +237,136 @@ export class Moodle3Connector implements LmsConnector {
     // está habilitada, que es justo lo que se está comprobando.
     const courseIds = courses.length > 0 ? [parseCourseId(courses[0]!.moodleCourseId)] : [];
 
+    let assignments: GetAssignmentsResponse | undefined;
     checks.push(
       await this.#probe(
         WS_FUNCTIONS.getAssignments,
-        'Leer las entregas del curso',
-        () =>
-          this.#client.call(
+        'Leer las tareas del curso',
+        async () => {
+          assignments = await this.#client.call(
             WS_FUNCTIONS.getAssignments,
             { courseids: courseIds },
             GetAssignmentsResponse,
-          ),
+          );
+          return assignments;
+        },
         (result) =>
           `${result.courses.length} ${result.courses.length === 1 ? 'curso' : 'cursos'} con tareas`,
       ),
     );
 
+    // La ingesta no lee las tareas: lee sus **envíos**, con esta otra función.
+    // Es la que suele faltar en el servicio web, y durante un tiempo este parte
+    // no la cubría: importar actividades funcionaba y la ingesta fallaba entera
+    // sin que «Probar conexión» avisara de nada. Se ensaya con una tarea real
+    // si el token ve alguna; con la lista vacía la llamada sigue diciendo si la
+    // función está habilitada, que es lo que se comprueba.
+    const assignmentIds = (assignments?.courses ?? [])
+      .flatMap((course) => course.assignments.map((assignment) => assignment.id))
+      .slice(0, 1);
+    checks.push(
+      await this.#probe(
+        WS_FUNCTIONS.getSubmissions,
+        'Leer lo que entrega cada alumno',
+        () =>
+          this.#client.call(
+            WS_FUNCTIONS.getSubmissions,
+            { assignmentids: assignmentIds, status: 'submitted' },
+            GetSubmissionsResponse,
+          ),
+        (result) => {
+          if (assignmentIds.length === 0) {
+            return 'Responde correctamente, aunque este token aún no ve ninguna tarea con la que ensayar.';
+          }
+          const total = result.assignments.reduce(
+            (sum, assignment) => sum + assignment.submissions.length,
+            0,
+          );
+          return `${total} ${total === 1 ? 'entrega visible' : 'entregas visibles'} en la primera tarea`;
+        },
+      ),
+    );
+
+    let forums: GetForumsResponse | undefined;
     checks.push(
       await this.#probe(
         WS_FUNCTIONS.getForums,
         'Leer los foros del curso',
-        () =>
-          this.#client.call(WS_FUNCTIONS.getForums, { courseids: courseIds }, GetForumsResponse),
+        async () => {
+          forums = await this.#client.call(
+            WS_FUNCTIONS.getForums,
+            { courseids: courseIds },
+            GetForumsResponse,
+          );
+          return forums;
+        },
         (result) => `${result.length} ${result.length === 1 ? 'foro' : 'foros'}`,
       ),
+    );
+
+    // El mismo agujero que el de los envíos, en versión foro: ver el foro no es
+    // poder leer sus debates ni sus mensajes. Con un foro (o un debate) a la
+    // vista se hace la llamada de verdad; sin ninguno no hay llamada inocua
+    // posible y se mira el catálogo del token, que es donde suele estar el fallo.
+    const forumId = forums?.[0]?.id;
+    let discussions: GetForumDiscussionsResponse | undefined;
+    checks.push(
+      forumId === undefined
+        ? this.#declared(
+            siteInfo,
+            WS_FUNCTIONS.getForumDiscussions,
+            'Leer los debates del foro',
+            'Sin ella Vega ve el foro pero no puede leer qué se pregunta en él.',
+            READ_NOT_REHEARSED,
+          )
+        : await this.#probe(
+            WS_FUNCTIONS.getForumDiscussions,
+            'Leer los debates del foro',
+            async () => {
+              discussions = await this.#client.call(
+                WS_FUNCTIONS.getForumDiscussions,
+                {
+                  forumid: forumId,
+                  page: 0,
+                  perpage: 1,
+                  sortby: 'timemodified',
+                  sortdirection: 'ASC',
+                },
+                GetForumDiscussionsResponse,
+              );
+              return discussions;
+            },
+            (result) =>
+              result.discussions.length === 0
+                ? 'Responde correctamente; el primer foro aún no tiene debates.'
+                : 'Lee los debates del primer foro sin problemas.',
+          ),
+    );
+
+    const firstDiscussion = discussions?.discussions[0];
+    const discussionId =
+      firstDiscussion === undefined ? undefined : (firstDiscussion.discussion ?? firstDiscussion.id);
+    checks.push(
+      discussionId === undefined
+        ? this.#declared(
+            siteInfo,
+            WS_FUNCTIONS.getDiscussionPosts,
+            'Leer los mensajes de un debate',
+            'Sin ella no se sabe si la pregunta que abre un debate sigue sin responder, que es a lo único que Vega contesta.',
+            READ_NOT_REHEARSED,
+          )
+        : await this.#probe(
+            WS_FUNCTIONS.getDiscussionPosts,
+            'Leer los mensajes de un debate',
+            () =>
+              this.#client.call(
+                WS_FUNCTIONS.getDiscussionPosts,
+                { discussionid: discussionId },
+                GetDiscussionPostsResponse,
+              ),
+            (result) =>
+              `${result.posts.length} ${result.posts.length === 1 ? 'mensaje' : 'mensajes'} en el primer debate`,
+          ),
     );
 
     // Opcional a propósito: sin esta función Vega corrige exactamente igual,
@@ -345,6 +461,7 @@ export class Moodle3Connector implements LmsConnector {
     name: string,
     label: string,
     whyItMatters: string,
+    okDetail?: string,
   ): LmsConnectionCheck {
     const declared = siteInfo?.functions;
     if (declared === undefined) {
@@ -366,8 +483,9 @@ export class Moodle3Connector implements LmsConnector {
         label,
         status: 'ok',
         detail:
+          okDetail ??
           'Está en el servicio web del token. No se ejecuta en la comprobación —escribiría en Moodle—, ' +
-          'así que queda por confirmar que el usuario tenga además la capacidad correspondiente.',
+            'así que queda por confirmar que el usuario tenga además la capacidad correspondiente.',
         required: true,
       };
     }
