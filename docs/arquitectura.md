@@ -40,7 +40,7 @@ graph TB
   SHARED["packages/shared<br/>esquemas Zod + tipos<br/>+ objeto routes"]
 
   subgraph conectores["connectors/"]
-    LMSIF["interfaz LmsConnector<br/>7 operaciones"]
+    LMSIF["interfaz LmsConnector<br/>8 operaciones"]
     MOCK["mock<br/>(por defecto)"]
     FS["filesystem"]
     M3["moodle3<br/>sin verificar contra Moodle real"]
@@ -86,7 +86,7 @@ Dos flechas que no son sólidas y conviene leer despacio:
   script de siembra (`apps/api/src/db/demo.ts`) y los vuelca en la tabla `grading_contexts`. A
   partir de ahí manda la base de datos: `readContextLevel()` consulta la tabla y nada más. Ver
   [`contexts/README.md`](../contexts/README.md).
-- **El API usa ya las siete operaciones del conector.** El catálogo entró en H2
+- **El API usa ya las ocho operaciones del conector.** El catálogo entró en H2
   (`GET /api/courses/discover`, `GET /api/activities/discover`, `POST /api/activities/import`); la
   ingesta y la publicación, en el ADR 0012. Lo que **no** ha ocurrido todavía es ejecutar nada de
   esto contra un Moodle real: `connectors/moodle3` sigue probado sólo con `fetchImpl` inyectado y
@@ -198,8 +198,8 @@ sequenceDiagram
   PROF->>API: POST .../validate
   PROF->>API: POST .../publish
   rect rgb(245, 245, 245)
-    API->>CN: publishGrade({ score: null, maxScore: null, items: [] })
-    CN->>LMS: feedback en HTML, sin tocar la calificación
+    API->>CN: publishForumReply(RemoteReply)
+    CN->>LMS: mod_forum_add_discussion_post, colgando del mensaje del alumno
   end
   API->>DB: published_at · status = published
 ```
@@ -353,12 +353,21 @@ un PR, sin entender el resto del monorepo. Enterrarlos en `packages/` los haría
 interno. Ver [ADR 0009](decisiones/0009-interfaz-lms-siete-operaciones.md), que sustituye al
 [ADR 0006](decisiones/0006-conectores-lms-interfaz-minima.md).
 
-La interfaz `LmsConnector` son siete operaciones: `listCourses`, `verifyConnection`,
-`listActivities`, `listSubmissions`, `download`, `publishGrade` y `publishFeedbackFile`. Las dos
-primeras y el filtro por curso de la tercera entraron en H2, cuando el alta de actividades pasó de
-un catálogo simulado a un Moodle real. Los tipos que cruzan esa frontera son deliberadamente pobres
-(`ActivityRef`, `SubmissionRef`, `RemoteSubmission`, `RemoteGrade`): un conector mueve ficheros,
-textos y notas; corregir no es asunto suyo.
+La interfaz `LmsConnector` son ocho operaciones: `listCourses`, `verifyConnection`,
+`listActivities`, `listSubmissions`, `download`, `publishGrade`, `publishFeedbackFile` y
+`publishForumReply`. Las dos primeras y el filtro por curso de la tercera entraron en H2, cuando el
+alta de actividades pasó de un catálogo simulado a un Moodle real; la última, con el
+[ADR 0014](decisiones/0014-publicar-en-foro-y-verificar-la-escritura.md). Los tipos que cruzan esa
+frontera son deliberadamente pobres (`ActivityRef`, `SubmissionRef`, `RemoteSubmission`,
+`RemoteGrade`, `RemoteReply`): un conector mueve ficheros, textos y notas; corregir no es asunto
+suyo.
+
+**Las tres últimas escriben, y no son intercambiables.** Un foro no tiene libro de notas: una
+respuesta validada se publica con `publishForumReply` y **nunca** con `publishGrade`, que los
+conectores rechazan sobre una actividad de foro. No es una precaución teórica — antes de la
+bifurcación, el `remoteId` de una duda (`<foro>:<debate>:<mensaje>`) se leía sin error como el de una
+entrega (`<tarea>:<usuario>:<intento>`) y la respuesta acababa como nota de otra actividad, a otro
+alumno. Ver ADR 0014.
 
 **Los modos de fallo sí son parte del contrato**, y no lo eran: `LmsAuthError` («tu credencial no
 vale, pasa por Ajustes») y `LmsUnavailableError` («el LMS no responde, reinténtalo») se reconocen por
@@ -405,7 +414,9 @@ cada pieza de cara al motor de IA está en
 |---|---|---|
 | Ingesta desde el LMS | `apps/api/src/ingest/` | **Cableada** (ADR 0012). El lote llama a `listSubmissions()` y a `download()` antes de corregir, con la credencial de `activities.imported_by`. Idempotente por `UNIQUE (activity_id, remote_id)`. **Sin verificar contra un Moodle real.** |
 | Ficha del alumno | `apps/api/src/ingest/` · `students` | **Implementada** (ADR 0013). La ingesta trae el perfil de Moodle —nombre, correo, centro y campos personalizados— y lo refresca en cada pasada. Al modelo viaja **sólo** el recorte de `studentContextFor()`: nombre, comunidad autónoma, provincia y población. NIF, DNI, dirección y código postal se guardan y **no salen nunca**. |
-| Publicación en el LMS | `routes/submissions.ts` · `publish/publish.ts` | **Cableada** (ADR 0012). `POST .../publish` llama a `publishGrade` y a `publishFeedbackFile` con lo **efectivo**, y registra cada una por separado para que el reintento no republique la nota. Un conector sin fichero de feedback no es un fallo: se publica la nota y se explica en `corrections.publish_notice`. **Sin verificar contra un Moodle real.** |
+| Publicación en el LMS · entregas | `routes/submissions.ts` · `publish/publish.ts` | **Cableada** (ADR 0012). `POST .../publish` llama a `publishGrade` y a `publishFeedbackFile` con lo **efectivo**, y registra cada una por separado para que el reintento no republique la nota. Un conector sin fichero de feedback no es un fallo: se publica la nota y se explica en `corrections.publish_notice`. **Sin verificar contra un Moodle real.** |
+| Publicación en el LMS · foros | `publish/publish.ts` · `connectors/moodle3` | **Cableada** (ADR 0014). `publishForumReply` cuelga la respuesta del mensaje del alumno con `mod_forum_add_discussion_post`, una sola operación y una sola marca. Corrige un fallo que escribía notas en el sitio equivocado sin dar error. **Lo que falta es el formato**: hoy se manda el documento de corrección, que es LaTeX/markdown, y un mensaje de foro es prosa. Lo decide H3. **Sin verificar contra un Moodle real.** |
+| Verificación del token | `connectors/moodle3` · Ajustes | **Ampliada** (ADR 0014). Las funciones de lectura se prueban llamándolas; las de escritura (`mod_assign_save_grade`, `mod_forum_add_discussion_post`) **no se pueden ensayar** —calificarían a un alumno o publicarían un mensaje— y se comprueban contra el catálogo de funciones del token. Eso dice si la función está en el servicio, no si el usuario tiene la capacidad. |
 | Catálogo de actividades de Moodle | `routes/activities.ts` · `lms/factory.ts` | **Cableado.** `GET /api/courses/discover`, `GET /api/activities/discover` y `POST /api/activities/import` llaman al conector de verdad; `MOODLE_CATALOGUE` ha desaparecido. `apps/api` depende ya de `@vega/connector-{lms,moodle3,filesystem}`. |
 | `moodle3` · listar cursos, tareas y foros | `connectors/moodle3` | **Implementado, sin verificar contra un Moodle real.** Usa `core_enrol_get_users_courses`, `mod_assign_get_assignments` y `mod_forum_get_forums_by_courses`, y ya conserva el id del curso. Tiene tests unitarios con `fetchImpl` inyectado y varios `TODO(vega)` abiertos. `pendingCount` de una entrega se devuelve a 0 a propósito: contarlo obligaría a bajarse todas las entregas. **Sigue siendo el riesgo principal del proyecto.** |
 | `moodle3` · comprobar la credencial | `connectors/moodle3` | **Implementado**, sin verificar contra un Moodle real. `verifyConnection()` usa `core_webservice_get_site_info` y devuelve sitio, usuario y número de cursos. No distingue «no tienes cursos» de «al servicio le falta habilitar `core_enrol_get_users_courses`». |
