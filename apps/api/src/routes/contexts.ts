@@ -11,11 +11,23 @@ import {
 import { resolveContext } from '@vega/core';
 import { currentUser } from '../auth/plugin.js';
 import { schema } from '../db/client.js';
-import { toGradingContext } from '../db/mappers.js';
 import { forbidden, notFound, parseOrThrow } from '../http/errors.js';
-import { activityScope, assertActivityAccess, seesEverything } from '../auth/scope.js';
+import {
+  activityScope,
+  assertActivityAccess,
+  assertCourseAccess,
+  seesEverything,
+} from '../auth/scope.js';
 import { requireActivity } from './activities.js';
 import type { AppContext } from '../context.js';
+import {
+  listActiveContexts,
+  readActiveContext,
+  readContextLevel,
+  saveContextVersion,
+} from '../contexts/service.js';
+
+export { readContextLevel } from '../contexts/service.js';
 
 /**
  * Contextos de corrección a tres niveles: global → tipo de actividad →
@@ -32,20 +44,6 @@ import type { AppContext } from '../context.js';
  * en un solo sitio es lo que evita que las dos cosas se separen con el tiempo.
  */
 
-/** Lee el contenido de un nivel de contexto; cadena vacía si no está definido. */
-export async function readContextLevel(
-  ctx: AppContext,
-  level: ContextLevel,
-  key: string,
-): Promise<string> {
-  const [row] = await ctx.db
-    .select()
-    .from(schema.gradingContexts)
-    .where(and(eq(schema.gradingContexts.level, level), eq(schema.gradingContexts.key, key)))
-    .limit(1);
-  return row?.content ?? '';
-}
-
 // ── Rutas ───────────────────────────────────────────────────────────────────
 
 export async function contextRoutes(app: FastifyInstance, ctx: AppContext): Promise<void> {
@@ -56,28 +54,33 @@ export async function contextRoutes(app: FastifyInstance, ctx: AppContext): Prom
     { preHandler: app.authenticate },
     async (request): Promise<ContextListResponse> => {
       const session = currentUser(request);
-      const rows = await db
-        .select()
-        .from(schema.gradingContexts)
-        .orderBy(asc(schema.gradingContexts.level), asc(schema.gradingContexts.key));
+      const rows = await listActiveContexts(ctx);
 
       // Los niveles global y de tipo de actividad son política de departamento
       // y los ve todo el mundo (HU-06, RN-6). El de una actividad concreta, no:
       // es el criterio con el que se corrige a alumnos de un curso, y sigue el
       // mismo alcance que la actividad. Un contexto huérfano —sin actividad que
       // le corresponda— sólo lo ve la administración: no es de nadie.
-      if (seesEverything(session)) return { items: rows.map(toGradingContext) };
+      if (seesEverything(session)) return { items: rows };
 
       const visible = await db
         .select({ slug: schema.activities.slug })
         .from(schema.activities)
         .where(activityScope(session));
       const slugs = new Set(visible.map((row) => row.slug));
+      const visibleCourses = await db
+        .select({ id: schema.courseTeachers.courseId })
+        .from(schema.courseTeachers)
+        .where(eq(schema.courseTeachers.userId, session.sub));
+      const courseIds = new Set(visibleCourses.map((row) => row.id));
 
       return {
         items: rows
-          .filter((row) => row.level !== 'activity' || slugs.has(row.key))
-          .map(toGradingContext),
+          .filter(
+            (row) =>
+              (row.level !== 'activity' || slugs.has(row.key)) &&
+              (row.level !== 'course' || courseIds.has(row.key)),
+          ),
       };
     },
   );
@@ -93,9 +96,14 @@ export async function contextRoutes(app: FastifyInstance, ctx: AppContext): Prom
       const session = currentUser(request);
       const key = request.params.key;
 
-      // Editar el contexto de una actividad es decidir con qué criterio se
-      // corrige a sus alumnos: exige el mismo permiso que la actividad. Los
-      // niveles global y de tipo son política común y no se acotan (HU-06, RN-6).
+      if ((level === 'global' || level === 'activity_kind') && !seesEverything(session)) {
+        throw forbidden('Sólo la administración puede editar este nivel de contexto.');
+      }
+
+      if (level === 'course') {
+        await assertCourseAccess(ctx, session, key);
+      }
+
       if (level === 'activity') {
         const [target] = await db
           .select({ id: schema.activities.id })
@@ -112,18 +120,14 @@ export async function contextRoutes(app: FastifyInstance, ctx: AppContext): Prom
         }
       }
 
-      // Upsert: los contextos se crean solos la primera vez que se editan.
-      const [row] = await db
-        .insert(schema.gradingContexts)
-        .values({ level, key, content: body.content, updatedBy: session.sub })
-        .onConflictDoUpdate({
-          target: [schema.gradingContexts.level, schema.gradingContexts.key],
-          set: { content: body.content, updatedBy: session.sub, updatedAt: new Date() },
-        })
-        .returning();
-
-      if (!row) throw notFound('No se ha podido guardar el contexto.');
-      return { context: toGradingContext(row) };
+      const context = await saveContextVersion(ctx, {
+        level,
+        key,
+        content: body.content,
+        expectedVersion: body.expectedVersion,
+        userId: session.sub,
+      });
+      return { context };
     },
   );
 
@@ -152,12 +156,36 @@ export async function contextRoutes(app: FastifyInstance, ctx: AppContext): Prom
         )
         .orderBy(asc(schema.activityFiles.uploadedAt));
 
-      // Lo que ve el profesor en esta pantalla es literalmente lo que se manda
-      // al modelo: misma función que usa el lote.
+      const contexts = await Promise.all([
+        readActiveContext(ctx, 'global', 'global'),
+        readActiveContext(ctx, 'activity_kind', activity.kind),
+        activity.templateKey
+          ? readActiveContext(ctx, 'template', activity.templateKey)
+          : Promise.resolve(null),
+        activity.courseId
+          ? readActiveContext(ctx, 'course', activity.courseId)
+          : Promise.resolve(null),
+        readActiveContext(ctx, 'activity', activity.slug),
+      ]);
+      const [global, activityKind, template, course, activityContext] = contexts;
+      const segments = contexts
+        .filter((item): item is NonNullable<typeof item> => item !== null)
+        .map((item) => ({
+          level: item.level,
+          key: item.key,
+          contextId: item.id,
+          version: item.activeVersion,
+          contentHash: item.contentHash,
+          content: item.content,
+        }));
+
       return resolveContext({
-        global: await readContextLevel(ctx, 'global', 'global'),
-        activityKind: await readContextLevel(ctx, 'activity_kind', activity.kind),
-        activity: await readContextLevel(ctx, 'activity', activity.slug),
+        global: global?.content,
+        activityKind: activityKind?.content,
+        template: template?.content,
+        course: course?.content,
+        activity: activityContext?.content,
+        segments,
         files: activity.files,
         referenceSolution: activity.referenceSolution,
         graded: activity.graded,

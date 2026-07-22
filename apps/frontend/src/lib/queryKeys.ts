@@ -23,6 +23,8 @@ export const queryKeys = {
   discoverActivities: (moodleCourseId: string) =>
     ['activities', 'discover', moodleCourseId] as const,
   contexts: ['contexts'] as const,
+  prompts: ['prompts'] as const,
+  aiCalls: (params: object) => ['ai-calls', params] as const,
   resolvedContext: (activityId: string) => ['contexts', 'resolved', activityId] as const,
   users: ['users'] as const,
   settings: ['settings'] as const,

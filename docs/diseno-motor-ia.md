@@ -1,10 +1,10 @@
 # Diseño del motor de IA — análisis del hito
 
-> **Estado: propuesta para revisión.** Este documento reúne el análisis del hito de
-> integración con IA. La **sección §4 (cómo funciona el sistema y optimización de tokens)** está
-> abierta a que otra IA proponga algo mejor —sobre todo en ahorro de tokens— **antes** de
-> implementarla. El resto (dónde vive cada dato, API key, prueba de conexión, revisión del modelo)
-> es el plan que se va a ejecutar en este hito.
+> **Estado: SUSTITUIDO por [`motor-ia.md`](motor-ia.md) (2026-07-22).** La arquitectura del motor
+> quedó cerrada allí tras consolidar este análisis, los de `docs/analisis/` y el input humano de
+> `docs/analisis/comentarios-sesion.md`. De este documento, la §5 (API key y prueba de conexión)
+> **ya está implementada** (`apps/api/src/ai/factory.ts`, `routes/settings.ts`); la §4 queda
+> superada por las decisiones de `motor-ia.md`. Se conserva como registro del análisis.
 >
 > Convención de este documento: convierto las fechas relativas a absolutas y cito el código real
 > (`fichero:símbolo`) en vez de describirlo de memoria. Si algo aquí no cuadra con el código, el

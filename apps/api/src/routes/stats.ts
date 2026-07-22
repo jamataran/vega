@@ -9,7 +9,7 @@ import type {
   SubmissionStatus,
 } from '@vega/shared';
 import { z } from 'zod';
-import { ACTIVITY_KIND_LABEL, CostDimension, CostPeriod, routes } from '@vega/shared';
+import { ACTIVITY_KIND_LABEL, AI_OPERATION_LABEL, CostDimension, CostPeriod, routes } from '@vega/shared';
 import { currentUser } from '../auth/plugin.js';
 import { seesEverything, visibleActivityIds } from '../auth/scope.js';
 import { schema } from '../db/client.js';
@@ -46,6 +46,7 @@ export async function statsRoutes(app: FastifyInstance, ctx: AppContext): Promis
         transcribed: 0,
         grading: 0,
         graded: 0,
+        parked: 0,
         validated: 0,
         published: 0,
         error: 0,
@@ -142,6 +143,39 @@ export async function statsRoutes(app: FastifyInstance, ctx: AppContext): Promis
 
       const validatedCount = Number(untouched?.validated ?? 0);
       const untouchedCount = Number(untouched?.untouched ?? 0);
+      const [quality] = await sql<{
+        readings: string;
+        readings_clean: string;
+        deductions: string;
+        deductions_cited: string;
+        verifications: string;
+        verifications_clean: string;
+        simulated_calls: string;
+        real_calls: string;
+        unpriced_calls: string;
+      }[]>`
+        SELECT
+          (SELECT COUNT(*) FROM transcriptions t JOIN submissions s ON s.id = t.submission_id WHERE TRUE ${mine}) AS readings,
+          (SELECT COUNT(*) FROM transcriptions t JOIN submissions s ON s.id = t.submission_id WHERE jsonb_array_length(COALESCE(t.discrepancies, '[]'::jsonb)) = 0 ${mine}) AS readings_clean,
+          (SELECT COUNT(*) FROM correction_items ci JOIN corrections c ON c.id = ci.correction_id JOIN submissions s ON s.id = c.submission_id WHERE ci.ai_points < ci.max_points ${mine}) AS deductions,
+          (SELECT COUNT(*) FROM correction_items ci JOIN corrections c ON c.id = ci.correction_id JOIN submissions s ON s.id = c.submission_id WHERE ci.ai_points < ci.max_points AND ci.ai_quote IS NOT NULL ${mine}) AS deductions_cited,
+          (SELECT COUNT(*) FROM corrections c JOIN submissions s ON s.id = c.submission_id WHERE c.verification IS NOT NULL ${mine}) AS verifications,
+          (SELECT COUNT(*) FROM corrections c JOIN submissions s ON s.id = c.submission_id WHERE c.verification IS NOT NULL AND jsonb_array_length(COALESCE(c.verification->'issues', '[]'::jsonb)) = 0 ${mine}) AS verifications_clean,
+          (SELECT COUNT(*) FROM ai_calls ac JOIN submissions s ON s.id = ac.submission_id WHERE ac.simulated ${mine}) AS simulated_calls,
+          (SELECT COUNT(*) FROM ai_calls ac JOIN submissions s ON s.id = ac.submission_id WHERE NOT ac.simulated ${mine}) AS real_calls,
+          (SELECT COUNT(*) FROM ai_calls ac JOIN submissions s ON s.id = ac.submission_id WHERE ac.cost_cents IS NULL AND ac.error IS NULL ${mine}) AS unpriced_calls
+      `;
+      const ratio = (part: string | undefined, total: string | undefined): number => {
+        const denominator = Number(total ?? 0);
+        return denominator === 0 ? 0 : Math.round((Number(part ?? 0) / denominator) * 10_000) / 10_000;
+      };
+      const citationsVerified = ratio(quality?.deductions_cited, quality?.deductions);
+      const readingsWithoutDiscrepancy = ratio(quality?.readings_clean, quality?.readings);
+      const verificationsWithoutIssues = ratio(quality?.verifications_clean, quality?.verifications);
+      const untouchedRatio = validatedCount === 0 ? 0 : Math.round((untouchedCount / validatedCount) * 100) / 100;
+      const reliabilityScore = Math.round(((citationsVerified + readingsWithoutDiscrepancy + verificationsWithoutIssues + untouchedRatio) / 4) * 10_000) / 10_000;
+      const simulatedCalls = Number(quality?.simulated_calls ?? 0);
+      const realCalls = Number(quality?.real_calls ?? 0);
 
       /**
        * El último lote se reserva a administración.
@@ -185,8 +219,15 @@ export async function statsRoutes(app: FastifyInstance, ctx: AppContext): Promis
             ? 0
             : Math.round(Number(deviation.avg_deviation) * 100) / 100,
         // Sin correcciones validadas todavía no hay señal: 0 es "aún no sabemos".
-        untouchedRatio:
-          validatedCount === 0 ? 0 : Math.round((untouchedCount / validatedCount) * 100) / 100,
+        untouchedRatio,
+        reliability: {
+          score: reliabilityScore,
+          citationsVerified,
+          readingsWithoutDiscrepancy,
+          verificationsWithoutIssues,
+        },
+        aiMode: simulatedCalls > 0 && realCalls > 0 ? 'mixed' : realCalls > 0 ? 'real' : simulatedCalls > 0 ? 'simulated' : 'none',
+        unpricedCalls: Number(quality?.unpriced_calls ?? 0),
         lastBatchRun: lastRun ? toBatchRun(lastRun) : null,
       };
     },
@@ -244,6 +285,70 @@ export async function statsRoutes(app: FastifyInstance, ctx: AppContext): Promis
       // gasto de un curso en cuanto alguien lo renombraba en Moodle, que es
       // justo el defecto que la entidad `courses` vino a arreglar.
       const courseName = sql`NULLIF(COALESCE(co.name, a.course_name), '')`;
+
+      if (dimension === 'operation') {
+        const operationRows = await sql<{
+          operation: keyof typeof AI_OPERATION_LABEL;
+          input_tokens: number;
+          output_tokens: number;
+          cached_tokens: number;
+          cost_cents: number;
+          corrections: number;
+          from_ts: Date;
+          to_ts: Date;
+        }[]>`
+          SELECT ac.operation,
+                 SUM(ac.input_tokens)::int AS input_tokens,
+                 SUM(ac.output_tokens)::int AS output_tokens,
+                 SUM(ac.cache_read_tokens)::int AS cached_tokens,
+                 COALESCE(SUM(ac.cost_cents), 0)::float8 AS cost_cents,
+                 COUNT(DISTINCT ac.submission_id)::int AS corrections,
+                 MIN(ac.created_at) AS from_ts,
+                 MAX(ac.created_at) AS to_ts
+            FROM ai_calls ac
+            LEFT JOIN submissions s ON s.id = ac.submission_id
+           WHERE ac.created_at >= ${since}
+             AND ac.submission_id IS NOT NULL
+             ${mine}
+           GROUP BY ac.operation
+           ORDER BY cost_cents DESC
+        `;
+        const totals = operationRows.reduce(
+          (total, row) => ({
+            inputTokens: total.inputTokens + row.input_tokens,
+            outputTokens: total.outputTokens + row.output_tokens,
+            cachedInputTokens: total.cachedInputTokens + row.cached_tokens,
+            costCents: total.costCents + row.cost_cents,
+            corrections: total.corrections + row.corrections,
+          }),
+          { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, costCents: 0, corrections: 0 },
+        );
+        const first = operationRows.at(-1);
+        const last = operationRows[0];
+        return {
+          period,
+          from: toIso(first?.from_ts ?? new Date()),
+          to: toIso(last?.to_ts ?? new Date()),
+          dimension,
+          usage: {
+            inputTokens: totals.inputTokens,
+            outputTokens: totals.outputTokens,
+            cachedInputTokens: totals.cachedInputTokens,
+            costCents: totals.costCents,
+          },
+          corrections: totals.corrections,
+          avgCostCents: totals.corrections === 0 ? 0 : totals.costCents / totals.corrections,
+          groups: operationRows.map((row) => ({
+            key: row.operation,
+            label: AI_OPERATION_LABEL[row.operation],
+            activityId: null,
+            kind: null,
+            costCents: row.cost_cents,
+            corrections: row.corrections,
+            avgCostCents: row.corrections === 0 ? 0 : row.cost_cents / row.corrections,
+          })),
+        };
+      }
 
       const [key, label, kind, activityId, groupBy] =
         dimension === 'activity_kind'

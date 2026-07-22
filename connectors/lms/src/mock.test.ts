@@ -85,3 +85,43 @@ test('un perfil incompleto también está representado', async () => {
     'algún alumno tiene que venir sin teléfono',
   );
 });
+
+// ── Publicar por el camino correcto ─────────────────────────────────────────
+
+/**
+ * El mock rechaza los cruces igual que el conector real. Es donde se prueba el
+ * circuito completo sin Moodle delante: si aquí una respuesta de foro se dejara
+ * publicar como nota, el error sólo aparecería en producción y en forma de
+ * calificación puesta a quien no era.
+ */
+test('el mock no deja publicar una respuesta de foro como nota', async () => {
+  const conector = new MockLmsConnector();
+  const [duda] = await conector.listSubmissions(FORO);
+
+  await assert.rejects(
+    () => conector.publishGrade(duda!.ref, { score: null, maxScore: null, summary: '', items: [] }),
+    /publishForumReply/,
+  );
+  assert.equal(conector.publishedGrades.length, 0);
+});
+
+test('el mock no deja responder en el foro a una entrega', async () => {
+  const conector = new MockLmsConnector();
+  const [entrega] = await conector.listSubmissions(TAREA);
+
+  await assert.rejects(
+    () => conector.publishForumReply(entrega!.ref, { body: 'Hola', subject: null }),
+    /publishGrade/,
+  );
+  assert.equal(conector.publishedReplies.length, 0);
+});
+
+test('una respuesta validada queda registrada y se puede leer', async () => {
+  const conector = new MockLmsConnector();
+  const [duda] = await conector.listSubmissions(FORO);
+
+  await conector.publishForumReply(duda!.ref, { body: 'Buena observación.', subject: null });
+
+  assert.equal(conector.publishedReplies.length, 1);
+  assert.equal(conector.publishedReplies[0]?.reply.body, 'Buena observación.');
+});

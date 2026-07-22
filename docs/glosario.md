@@ -222,7 +222,7 @@ suma, y autonomía por debajo del umbral.
 
 **Cola de revisión** (`QueueItem`, `QueueResponse`)
 La lista de entregas que esperan acción del profesor. Su criterio de pertenencia es
-`REVIEWABLE_STATUSES = ['graded', 'validated', 'error']`. Se filtra por estado, actividad, tipo de
+`REVIEWABLE_STATUSES = ['graded', 'parked', 'validated', 'error']`. Se filtra por estado, actividad, tipo de
 actividad y búsqueda libre sobre el alias o la referencia del alumno.
 
 **Validar** (`Correction.validatedBy` / `validatedAt`)
@@ -236,15 +236,30 @@ puntuable el `RemoteGrade` viaja con `score` y `maxScore` a `null` y el LMS no r
 ninguna. Una vez publicada, la corrección no se puede editar ni reprocesar.
 
 **Publicación automática** (`Correction.publishedAutomatically`)
-`true` cuando la corrección se publicó desde el lote sin pasar por el profesor, por el modo de
-autonomía de la actividad. Es lo que distingue una publicación autónoma de una validada a mano, y lo
-que cuenta `BatchRun.submissionsAutoPublished`.
+Campo heredado que el motor IA ya no activa. El lote termina en `graded`; la publicación en Moodle
+es una operación posterior y explícita.
 
 **Lote** (`BatchRun`)
 Ejecución del procesamiento por tandas que recoge las entregas en `pending` de las actividades
-activas, las corrige y aplica la autonomía. Lo dispara el planificador (`triggeredBy = null`) o el
+activas, las corrige y las deja listas para revisión. Lo dispara el planificador (`triggeredBy = null`) o el
 profesor a mano desde Ajustes. Se ordena por actividad para aprovechar el prompt caching, y procesa
 como mucho 25 entregas por ejecución.
+
+**Doble lectura**
+Dos transcripciones independientes del mismo original. Se comparan con forma canónica y cualquier
+diferencia material se conserva como `DISCREPANCIA`; ninguna lectura corrige a la otra en silencio.
+
+**Cita verificable** (`CorrectionItem.aiQuote`)
+Fragmento literal y página del trabajo del alumno que ancla un descuento. Si falta o no aparece en
+la lectura consolidada, la verificación mecánica reduce la confianza por debajo del 50 %.
+
+**Aparcada** (`parked`)
+Intervención que no requiere respuesta del motor: errata, gestión administrativa o texto que no es
+una duda con confianza de triaje ≥ 0,9, o una decisión manual del profesor.
+
+**Ledger de IA** (`ai_calls`)
+Registro por intento con operación, modelo, versiones de prompt y contexto, petición sin binarios,
+respuesta, uso, coste y errores. Es exclusivo de administración.
 
 **Conector** (`moodle.connector` en los ajustes)
 Adaptador que habla con el origen de las entregas y el destino de las notas: `mock`, `filesystem`,

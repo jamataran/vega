@@ -83,7 +83,11 @@ export function ContextPage() {
   const dirty = value !== serverContent;
 
   const saveMutation = useMutation({
-    mutationFn: () => api.updateContext(level, selectedKey, { content: value }),
+    mutationFn: () =>
+      api.updateContext(level, selectedKey, {
+        content: value,
+        expectedVersion: stored?.activeVersion ?? 1,
+      }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.contexts });
       setDrafts((current) => {
@@ -105,7 +109,7 @@ export function ContextPage() {
   return (
     <div>
       <PageHeader eyebrow="Corrección" title="Contexto">
-        Las instrucciones que recibe la IA. Se acumulan de lo general a lo concreto; el contexto de
+        Los criterios que recibe el motor. Se acumulan de lo general a lo concreto; el contexto de
         cada actividad se edita en su ficha.
       </PageHeader>
 
@@ -192,7 +196,7 @@ export function ContextPage() {
 
           <Section
             title="Contexto efectivo"
-            description="Lo que se enviaría de verdad al modelo para una actividad concreta, con los tres niveles ya resueltos."
+            description="Lo que se enviaría al modelo para una actividad concreta, con los cinco niveles ya resueltos."
           >
             {activitiesQuery.isError ? (
               <ErrorState

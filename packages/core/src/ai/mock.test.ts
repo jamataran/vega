@@ -22,10 +22,12 @@ function gradeInputFor(submissionId: string): GradeInput {
   return {
     submissionId,
     activityKind: 'assignment',
-    transcription: { pages: [], flags: [], confidence: 0.9 },
+    transcription: { pages: [], flags: [], discrepancies: [], passCount: 2, confidence: 0.9 },
+    document: [],
     textContent: null,
     student: null,
-    context: '## Instrucciones globales\n\nCorrige con rigor.',
+    context: [],
+    material: '## Instrucciones globales\n\nCorrige con rigor.',
     pointsAllocation: [
       { label: '1a', statement: 'Derivada', maxPoints: 2.5 },
       { label: '1b', statement: 'Simplificación', maxPoints: 2.5 },
@@ -42,9 +44,11 @@ function forumInputFor(submissionId: string, textContent: string | null = null):
     submissionId,
     activityKind: 'forum',
     transcription: null,
+    document: [],
     textContent,
     student: null,
-    context: '## Instrucciones globales\n\nValora la argumentación.',
+    context: [],
+    material: '## Instrucciones globales\n\nValora la argumentación.',
     pointsAllocation: [],
     graded: false,
     maxScore: null,
@@ -99,7 +103,8 @@ test('la transcripción devuelve LaTeX creíble por página', async () => {
     // componer un documento de varios párrafos).
     assert.match(page.latex, /\$\$[\s\S]+?\$\$/u, 'la página debe traer fórmulas delimitadas');
     assert.match(page.latex, /\\[a-zA-Z]+/u, 'la página debe traer comandos LaTeX');
-    assert.ok(page.imageUrl.includes(SUBMISSION_A));
+    assert.match(page.imageUrl, /^data:image\/svg\+xml/u);
+    assert.match(decodeURIComponent(page.imageUrl), /Original simulado/u);
   }
   assert.ok(result.confidence > 0 && result.confidence <= 1);
 });

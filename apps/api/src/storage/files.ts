@@ -76,6 +76,28 @@ export class FileStore {
     return readFile(this.absolutePathOf(storagePath));
   }
 
+  /**
+   * ¿Se puede escribir de verdad en el almacén?
+   *
+   * Se comprueba escribiendo, no mirando permisos: en un contenedor el fallo
+   * típico es que el volumen se haya montado con otro dueño, y eso `stat` no lo
+   * responde por el usuario que corre el proceso. Existe porque la alternativa
+   * ya ocurrió: un despliegue con el volumen sin permisos registró un centenar
+   * de entregas y no guardó ni un PDF, y no se supo hasta que el motor empezó a
+   * fallar sobre ficheros que nunca llegaron.
+   */
+  async checkWritable(): Promise<{ writable: true } | { writable: false; reason: string }> {
+    const probe = join(this.#root, '.vega-escritura');
+    try {
+      await mkdir(this.#root, { recursive: true });
+      await writeFile(probe, 'ok');
+      await rm(probe, { force: true });
+      return { writable: true };
+    } catch (error) {
+      return { writable: false, reason: (error as Error).message };
+    }
+  }
+
   /** Borra lo guardado de una entrega. No falla si no había nada. */
   async removeSubmissionFiles(submissionId: string): Promise<void> {
     const absolute = this.absolutePathOf(join('submissions', submissionId));

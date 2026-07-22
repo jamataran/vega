@@ -12,7 +12,7 @@ import { Card } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
 import { EmptyState, ErrorState, PageHeader } from '@/components/common/Feedback';
-import { ActivityKindBadge, AutonomyBadge } from '@/components/common/status';
+import { ActivityKindBadge } from '@/components/common/status';
 import { DiscoverActivitiesDialog } from '@/components/activity/DiscoverActivitiesDialog';
 
 /** Agrupadas por curso de Moodle: es el orden con el que el profesor las busca. */
@@ -64,9 +64,6 @@ function ActivityRow({ activity }: { activity: Activity }) {
             <li>
               <ActivityKindBadge kind={activity.kind} />
             </li>
-            <li>
-              <AutonomyBadge mode={activity.autonomy} />
-            </li>
             <li className="text-ui text-muted-foreground">
               {activity.graded && activity.maxScore !== null
                 ? `Se puntúa sobre ${formatPoints(activity.maxScore)}`
@@ -113,8 +110,7 @@ export function ActivitiesPage() {
           </Button>
         }
       >
-        Las actividades de Moodle a las que reacciona Vega, con su tipo, su nota y cuánta autonomía
-        les has dado.
+        Las actividades de Moodle a las que reacciona Vega, con su tipo y su nota.
       </PageHeader>
 
       {query.isError ? (

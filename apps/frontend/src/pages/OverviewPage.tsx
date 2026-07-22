@@ -75,20 +75,42 @@ export function OverviewPage() {
                     : 'De media, bajas la nota de la IA'
               }
             />
-            {/* La métrica que decide cuándo una actividad aguanta más autonomía. */}
+            {/* La métrica que dice si el contexto de corrección está bien afinado. */}
             <Figure
               className="col-span-2"
               label="Validadas sin tocar"
               value={formatPercent(data.untouchedRatio)}
               note={
                 data.untouchedRatio >= 0.9
-                  ? 'Casi nunca cambias la propuesta: esta es la señal para dar más autonomía a una actividad.'
+                  ? 'Casi nunca cambias la propuesta: el contexto de corrección está bien afinado.'
                   : data.untouchedRatio >= 0.6
                     ? 'Sueles aceptar la propuesta, pero todavía intervienes en una de cada tres.'
-                    : 'Intervienes a menudo: conviene afinar el contexto antes de dar autonomía.'
+                    : 'Intervienes a menudo: conviene afinar el contexto de corrección.'
               }
             />
           </div>
+        </Section>
+
+        <Section
+          title="Fiabilidad"
+          description="Señales calculadas sobre citas, lecturas, verificación y cambios docentes."
+          actions={
+            <Badge variant={data.aiMode === 'real' ? 'success' : data.aiMode === 'none' ? 'outline' : 'warning'}>
+              {data.aiMode === 'real' ? 'IA real' : data.aiMode === 'simulated' ? 'Modo simulado' : data.aiMode === 'mixed' ? 'Datos mixtos' : 'Sin llamadas'}
+            </Badge>
+          }
+        >
+          <div className="grid grid-cols-2 gap-x-4 gap-y-5">
+            <Figure label="Índice compuesto" value={formatPercent(data.reliability.score)} />
+            <Figure label="Citas presentes" value={formatPercent(data.reliability.citationsVerified)} />
+            <Figure label="Lecturas coincidentes" value={formatPercent(data.reliability.readingsWithoutDiscrepancy)} />
+            <Figure label="Sin avisos al verificar" value={formatPercent(data.reliability.verificationsWithoutIssues)} />
+          </div>
+          {data.unpricedCalls > 0 ? (
+            <p role="alert" className="mt-4 text-ui text-warning-ink">
+              {data.unpricedCalls} {data.unpricedCalls === 1 ? 'llamada no tiene' : 'llamadas no tienen'} una tarifa conocida. No se muestran como coste cero.
+            </p>
+          ) : null}
         </Section>
 
         <CostBreakdown />

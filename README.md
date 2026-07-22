@@ -77,14 +77,15 @@ review forever.
 
 ## Any subject, not just maths
 
-Vega has no subject baked in. What the AI knows about your course lives entirely in Markdown files
-you write — **the prompts are the personalisation**, and they layer in three levels:
+Vega has no subject baked in. What the AI knows about your course lives in **grading contexts**
+you write — **the contexts are the personalisation** — layered from general to specific: global →
+activity kind → template → course → activity. The `contexts/` folder only seeds a fresh install;
+after that the database rules and everything is edited in the app (Contexts screen), versioned,
+with the effective combination always visible before it is sent.
 
-```
-contexts/global.md                     department-wide policy: tone, rounding, how strict to be
-contexts/activity-kinds/<kind>.md      what matters in this format of work
-contexts/activities/<slug>.md          this specific assignment or forum
-```
+The engine's own operating instructions (how to transcribe, grade, triage, verify) are a separate
+thing: **prompts**, also stored versioned in the database and editable from the admin Prompts
+screen. Step-by-step setup guide (Spanish): [`docs/configuracion.md`](docs/configuracion.md).
 
 More specific layers add to and qualify the general ones; they never erase them. So a maths
 department writes rules about method marks and algebraic rigour, while a Spanish literature
@@ -134,9 +135,9 @@ was skipped, autonomous publishing is vetoed in code, not in a comment.
 
 ## Writing contexts: what actually changes the output
 
-The prompts *are* the product configuration, so this section is the closest thing Vega has to a
+The contexts *are* the product configuration, so this section is the closest thing Vega has to a
 manual. Full guidance lives in [`contexts/README.md`](contexts/README.md); the shape of each layer
-is in [`docs/motor-ia.md`](docs/analisis/motor-ia.md).
+is in [`docs/motor-ia.md`](docs/motor-ia.md).
 
 **Write instructions, not a syllabus.** The reader is a corrector, not a student. «Deduct 0.25 for
 not stating the domain» does work; «value rigour» does not. Every rule should be one you could
@@ -245,14 +246,45 @@ The API creates an initial admin on first boot **only when the database has no u
 boot until you do. Everyone else is created from the Users screen.
 
 **A fresh install starts empty**: no courses, no activities, no submissions. Nothing is ever seeded
-automatically beyond the grading contexts from `contexts/`, which are configuration rather than
-sample data. To get demo content while working on the UI without a Moodle in front of you:
+automatically beyond the grading contexts from `contexts/` and the engine prompts embedded in the
+code, which are configuration rather than sample data. To get demo content while working on the UI without a Moodle in front of you:
 
 ```bash
 pnpm db:demo                    # WIPES the database, then loads sample data
 ```
 
 It refuses to run with `NODE_ENV=production`.
+
+### Connecting to the database
+
+`pnpm db:up` starts Postgres from the repo's `docker-compose.yml` as container `vega-postgres`, on
+**port 5433** — not 5432, deliberately, so it does not collide with another Postgres you already
+have running.
+
+```
+host      localhost          database  vega
+port      5433               user      vega
+                             password  vega
+```
+
+```bash
+postgres://vega:vega@localhost:5433/vega      # DATABASE_URL for apps/api
+psql postgres://vega:vega@localhost:5433/vega # or from a GUI client with the values above
+```
+
+Those credentials are development-only and live in `docker-compose.yml` in plain sight. In a
+deployed environment the value comes from `DATABASE_URL` in `deploy/{test,prod}/docker-compose.yml`,
+where the password is an environment secret and the host is the `postgres` service, not `localhost`.
+
+**The schema is documented in [`docs/modelo-de-datos.md`](docs/modelo-de-datos.md)** — entity
+diagram, every table with the reasoning behind it, and the submission state machine. It is derived
+from `apps/api/migrations/*.sql`, which is the source of truth: if the two disagree, the document is
+the one that is wrong. The TypeScript mirror of the schema is `apps/api/src/db/schema.ts` (Drizzle),
+and the API-facing types are in `packages/shared/src/domain.ts`.
+
+Migrations are flat SQL applied at API boot, recorded with their checksum in `_vega_migrations`
+([ADR 0002](docs/decisiones/0002-migraciones-sql-planas.md)). There is no migration CLI to learn:
+`pnpm db:migrate` runs the same code the container runs on startup.
 
 Grade one submission from the CLI, no LMS involved:
 
@@ -330,26 +362,41 @@ apart by a `wsfunction` parameter. Moodle returns its errors with HTTP 200 and a
 **Enabled**, save, then follow the service's **Functions** link and add the ones below. Nothing is
 added for you.
 
-Only course and activity discovery is implemented today (M2). The ingest and publishing calls exist
-in the connector but no route or batch job reaches them yet, so the second table is what you will
-need later, not now.
+Ingest and publishing are wired now, so **all of these are needed**, not just the discovery ones.
+Settings checks every one of them and names the ones that are missing.
 
-**Needed now — course and activity discovery**
+**Reading — discovery and ingest**
 
-| Function | What Vega uses it for |
-|---|---|
-| `core_webservice_get_site_info` | Identifies the token's owner (`userid`, `username`, `sitename`). The `userid` is not decorative — the next call requires it and the token reveals it nowhere else. Cheapest possible liveness check for a credential |
-| `core_enrol_get_users_courses` | The courses the token's owner is enrolled in. **This is the course picker** |
-| `mod_assign_get_assignments` | The assignments of the selected course |
-| `mod_forum_get_forums_by_courses` | The forums of the selected course |
+| Function | What Vega uses it for | Required |
+|---|---|---|
+| `core_webservice_get_site_info` | Identifies the token's owner (`userid`, `username`, `sitename`). The `userid` is not decorative — the next call requires it and the token reveals it nowhere else. Cheapest possible liveness check for a credential. Also returns the token's function catalogue, which is how the write calls below get verified | Yes |
+| `core_enrol_get_users_courses` | The courses the token's owner is enrolled in. **This is the course picker** | Yes |
+| `mod_assign_get_assignments` | The assignments of the selected course | Yes |
+| `mod_forum_get_forums_by_courses` | The forums of the selected course | Yes |
+| `mod_assign_get_submissions` | Pull submitted attempts and the URLs of the attached files | Yes |
+| `mod_forum_get_forum_discussions_paginated` | Read forum discussions | Yes, for forums |
+| `mod_forum_get_forum_discussion_posts` | Read the replies in a discussion, which is the only way to tell whether a question is still unanswered. Deprecated in Moodle 3.8 in favour of `mod_forum_get_discussion_posts` | Yes, for forums |
+| `core_user_get_users_by_field` | Student names and profile fields — including the autonomous community, which changes how the work is marked (ADR 0013). **Optional**: without it Vega still grades, the queue just shows `moodle-1234` instead of a name | No |
 
-**Needed later — submission ingest and grade publishing (M3+)**
+**Writing — this is what the student actually sees**
 
-| Function | What Vega will use it for |
-|---|---|
-| `mod_assign_get_submissions` | Pull submitted attempts and the URLs of the attached files |
-| `mod_forum_get_forum_discussions_paginated` | Read forum discussions. The connector still refuses forum ingest outright |
-| `mod_assign_save_grade` | Write the score back, with the feedback as HTML in the comments editor |
+| Function | What Vega uses it for | Required |
+|---|---|---|
+| `mod_assign_save_grade` | Write the score back, with the feedback as HTML in the comments editor | Yes, for assignments |
+| `mod_forum_add_discussion_post` | Post the approved reply under the student's question. Never used for assignments, and a grade is never written for a forum — see ADR 0014 | Yes, for forums |
+
+**These two are never called to test your setup.** Doing so would grade a real student or post a
+real message, so Settings checks them against the token's function catalogue instead. That tells you
+whether the function is in the service — the usual failure — but not whether the owner has the
+capability. See below.
+
+**Add every reading function, not just the ones that make the import work.** Moodle adds no function
+at all when you create an external service, and the two halves fail at different moments: with
+`mod_assign_get_assignments` alone you can import an activity and still ingest nothing, because
+pulling the submissions needs `mod_assign_get_submissions`. The same trap applies to forums —
+listing them needs `mod_forum_get_forums_by_courses`, but reading what students asked needs
+`mod_forum_get_forum_discussions_paginated` and `mod_forum_get_forum_discussion_posts`. «Test
+connection» in Settings now exercises all of them, so a green report means ingestion will work.
 
 Downloading a submission is not a web service call: files come from `pluginfile.php` signed with the
 same token, so no extra function is involved. `core_course_get_contents` appears in the connector's
@@ -368,9 +415,14 @@ A Moodle token carries its owner's permissions, no more. The owner needs:
 Beyond `webservice/rest:use`, Vega asserts no capability of its own and there is nothing in the
 codebase that checks one, so treat the rest as *probable*, derived from what each function does
 rather than from anything we have verified: `moodle/course:view` matters for courses the user is not
-enrolled in, `mod/assign:view` for listing assignments, `mod/forum:viewdiscussion` for forums, and
-`mod/assign:grade` for publishing scores once M3 lands. An enrolled teacher normally has all of
-them.
+enrolled in, `mod/assign:view` for listing assignments, `mod/forum:viewdiscussion` for forums,
+`mod/assign:grade` for publishing scores, `mod/forum:replypost` for posting forum replies, and
+`moodle/user:viewalldetails` for reading student profiles — that last one fails *quietly*, returning
+a trimmed profile rather than an error. An enrolled teacher normally has all of them.
+
+**A green tick on a write function in Settings means less than it looks.** It means the function is
+in the service, not that the token's owner can use it. That difference can only be settled by
+publishing something for real, which is exactly what a connection test must not do.
 
 ### 4. Issue the token — one per teacher
 

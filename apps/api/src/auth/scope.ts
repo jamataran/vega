@@ -100,6 +100,25 @@ export async function assertActivityAccess(
   );
 }
 
+/** Comprueba que el profesor pertenece al curso antes de leer o editar su contexto. */
+export async function assertCourseAccess(
+  ctx: AppContext,
+  user: TokenPayload,
+  courseId: string,
+): Promise<void> {
+  if (seesEverything(user)) return;
+  const [access] = await ctx.db
+    .select({ userId: schema.courseTeachers.userId })
+    .from(schema.courseTeachers)
+    .where(
+      sql`${schema.courseTeachers.courseId} = ${courseId} AND ${schema.courseTeachers.userId} = ${user.sub}`,
+    )
+    .limit(1);
+  if (!access) {
+    throw forbidden('Ese contexto pertenece a otro curso. Sólo puede editarlo su profesorado.');
+  }
+}
+
 /**
  * Registra a qué cursos alcanza un profesor.
  *

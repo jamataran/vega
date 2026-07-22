@@ -1,11 +1,14 @@
 import { z } from 'zod';
 import {
   ActivityKind,
+  AiOperation,
+  AiTransport,
   AutonomyMode,
   ContextLevel,
   ScoreSource,
   SubmissionStatus,
   TranscriptionFlagKind,
+  TriageLabel,
   UserRole,
 } from './enums.js';
 
@@ -156,6 +159,8 @@ export const Activity = z.object({
   pointsAllocation: z.array(PointsAllocation),
   /** Solución de referencia del profesor, en LaTeX o texto. */
   referenceSolution: z.string().nullable(),
+  /** Plantilla de criterios compartida por actividades del mismo formato. */
+  templateKey: z.string().nullable(),
   /** Cuánta autonomía tiene Vega sobre esta actividad. */
   autonomy: AutonomyMode,
   /** Ficheros adjuntos al contexto de la actividad. */
@@ -322,6 +327,12 @@ export const Submission = z.object({
   /** Nombre legible, para que el profesor sepa qué está firmando. */
   studentAlias: z.string().nullable(),
   status: SubmissionStatus,
+  /** Lote durable que inició el procesamiento actual, si lo hay. */
+  batchRunId: Id.nullable(),
+  parkedReason: z.string().nullable(),
+  parkedBy: Id.nullable(),
+  triageLabel: TriageLabel.nullable(),
+  triageConfidence: z.number().min(0).max(1).nullable(),
   /** Nombre del fichero entregado. `null` en actividades sin fichero (foros). */
   originalFilename: z.string().nullable(),
   pageCount: z.number().int().min(0),
@@ -362,11 +373,23 @@ export const TranscriptionPage = z.object({
 });
 export type TranscriptionPage = z.infer<typeof TranscriptionPage>;
 
+/** Diferencia material entre las dos lecturas independientes de una página. */
+export const TranscriptionDiscrepancy = z.object({
+  page: z.number().int().positive(),
+  readingA: z.string(),
+  readingB: z.string(),
+  /** Fragmento que se inserta en la transcripción consolidada. */
+  marker: z.string(),
+});
+export type TranscriptionDiscrepancy = z.infer<typeof TranscriptionDiscrepancy>;
+
 export const Transcription = z.object({
   id: Id,
   submissionId: Id,
   pages: z.array(TranscriptionPage),
   flags: z.array(TranscriptionFlag),
+  discrepancies: z.array(TranscriptionDiscrepancy),
+  passCount: z.number().int().positive(),
   /** Confianza global del OCR, 0–1. Por debajo de 0.75 la UI lo señala. */
   confidence: z.number().min(0).max(1),
   model: z.string(),
@@ -388,6 +411,9 @@ export const CorrectionItem = z.object({
   maxPoints: z.number().min(0),
   aiPoints: z.number().min(0),
   aiFeedback: z.string(),
+  /** Cita literal que ancla cualquier descuento en la transcripción. */
+  aiQuote: z.string().nullable(),
+  aiQuotePage: z.number().int().positive().nullable(),
   /** `null` mientras el profesor no haya tocado el apartado. */
   teacherPoints: z.number().min(0).nullable(),
   teacherFeedback: z.string().nullable(),
@@ -412,10 +438,27 @@ export const UsageMetrics = z.object({
   inputTokens: z.number().int().min(0),
   outputTokens: z.number().int().min(0),
   cachedInputTokens: z.number().int().min(0),
+  cacheCreationTokens: z.number().int().min(0).optional(),
   /** Coste en céntimos de euro, para evitar decimales flotantes en BD. */
   costCents: z.number().min(0),
 });
 export type UsageMetrics = z.infer<typeof UsageMetrics>;
+
+export const VerificationIssue = z.object({
+  kind: z.string().min(1),
+  itemLabel: z.string().nullable(),
+  detail: z.string().min(1),
+  source: z.enum(['mechanical', 'ai']),
+});
+export type VerificationIssue = z.infer<typeof VerificationIssue>;
+
+export const CorrectionVerification = z.object({
+  coherent: z.boolean(),
+  confidence: z.number().min(0).max(1).nullable(),
+  issues: z.array(VerificationIssue),
+  aiEnabled: z.boolean(),
+});
+export type CorrectionVerification = z.infer<typeof CorrectionVerification>;
 
 export const Correction = z.object({
   id: Id,
@@ -434,6 +477,10 @@ export const Correction = z.object({
   /** Resumen breve para la cabecera de la cola. */
   aiSummary: z.string(),
   teacherSummary: z.string().nullable(),
+  /** Notas de apoyo para el profesor; nunca se publican al alumno. */
+  teacherNotes: z.string().nullable(),
+  verification: CorrectionVerification.nullable(),
+  simulated: z.boolean(),
   confidence: z.number().min(0).max(1),
   model: z.string(),
   usage: UsageMetrics,
@@ -481,13 +528,97 @@ export const GradingContext = z.object({
    * de actividad, o el `slug` de la actividad para el nivel más específico.
    */
   key: z.string(),
+  activeVersion: z.number().int().positive(),
+  contentHash: z.string(),
+  source: z.enum(['seed', 'migration', 'edit', 'restore']),
   content: z.string(), // Markdown
   updatedAt: IsoDate,
   updatedBy: Id.nullable(),
 });
 export type GradingContext = z.infer<typeof GradingContext>;
 
+export const GradingContextVersion = z.object({
+  contextId: Id,
+  version: z.number().int().positive(),
+  content: z.string(),
+  contentHash: z.string(),
+  source: z.enum(['seed', 'migration', 'edit', 'restore']),
+  createdAt: IsoDate,
+  createdBy: Id.nullable(),
+});
+export type GradingContextVersion = z.infer<typeof GradingContextVersion>;
+
+/** Segmento fijado al inicio de una ejecución; el orden respeta la jerarquía. */
+export const ContextSegment = z.object({
+  level: ContextLevel,
+  key: z.string(),
+  contextId: Id,
+  version: z.number().int().positive(),
+  contentHash: z.string(),
+  content: z.string(),
+});
+export type ContextSegment = z.infer<typeof ContextSegment>;
+
+export const Prompt = z.object({
+  key: z.string().min(1),
+  version: z.number().int().positive(),
+  content: z.string(),
+  active: z.boolean(),
+  updatedBy: Id.nullable(),
+  updatedAt: IsoDate,
+});
+export type Prompt = z.infer<typeof Prompt>;
+
+export const AiCall = z.object({
+  id: Id,
+  batchRunId: Id.nullable(),
+  aiBatchId: Id.nullable(),
+  submissionId: Id.nullable(),
+  operation: AiOperation,
+  transport: AiTransport,
+  provider: z.string(),
+  modelRequested: z.string(),
+  modelReturned: z.string().nullable(),
+  promptKey: z.string().nullable(),
+  promptVersion: z.number().int().positive().nullable(),
+  contextHash: z.string().nullable(),
+  contextVersions: z.array(
+    z.object({
+      level: ContextLevel,
+      key: z.string(),
+      contextId: Id,
+      version: z.number().int().positive(),
+      contentHash: z.string(),
+    }),
+  ),
+  requestParams: z.record(z.string(), z.unknown()),
+  responseRaw: z.unknown().nullable(),
+  parsedOk: z.boolean(),
+  stopReason: z.string().nullable(),
+  error: z.string().nullable(),
+  latencyMs: z.number().int().min(0).nullable(),
+  inputTokens: z.number().int().min(0),
+  outputTokens: z.number().int().min(0),
+  cacheReadTokens: z.number().int().min(0),
+  cacheCreationTokens: z.number().int().min(0),
+  costCents: z.number().min(0).nullable(),
+  unpriced: z.boolean(),
+  simulated: z.boolean(),
+  createdAt: IsoDate,
+});
+export type AiCall = z.infer<typeof AiCall>;
+
 // ── Ajustes del sistema (sólo administrador) ────────────────────────────────
+
+/** La planificación de un tipo de actividad: si corre sola y cada cuánto. */
+export const ScheduleSlot = z.object({
+  enabled: z.boolean(),
+  /** Cada cuántos minutos corre solo el proceso para este tipo. */
+  everyMinutes: z.number().int().positive(),
+  lastRunAt: IsoDate.nullable(),
+  nextRunAt: IsoDate.nullable(),
+});
+export type ScheduleSlot = z.infer<typeof ScheduleSlot>;
 
 /**
  * Configuración editable desde la aplicación. Los secretos NUNCA se devuelven:
@@ -497,10 +628,22 @@ export const AppSettings = z.object({
   anthropic: z.object({
     apiKeyConfigured: z.boolean(),
     transcriptionModel: z.string(),
+    /** Modelo usado por las dos lecturas; sustituye gradualmente al nombre anterior. */
+    readingModel: z.string(),
     gradingModel: z.string(),
+    verifyModel: z.string(),
+    triageModel: z.string(),
     maxTokens: z.number().int().positive(),
     /** Proveedor activo: `mock` no consume tokens. */
     provider: z.enum(['mock', 'anthropic']),
+  }),
+  ai: z.object({
+    transport: AiTransport,
+    verify: z.boolean(),
+    explanations: z.boolean(),
+    lowConfidenceThreshold: z.number().min(0).max(1),
+    pagesPerChunk: z.number().int().positive(),
+    logRetentionDays: z.number().int().positive(),
   }),
   /**
    * De la **instalación**, no del profesor: a qué Moodle apunta Vega y con qué
@@ -518,12 +661,14 @@ export const AppSettings = z.object({
     passwordConfigured: z.boolean(),
     from: z.string(),
   }),
+  /**
+   * Una planificación por tipo de actividad, no una global: una duda de foro
+   * no puede esperar al ritmo del lote de entregas, y el lote de entregas no
+   * tiene por qué correr cada pocos minutos.
+   */
   schedule: z.object({
-    enabled: z.boolean(),
-    /** Cada cuántos minutos corre el proceso de corrección. */
-    everyMinutes: z.number().int().positive(),
-    lastRunAt: IsoDate.nullable(),
-    nextRunAt: IsoDate.nullable(),
+    assignment: ScheduleSlot,
+    forum: ScheduleSlot,
   }),
   branding: z.object({
     name: z.string(),
@@ -533,6 +678,24 @@ export type AppSettings = z.infer<typeof AppSettings>;
 
 // ── Lotes ───────────────────────────────────────────────────────────────────
 
+/**
+ * Una actividad que no se pudo leer del LMS, con el motivo en cristiano.
+ *
+ * `config` exige que alguien entre en Ajustes (token caducado, función que
+ * falta en el servicio web de Moodle) y no se arregla reintentando; `transient`
+ * sí, y por eso se distinguen: sin esa diferencia, un Moodle caído y un token
+ * mal puesto dan el mismo aviso y nadie sabe si esperar o actuar.
+ */
+export const BatchRunProblem = z.object({
+  /** Identificador de la actividad en Vega, para poder abrirla. */
+  activityId: z.string(),
+  /** Su `slug`, que es lo que se reconoce de un vistazo. */
+  slug: z.string(),
+  kind: z.enum(['config', 'transient']),
+  message: z.string(),
+});
+export type BatchRunProblem = z.infer<typeof BatchRunProblem>;
+
 export const BatchRun = z.object({
   id: Id,
   startedAt: IsoDate,
@@ -540,6 +703,12 @@ export const BatchRun = z.object({
   status: z.enum(['running', 'done', 'failed']),
   /** Quién lo lanzó: `null` si fue el planificador. */
   triggeredBy: Id.nullable(),
+  /**
+   * Qué tipos de actividad barrió este proceso. El planificador corre por tipo
+   * (los foros suelen ir más frecuentes que las entregas); un proceso forzado
+   * a mano barre siempre los dos.
+   */
+  kinds: z.array(ActivityKind),
   submissionsProcessed: z.number().int().min(0),
   submissionsFailed: z.number().int().min(0),
   /** Cuántas se publicaron solas por estar en modo autónomo. */
@@ -551,6 +720,12 @@ export const BatchRun = z.object({
   submissionsIngested: z.number().int().min(0),
   /** Actividades cuya ingesta falló entera: LMS caído, token o configuración. */
   activitiesFailed: z.number().int().min(0),
+  /**
+   * Qué le pasó a cada una de ellas. Sin esto, `activitiesFailed` es un número
+   * sin salida: dice que algo falló y obliga a ir al log del servidor para
+   * saber si es el token, una función que falta en Moodle o el LMS caído.
+   */
+  problems: z.array(BatchRunProblem),
   usage: UsageMetrics,
 });
 export type BatchRun = z.infer<typeof BatchRun>;

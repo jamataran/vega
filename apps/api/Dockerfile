@@ -102,6 +102,17 @@ COPY --from=build --chown=vega:vega /repo/apps/api/migrations ./migrations
 # este enlace sobra.
 RUN ln -s /app/migrations /migrations
 
+# Los puntos de montaje SE CREAN AQUÍ, y con dueño `vega`.
+#
+# No es cosmético: si el directorio no existe en la imagen, Docker crea el punto
+# de montaje del volumen con nombre como `root:root`, y el proceso —que corre
+# como `vega`— no puede escribir dentro. El síntoma es de los peores: la ingesta
+# registra la entrega en la base de datos y falla al guardar el PDF, así que el
+# profesor ve entregas que nunca se pueden corregir. Creándolos en la imagen,
+# Docker siembra el volumen nuevo con estos permisos.
+RUN mkdir -p /app/data /app/contexts \
+ && chown -R vega:vega /app/data /app/contexts
+
 # Entrypoint: migrar y, sólo si la migración va bien, arrancar el servidor.
 #
 # Ojo: dist/index.js TAMBIÉN aplica las migraciones antes de escuchar. Pasarlas

@@ -1,11 +1,13 @@
 import type {
   Activity,
   ActivityFile,
+  AiCall,
   BatchRun,
   Correction,
   CorrectionItem,
   Course,
   GradingContext,
+  Prompt,
   Student,
   Submission,
   Transcription,
@@ -96,6 +98,7 @@ export function toActivity(
     maxScore: numOrNull(row.maxScore),
     pointsAllocation: row.pointsAllocation ?? [],
     referenceSolution: row.referenceSolution,
+    templateKey: row.templateKey,
     autonomy: row.autonomy,
     files: files.map(toActivityFile),
     createdAt: iso(row.createdAt),
@@ -109,6 +112,11 @@ export function toSubmission(row: Row<typeof schema.submissions>): Submission {
     studentRef: row.studentRef,
     studentAlias: row.studentAlias,
     status: row.status,
+    batchRunId: row.batchRunId,
+    parkedReason: row.parkedReason,
+    parkedBy: row.parkedBy,
+    triageLabel: row.triageLabel,
+    triageConfidence: numOrNull(row.triageConfidence),
     originalFilename: row.originalFilename,
     pageCount: row.pageCount,
     textContent: row.textContent,
@@ -124,6 +132,8 @@ export function toTranscription(row: Row<typeof schema.transcriptions>): Transcr
     submissionId: row.submissionId,
     pages: row.pages ?? [],
     flags: row.flags ?? [],
+    discrepancies: row.discrepancies ?? [],
+    passCount: row.passCount,
     confidence: num(row.confidence),
     model: row.model,
     createdAt: iso(row.createdAt),
@@ -139,6 +149,8 @@ export function toCorrectionItem(row: Row<typeof schema.correctionItems>): Corre
     maxPoints: num(row.maxPoints),
     aiPoints: num(row.aiPoints),
     aiFeedback: row.aiFeedback,
+    aiQuote: row.aiQuote,
+    aiQuotePage: row.aiQuotePage,
     teacherPoints: numOrNull(row.teacherPoints),
     teacherFeedback: row.teacherFeedback,
     confidence: num(row.confidence),
@@ -151,12 +163,14 @@ function toUsage(row: {
   inputTokens: number;
   outputTokens: number;
   cachedInputTokens: number;
+  cacheCreationTokens?: number;
   costCents: string | number;
 }): UsageMetrics {
   return {
     inputTokens: row.inputTokens,
     outputTokens: row.outputTokens,
     cachedInputTokens: row.cachedInputTokens,
+    cacheCreationTokens: row.cacheCreationTokens ?? 0,
     costCents: num(row.costCents),
   };
 }
@@ -174,6 +188,9 @@ export function toCorrection(
     teacherLatex: row.teacherLatex,
     aiSummary: row.aiSummary,
     teacherSummary: row.teacherSummary,
+    teacherNotes: row.teacherNotes,
+    verification: row.verification,
+    simulated: row.simulated,
     confidence: num(row.confidence),
     model: row.model,
     usage: toUsage(row),
@@ -215,14 +232,63 @@ export function toStudent(row: Row<typeof schema.students>): Student {
   };
 }
 
-export function toGradingContext(row: Row<typeof schema.gradingContexts>): GradingContext {
+export function toGradingContext(row: {
+  context: Row<typeof schema.gradingContexts>;
+  version: Row<typeof schema.gradingContextVersions>;
+}): GradingContext {
+  return {
+    id: row.context.id,
+    level: row.context.level,
+    key: row.context.key,
+    activeVersion: row.context.activeVersion,
+    content: row.version.content,
+    contentHash: row.version.contentHash,
+    source: row.version.source,
+    updatedAt: iso(row.version.createdAt),
+    updatedBy: row.version.createdBy,
+  };
+}
+
+export function toPrompt(row: Row<typeof schema.prompts>): Prompt {
+  return {
+    key: row.key,
+    version: row.version,
+    content: row.content,
+    active: row.active,
+    updatedBy: row.updatedBy,
+    updatedAt: iso(row.updatedAt),
+  };
+}
+
+export function toAiCall(row: Row<typeof schema.aiCalls>): AiCall {
   return {
     id: row.id,
-    level: row.level,
-    key: row.key,
-    content: row.content,
-    updatedAt: iso(row.updatedAt),
-    updatedBy: row.updatedBy,
+    batchRunId: row.batchRunId,
+    aiBatchId: row.aiBatchId,
+    submissionId: row.submissionId,
+    operation: row.operation,
+    transport: row.transport,
+    provider: row.provider,
+    modelRequested: row.modelRequested,
+    modelReturned: row.modelReturned,
+    promptKey: row.promptKey,
+    promptVersion: row.promptVersion,
+    contextHash: row.contextHash,
+    contextVersions: row.contextVersions,
+    requestParams: row.requestParams,
+    responseRaw: row.responseRaw,
+    parsedOk: row.parsedOk,
+    stopReason: row.stopReason,
+    error: row.error,
+    latencyMs: row.latencyMs,
+    inputTokens: row.inputTokens,
+    outputTokens: row.outputTokens,
+    cacheReadTokens: row.cacheReadTokens,
+    cacheCreationTokens: row.cacheCreationTokens,
+    costCents: row.costCents === null ? null : num(row.costCents),
+    unpriced: row.unpriced,
+    simulated: row.simulated,
+    createdAt: iso(row.createdAt),
   };
 }
 
@@ -233,11 +299,13 @@ export function toBatchRun(row: Row<typeof schema.batchRuns>): BatchRun {
     finishedAt: isoOrNull(row.finishedAt),
     status: row.status,
     triggeredBy: row.triggeredBy,
+    kinds: row.kinds,
     submissionsProcessed: row.submissionsProcessed,
     submissionsFailed: row.submissionsFailed,
     submissionsAutoPublished: row.submissionsAutoPublished,
     submissionsIngested: row.submissionsIngested,
     activitiesFailed: row.activitiesFailed,
+    problems: row.problems,
     usage: toUsage(row),
   };
 }

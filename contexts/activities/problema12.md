@@ -2,7 +2,7 @@
 
 - **Tipo de tarea**: `simulacro_problema`
 - **Nota máxima**: 10
-- Aplica sobre `global.md` y `task-types/simulacro_problema.md`.
+- Aplica sobre el contexto global y la plantilla `simulacro-problema` resueltos por Vega.
 
 ## Estructura del examen
 

@@ -20,14 +20,20 @@ final está [cómo reproducirlo](#cómo-se-ha-comprobado).
 
 Lo que el profesor toca —cursos, actividades, contextos, cola, revisión, validación, ajustes,
 alcance por curso— funciona, persiste y está probado a mano. Lo que el motor necesita por debajo
-tenía **tres agujeros de tubería** y **un agujero de diseño**:
+tenía **tres agujeros de tubería**, **dos escrituras mal dirigidas** y **un agujero de diseño**:
 
 | | Estado antes de esta revisión | Ahora |
 |---|---|---|
 | **Ingesta** — nada traía entregas del LMS | Agujero de tubería | **Cerrado** ([§4.2](#42-importación-desde-moodle)) |
 | **Publicación** — `POST .../publish` no llamaba a nadie | Agujero de tubería | **Cerrado** ([§4.2](#42-importación-desde-moodle)) |
 | **Almacén de binarios** — el lote fabricaba rutas falsas | Agujero de tubería | **Cerrado** ([§4.2](#42-importación-desde-moodle)) |
+| **Publicación de foro** — se publicaba como nota de otra actividad, sin error | Escritura mal dirigida | **Cerrado** ([§4.2](#42-importación-desde-moodle)) |
+| **Verificación del token** — Ajustes sólo comprobaba lecturas | Fallo diferido a producción | **Cerrado** ([§4.2](#42-importación-desde-moodle)) |
 | **Persistencia de prompts** — no existe | Agujero de diseño | **Sigue abierto** ([§4.1](#41-persistencia-de-prompts)) |
+
+Las dos filas del medio aparecieron después de la revisión inicial y son de otra especie: no era
+tubería que faltaba, era tubería conectada al sitio equivocado. La primera **ponía notas reales a
+alumnos que no eran**, sin lanzar ninguna excepción.
 
 El agujero de diseño es el que importa, porque no se arregla escribiendo tubería: hay que decidir
 algo. Los ocho ficheros de `prompts/` que se escribieron con el diseño del motor **no los lee
@@ -85,10 +91,14 @@ Está en la rama de revisión, **no en `feat/h3-motor-ia`**.
 | Un solo lote a la vez | `apps/api/src/routes/batch.ts` | Dos disparos simultáneos corregían lo mismo dos veces, y **pagaban dos veces** |
 | Lote sólo para administración | `apps/api/src/routes/batch.ts` | Lo lanzaba cualquier usuario autenticado |
 | Ficha del alumno y contexto al modelo | `students` · `apps/api/src/ingest/` · `@vega/shared` | El modelo corregía **sin saber la comunidad autónoma** del alumno, que es lo que decide el tribunal y los criterios. Ver abajo |
+| Publicación en foro | `apps/api/src/publish/publish.ts` · `connectors/*` | `publishToLms()` **no bifurcaba**: una respuesta validada de foro se publicaba como nota de otra actividad, a otro alumno, sin dar error. Ver abajo |
+| Verificación de las funciones de escritura | `connectors/moodle3` | Ajustes sólo comprobaba funciones `get_*`. Faltaba `mod_assign_save_grade` y no se sabía hasta la primera noche de proceso |
 | Primeros tests de `apps/api` y de `packages/shared` | 4 ficheros, 32 casos | Los dos paquetes tenían **cero** |
 
-Las decisiones de producto que ha habido que tomar para esto están en
-[ADR 0012](../decisiones/0012-ingesta-almacen-y-publicacion-en-dos-fases.md).
+Las decisiones de producto que ha habido que tomar para esto están en el
+[ADR 0012](../decisiones/0012-ingesta-almacen-y-publicacion-en-dos-fases.md), el
+[ADR 0013](../decisiones/0013-ficha-del-alumno-y-contexto-al-modelo.md) y el
+[ADR 0014](../decisiones/0014-publicar-en-foro-y-verificar-la-escritura.md).
 
 ---
 
@@ -187,6 +197,48 @@ Vive en `apps/api/src/publish/publish.ts`. Lo que cambia respecto al `TODO(vega)
   `assignfeedback_file`. La nota se publica, la entrega llega a `published`, y el motivo se guarda
   en `corrections.publish_notice` y se enseña en la pantalla de revisión.
 
+#### Un foro se publicaba como si fuera una nota, y no daba error
+
+Esto se encontró después de la revisión inicial y es lo más serio que ha aparecido.
+`publishToLms()` llamaba a `publishGrade()` para **cualquier** actividad. En Moodle, el `remoteId`
+de una entrega es `<tarea>:<usuario>:<intento>` y el de una duda de foro es
+`<foro>:<debate>:<mensaje>`: **tres números separados por dos puntos, los dos**. El parseador los
+aceptaba indistintamente.
+
+Publicar una respuesta validada de foro llamaba por tanto a `mod_assign_save_grade` con
+`assignmentid` = el id del foro y `userid` = el id del debate. **Una nota puesta a un alumno
+cualquiera en una actividad cualquiera**, sin excepción, sin aviso y sin forma de enterarse salvo
+mirándolo en Moodle. Es exactamente lo que HU-20 RN-4 prohíbe, escrito en una regla que nadie
+ejecutaba.
+
+Ahora hay una operación aparte, `publishForumReply()`, con su tipo propio; los conectores rechazan
+el cruce en las dos direcciones —incluido el `mock`, que es donde se prueba el circuito— y hay
+cuatro pruebas que fallan si vuelve. Ver
+[ADR 0014](../decisiones/0014-publicar-en-foro-y-verificar-la-escritura.md).
+
+**Lo que sigue abierto es el formato del mensaje**, y es trabajo de H3: el cuerpo de la respuesta es
+hoy el documento de corrección (`teacherLatex ?? aiLatex`), que es LaTeX/markdown porque nació para
+una entrega de matemáticas. Un mensaje de foro es prosa. El transporte está probado; **lo que se
+manda por él lo tiene que decidir el motor**, que en el ADR 0011 gana una operación propia para
+responder dudas.
+
+#### Ajustes daba por buena una configuración que no podía publicar
+
+Segundo hallazgo del mismo tipo. `verifyConnection()` comprobaba cinco funciones, **todas de
+lectura**. `mod_assign_save_grade` estaba implementada y en uso, y no se comprobaba: un profesor
+configuraba su servicio web, lo veía todo en verde y descubría que le faltaba la función de publicar
+la primera noche que corría el proceso.
+
+No se arregla llamándolas: `mod_assign_save_grade` calificaría a un alumno de verdad y
+`mod_forum_add_discussion_post` publicaría un mensaje en un foro con gente dentro. Un botón «Probar
+conexión» con efectos visibles para el alumnado no es una comprobación. Se leen del catálogo de
+funciones que `core_webservice_get_site_info` devuelve para el token, que es donde está el fallo
+habitual — Moodle no añade ninguna función al crear un servicio externo.
+
+**Lo que eso comprueba y lo que no está escrito en el propio detalle de la comprobación**: que la
+función esté en el servicio no garantiza que el usuario tenga la capacidad (`mod/assign:grade`,
+`mod/forum:replypost`). Eso sólo se sabe publicando.
+
 #### El riesgo que no ha bajado
 
 **`connectors/moodle3` sigue sin ejecutarse nunca contra un Moodle real, y ahora tiene más
@@ -196,6 +248,10 @@ verificar, por orden de probabilidad de dar problemas:
 1. **`publishFeedbackFile()` rechaza siempre.** Moodle 3 no expone un web service limpio para
    `assignfeedback_file`. Es la pregunta abierta 1 de HU-17 y sigue sin resolver: hace falta un spike
    contra un Moodle de verdad.
+1 bis. **`mod_forum_add_discussion_post` no se ha llamado nunca de verdad.** Queda por comprobar el
+   formato del mensaje —la función no admite `messageformat` de primer nivel en 3.x y se manda
+   HTML—, qué hace el sitio con `maxeditingtime`, y si conviene `options[discussionsubscribe]=0`
+   para que el profesor no acabe suscrito a todos los debates que Vega conteste.
 2. **`mod_forum_get_forum_discussion_posts` quedó obsoleta en Moodle 3.8** en favor de
    `mod_forum_get_discussion_posts`, que devuelve otra forma. Habrá que elegir según la versión del
    sitio.
@@ -421,6 +477,15 @@ real. Era el encargo. Sigue siendo el riesgo principal del proyecto.
 - `docs/hitos.md` — «La ingesta y la publicación no se han tocado. Son H3 y H5» deja de ser cierto.
 - `docs/modelo-de-datos.md` — la migración `0005` añade columnas y resuelve el aviso de que «la
   clave natural no protege los foros».
+- `docs/hu/HU-20` — la pregunta abierta 1 (`[bloqueante]`) queda resuelta por el ADR 0014, y la 3
+  por el ADR 0012. La HU ya no tiene bloqueantes. También decía que la misma intervención se
+  duplicaba en cada ingesta, lo que dejó de ser cierto con `remote_id`.
+- `README.md` § «Connecting Vega to Moodle» — la tabla separaba las funciones en «needed now» y
+  «needed later (M3+)». Ya no hay «later»: se usan todas. Faltaban además
+  `mod_forum_get_forum_discussion_posts`, `core_user_get_users_by_field` y
+  `mod_forum_add_discussion_post`.
+- `docs/hu/HU-04` pregunta 2 — un foro puntuable ya no es un caso indefinido: se publica la
+  respuesta y **la nota se queda dentro de Vega en silencio**. Lo que falta es decirlo en la UI.
 - `docs/hu/HU-08` y `HU-17` siguen redactadas sobre **buzones** (`mailbox_id`, `Mailbox.connector`),
   vocabulario que el código eliminó en la migración `0002`. No se han reescrito en esta revisión;
   quien las toque debería hacerlo antes de implementar sobre ellas.

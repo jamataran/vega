@@ -10,6 +10,7 @@ import type {
   LmsConnectionInfo,
   LmsConnectorConfig,
   RemoteGrade,
+  RemoteReply,
   RemoteStudent,
   RemoteSubmission,
   SubmissionRef,
@@ -57,6 +58,23 @@ export type Moodle3Config = z.infer<typeof Moodle3Config>;
 
 /** Área de ficheros donde Moodle guarda lo que sube el alumno. */
 const SUBMISSION_FILE_AREA = 'submission_files';
+
+/**
+ * Detalle de «ok» cuando una función **de lectura** se comprueba contra el
+ * catálogo en vez de llamarla: no es que escribiera nada, es que sin datos a la
+ * vista (ningún foro, ningún debate) no hay llamada representativa que hacer.
+ */
+/**
+ * Cuántos cursos se consultan al comprobar la conexión. Suficientes para dar
+ * con una tarea o un foro real con el que ensayar, sin que un profesor con
+ * cientos de cursos convierta el botón «Probar conexión» en una consulta que
+ * su Moodle tarda medio minuto en contestar.
+ */
+const MAX_PROBE_COURSES = 25;
+
+const READ_NOT_REHEARSED =
+  'Está en el servicio web del token. No se ha podido ensayar con una llamada real porque este ' +
+  'token aún no ve ningún foro o debate con el que probarla.';
 
 /**
  * Tamaño de página al recorrer los debates de un foro. Cincuenta es un
@@ -225,31 +243,162 @@ export class Moodle3Connector implements LmsConnector {
     // Con un curso de verdad la prueba es representativa; sin ninguno se manda
     // la lista vacía, que Moodle acepta y sirve igual para saber si la función
     // está habilitada, que es justo lo que se está comprobando.
-    const courseIds = courses.length > 0 ? [parseCourseId(courses[0]!.moodleCourseId)] : [];
+    //
+    // Se preguntan **varios cursos y no sólo el primero**: en un aula real el
+    // profesor ve decenas y las tareas suelen estar en uno concreto, así que
+    // mirar el primero puede no encontrar ninguna tarea ni ningún foro con el
+    // que ensayar las funciones que de verdad usa la ingesta. El tope evita
+    // que un claustro con cientos de cursos convierta una comprobación en una
+    // consulta enorme.
+    const probeCourseIds = courses
+      .slice(0, MAX_PROBE_COURSES)
+      .map((course) => parseCourseId(course.moodleCourseId));
 
+    let assignments: GetAssignmentsResponse | undefined;
     checks.push(
       await this.#probe(
         WS_FUNCTIONS.getAssignments,
-        'Leer las entregas del curso',
-        () =>
-          this.#client.call(
+        'Leer las tareas del curso',
+        async () => {
+          assignments = await this.#client.call(
             WS_FUNCTIONS.getAssignments,
-            { courseids: courseIds },
+            { courseids: probeCourseIds },
             GetAssignmentsResponse,
-          ),
-        (result) =>
-          `${result.courses.length} ${result.courses.length === 1 ? 'curso' : 'cursos'} con tareas`,
+          );
+          return assignments;
+        },
+        (result) => {
+          // Cuántas TAREAS, no cuántos cursos ha devuelto Moodle: un curso sin
+          // ninguna tarea también viene en la respuesta, y contar cursos daba
+          // un «1 curso con tareas» que no significaba nada.
+          const total = result.courses.reduce((sum, course) => sum + course.assignments.length, 0);
+          return total === 0
+            ? 'Responde correctamente; este token no ve ninguna tarea todavía.'
+            : `${total} ${total === 1 ? 'tarea visible' : 'tareas visibles'}`;
+        },
       ),
     );
 
+    // La ingesta no lee las tareas: lee sus **envíos**, con esta otra función.
+    // Es la que suele faltar en el servicio web, y durante un tiempo este parte
+    // no la cubría: importar actividades funcionaba y la ingesta fallaba entera
+    // sin que «Probar conexión» avisara de nada.
+    //
+    // Hace falta una tarea de verdad con la que ensayar: Moodle rechaza la
+    // llamada con la lista vacía (`invalidparameter`), que es un fallo de la
+    // sonda y no del servicio web —dar eso por roto manda a arreglar algo que
+    // está bien—. Sin ninguna tarea a la vista se mira el catálogo del token.
+    const assignmentIds = (assignments?.courses ?? [])
+      .flatMap((course) => course.assignments.map((assignment) => assignment.id))
+      .slice(0, 1);
+    checks.push(
+      assignmentIds.length === 0
+        ? this.#declared(
+            siteInfo,
+            WS_FUNCTIONS.getSubmissions,
+            'Leer lo que entrega cada alumno',
+            'Sin ella Vega ve la tarea pero no puede traerse ni una entrega.',
+            READ_NOT_REHEARSED,
+          )
+        : await this.#probe(
+            WS_FUNCTIONS.getSubmissions,
+            'Leer lo que entrega cada alumno',
+            () =>
+              this.#client.call(
+                WS_FUNCTIONS.getSubmissions,
+                { assignmentids: assignmentIds, status: 'submitted' },
+                GetSubmissionsResponse,
+              ),
+            (result) => {
+              const total = result.assignments.reduce(
+                (sum, assignment) => sum + assignment.submissions.length,
+                0,
+              );
+              return `${total} ${total === 1 ? 'entrega visible' : 'entregas visibles'} en la primera tarea`;
+            },
+          ),
+    );
+
+    let forums: GetForumsResponse | undefined;
     checks.push(
       await this.#probe(
         WS_FUNCTIONS.getForums,
         'Leer los foros del curso',
-        () =>
-          this.#client.call(WS_FUNCTIONS.getForums, { courseids: courseIds }, GetForumsResponse),
+        async () => {
+          forums = await this.#client.call(
+            WS_FUNCTIONS.getForums,
+            { courseids: probeCourseIds },
+            GetForumsResponse,
+          );
+          return forums;
+        },
         (result) => `${result.length} ${result.length === 1 ? 'foro' : 'foros'}`,
       ),
+    );
+
+    // El mismo agujero que el de los envíos, en versión foro: ver el foro no es
+    // poder leer sus debates ni sus mensajes. Con un foro (o un debate) a la
+    // vista se hace la llamada de verdad; sin ninguno no hay llamada inocua
+    // posible y se mira el catálogo del token, que es donde suele estar el fallo.
+    const forumId = forums?.[0]?.id;
+    let discussions: GetForumDiscussionsResponse | undefined;
+    checks.push(
+      forumId === undefined
+        ? this.#declared(
+            siteInfo,
+            WS_FUNCTIONS.getForumDiscussions,
+            'Leer los debates del foro',
+            'Sin ella Vega ve el foro pero no puede leer qué se pregunta en él.',
+            READ_NOT_REHEARSED,
+          )
+        : await this.#probe(
+            WS_FUNCTIONS.getForumDiscussions,
+            'Leer los debates del foro',
+            async () => {
+              discussions = await this.#client.call(
+                WS_FUNCTIONS.getForumDiscussions,
+                {
+                  forumid: forumId,
+                  page: 0,
+                  perpage: 1,
+                  sortby: 'timemodified',
+                  sortdirection: 'ASC',
+                },
+                GetForumDiscussionsResponse,
+              );
+              return discussions;
+            },
+            (result) =>
+              result.discussions.length === 0
+                ? 'Responde correctamente; el primer foro aún no tiene debates.'
+                : 'Lee los debates del primer foro sin problemas.',
+          ),
+    );
+
+    const firstDiscussion = discussions?.discussions[0];
+    const discussionId =
+      firstDiscussion === undefined ? undefined : (firstDiscussion.discussion ?? firstDiscussion.id);
+    checks.push(
+      discussionId === undefined
+        ? this.#declared(
+            siteInfo,
+            WS_FUNCTIONS.getDiscussionPosts,
+            'Leer los mensajes de un debate',
+            'Sin ella no se sabe si la pregunta que abre un debate sigue sin responder, que es a lo único que Vega contesta.',
+            READ_NOT_REHEARSED,
+          )
+        : await this.#probe(
+            WS_FUNCTIONS.getDiscussionPosts,
+            'Leer los mensajes de un debate',
+            () =>
+              this.#client.call(
+                WS_FUNCTIONS.getDiscussionPosts,
+                { discussionid: discussionId },
+                GetDiscussionPostsResponse,
+              ),
+            (result) =>
+              `${result.posts.length} ${result.posts.length === 1 ? 'mensaje' : 'mensajes'} en el primer debate`,
+          ),
     );
 
     // Opcional a propósito: sin esta función Vega corrige exactamente igual,
@@ -274,6 +423,23 @@ export class Moodle3Connector implements LmsConnector {
             ? 'Responde correctamente, pero no ha devuelto ningún perfil.'
             : `${result.length} ${result.length === 1 ? 'perfil' : 'perfiles'}`,
         false,
+      ),
+    );
+
+    // Las de escritura no se llaman: se leen del catálogo del token. Ver
+    // `#declared`.
+    checks.push(
+      this.#declared(
+        siteInfo,
+        WS_FUNCTIONS.saveGrade,
+        'Publicar la nota y el feedback',
+        'Sin ella el profesor validaría correcciones que no llegarían nunca al alumno.',
+      ),
+      this.#declared(
+        siteInfo,
+        WS_FUNCTIONS.addDiscussionPost,
+        'Responder en el foro',
+        'Sin ella las respuestas a dudas se quedan en Vega, revisadas y sin publicar.',
       ),
     );
 
@@ -303,6 +469,66 @@ export class Moodle3Connector implements LmsConnector {
     } catch (error) {
       return { name, label, status: 'failed', detail: describe(error), required };
     }
+  }
+
+  /**
+   * Comprobación de una función **de escritura**, que no se llama.
+   *
+   * `mod_assign_save_grade` calificaría a un alumno de verdad y
+   * `mod_forum_add_discussion_post` publicaría un mensaje en un foro con gente
+   * dentro: no hay forma de ensayarlas. Se mira en su lugar el catálogo de
+   * funciones que `core_webservice_get_site_info` devuelve para el token, que
+   * es exactamente donde está el fallo habitual —Moodle no añade ninguna
+   * función al crear un servicio externo—.
+   *
+   * Lo que esto comprueba y lo que no conviene no confundirlo, y por eso lo dice
+   * el detalle: **que la función esté en el servicio no garantiza que el usuario
+   * tenga la capacidad** (`mod/assign:grade`, `mod/forum:replypost`). Eso sólo
+   * se sabe publicando. Aun así vale la pena: sin este parte, el profesor da la
+   * configuración por buena y se entera de que falta la mitad la primera noche
+   * que corre el proceso, cuando no hay nadie mirando.
+   */
+  #declared(
+    siteInfo: GetSiteInfoResponse | undefined,
+    name: string,
+    label: string,
+    whyItMatters: string,
+    okDetail?: string,
+  ): LmsConnectionCheck {
+    const declared = siteInfo?.functions;
+    if (declared === undefined) {
+      return {
+        name,
+        label,
+        status: 'skipped',
+        detail:
+          siteInfo === undefined
+            ? `No se ha podido comprobar: necesita el catálogo de funciones que devuelve ${WS_FUNCTIONS.getSiteInfo}.`
+            : 'Este Moodle no ha devuelto la lista de funciones del token, así que no se puede comprobar sin publicar de verdad.',
+        required: true,
+      };
+    }
+
+    if (declared.some((entry) => entry.name === name)) {
+      return {
+        name,
+        label,
+        status: 'ok',
+        detail:
+          okDetail ??
+          'Está en el servicio web del token. No se ejecuta en la comprobación —escribiría en Moodle—, ' +
+            'así que queda por confirmar que el usuario tenga además la capacidad correspondiente.',
+        required: true,
+      };
+    }
+
+    return {
+      name,
+      label,
+      status: 'failed',
+      detail: `No está en el servicio web del token. ${whyItMatters} Añádela en Administración del sitio → Servidor → Servicios web → Servicios externos → Funciones.`,
+      required: true,
+    };
   }
 
   /**
@@ -661,6 +887,18 @@ export class Moodle3Connector implements LmsConnector {
    * un assignment sobre 100 se publica mal sin reescalar).
    */
   async publishGrade(ref: SubmissionRef, grade: RemoteGrade): Promise<void> {
+    // Un `remoteId` de foro es `<foro>:<debate>:<mensaje>`, tres números, y
+    // `parseRemoteId` lo aceptaría sin rechistar: publicaría la respuesta como
+    // nota de la tarea nº foro al usuario nº debate. No daría error, y la nota
+    // caería sobre un alumno cualquiera de una actividad cualquiera. De ahí que
+    // el corte esté aquí y no en la validación del identificador.
+    if (refersToForum(ref.activity)) {
+      throw new Error(
+        `La actividad "${ref.activity.slug}" es un foro y no tiene libro de notas: ` +
+          'una respuesta a una duda se publica con publishForumReply().',
+      );
+    }
+
     const { assignmentId, userId, attempt } = parseRemoteId(ref.remoteId);
 
     await this.#client.call(
@@ -702,6 +940,45 @@ export class Moodle3Connector implements LmsConnector {
         'Publicar el fichero de feedback en Moodle 3 todavía no está resuelto (área assignfeedback_file). ' +
           'Publica la nota con publishGrade, que ya incluye el feedback en HTML, y adjunta el PDF por otro canal.',
       ),
+    );
+  }
+
+  /**
+   * La respuesta se cuelga **del mensaje del alumno**, no del debate: así queda
+   * como respuesta a su duda y no como una intervención suelta al final del
+   * hilo, que es lo que vería quien entrase a leerlo.
+   *
+   * TODO(vega): sin verificar contra Moodle real — quedan tres cosas:
+   *  - el formato del mensaje. `mod_forum_add_discussion_post` no admite un
+   *    `messageformat` de primer nivel en 3.x; se manda HTML porque es lo que
+   *    el editor de Moodle guarda por defecto, pero un sitio configurado en
+   *    Markdown podría enseñar las etiquetas en crudo al alumno;
+   *  - si el sitio tiene activado el retardo de edición (`maxeditingtime`), que
+   *    no impide publicar pero sí cambia cuándo se notifica;
+   *  - si conviene pasar `options[discussionsubscribe]=0` para que el profesor
+   *    no acabe suscrito a todos los debates que Vega conteste.
+   */
+  async publishForumReply(ref: SubmissionRef, reply: RemoteReply): Promise<void> {
+    if (!refersToForum(ref.activity)) {
+      throw new Error(
+        `La actividad "${ref.activity.slug}" es una entrega, no un foro: ` +
+          'la nota y el feedback se publican con publishGrade().',
+      );
+    }
+
+    const { postId } = parseForumRemoteId(ref.remoteId);
+
+    await this.#client.call(
+      WS_FUNCTIONS.addDiscussionPost,
+      {
+        postid: postId,
+        // Vacío deja que Moodle componga el «Re: <asunto del hilo>» que sus
+        // usuarios reconocen; inventarlo aquí obligaría a Vega a conocer las
+        // convenciones de cada idioma del sitio.
+        subject: reply.subject ?? '',
+        message: renderReplyHtml(reply),
+      },
+      z.unknown(),
     );
   }
 }
@@ -974,6 +1251,36 @@ function parseRemoteId(remoteId: string): {
     throw new Error(`Identificador de entrega de Moodle mal formado: "${remoteId}".`);
   }
   return parsed;
+}
+
+/**
+ * El `<foro>:<debate>:<mensaje>` que fabrica `forumSubmission`. Lo único que
+ * hace falta para responder es el tercero, pero se validan los tres: un
+ * identificador con dos partes es un `remoteId` de entrega colado por el camino
+ * de foro, y contestar a un `postid` que en realidad es un `userid` publicaría
+ * la respuesta en un hilo cualquiera.
+ */
+function parseForumRemoteId(remoteId: string): { postId: number } {
+  const parts = remoteId.split(':');
+  const postId = Number.parseInt(parts[2] ?? '', 10);
+  if (parts.length !== 3 || !Number.isFinite(postId)) {
+    throw new Error(
+      `Identificador de intervención de foro mal formado: "${remoteId}". Se esperaba <foro>:<debate>:<mensaje>.`,
+    );
+  }
+  return { postId };
+}
+
+/**
+ * La respuesta en HTML, que es lo que el editor de Moodle guarda por defecto.
+ * Se respetan los saltos de línea del profesor: lo que escribió con dos párrafos
+ * tiene que llegarle al alumno con dos párrafos.
+ */
+function renderReplyHtml(reply: RemoteReply): string {
+  return reply.body
+    .split(/\n{2,}/)
+    .map((paragraph) => `<p>${escapeHtml(paragraph).replaceAll('\n', '<br>')}</p>`)
+    .join('');
 }
 
 function firstSubmissionFile(submission: MoodleSubmission) {

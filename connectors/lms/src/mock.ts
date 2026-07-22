@@ -8,6 +8,7 @@ import type {
   LmsConnectionInfo,
   LmsConnectorConfig,
   RemoteGrade,
+  RemoteReply,
   RemoteStudent,
   RemoteSubmission,
   SubmissionRef,
@@ -18,9 +19,9 @@ import type {
  * toca disco ni red, y genera siempre las mismas actividades y las mismas
  * entregas para que la cola de revisión no cambie entre recargas.
  *
- * Lo publicado se guarda en memoria y se puede consultar con `publishedGrades`
- * y `publishedFiles`, que es como se comprueba en los tests de la API que una
- * validación acaba efectivamente en el LMS.
+ * Lo publicado se guarda en memoria y se puede consultar con `publishedGrades`,
+ * `publishedFiles` y `publishedReplies`, que es como se comprueba en los tests de
+ * la API que una validación acaba efectivamente en el LMS.
  */
 
 /** Fecha base fija: sin ella, "hace dos días" cambiaría en cada ejecución. */
@@ -274,12 +275,18 @@ export interface PublishedFile {
   readonly file: FeedbackFile;
 }
 
+export interface PublishedReply {
+  readonly ref: SubmissionRef;
+  readonly reply: RemoteReply;
+}
+
 export class MockLmsConnector implements LmsConnector {
   readonly name = 'mock';
 
   readonly #perActivity: number;
   readonly #grades: PublishedGrade[] = [];
   readonly #files: PublishedFile[] = [];
+  readonly #replies: PublishedReply[] = [];
 
   constructor(options: MockLmsConnectorOptions = {}) {
     this.#perActivity = Math.max(1, options.submissionsPerActivity ?? 4);
@@ -292,6 +299,11 @@ export class MockLmsConnector implements LmsConnector {
 
   get publishedFiles(): readonly PublishedFile[] {
     return this.#files;
+  }
+
+  /** Respuestas de foro publicadas hasta ahora, en orden de publicación. */
+  get publishedReplies(): readonly PublishedReply[] {
+    return this.#replies;
   }
 
   listCourses(): Promise<DiscoveredCourse[]> {
@@ -315,6 +327,10 @@ export class MockLmsConnector implements LmsConnector {
           detail: 'Catálogo simulado', required: true },
         { name: 'mock.forums', label: 'Leer los foros del curso', status: 'ok' as const,
           detail: 'Catálogo simulado', required: true },
+        { name: 'mock.saveGrade', label: 'Publicar la nota y el feedback', status: 'ok' as const,
+          detail: 'Se guarda en memoria; aquí no hay nada que escribir de verdad.', required: true },
+        { name: 'mock.addPost', label: 'Responder en el foro', status: 'ok' as const,
+          detail: 'Se guarda en memoria; aquí no hay nada que escribir de verdad.', required: true },
       ],
     });
   }
@@ -395,7 +411,20 @@ export class MockLmsConnector implements LmsConnector {
     });
   }
 
+  /**
+   * Rechaza los foros igual que el conector real. El mock es donde se prueba el
+   * circuito completo sin Moodle delante: si aquí una respuesta de foro se
+   * dejara publicar como nota, el error se descubriría en producción.
+   */
   publishGrade(ref: SubmissionRef, grade: RemoteGrade): Promise<void> {
+    if (isForumRef(ref)) {
+      return Promise.reject(
+        new Error(
+          `La actividad "${ref.activity.slug}" es un foro y no tiene libro de notas: ` +
+            'una respuesta a una duda se publica con publishForumReply().',
+        ),
+      );
+    }
     this.#grades.push({ ref, grade });
     return Promise.resolve();
   }
@@ -404,6 +433,24 @@ export class MockLmsConnector implements LmsConnector {
     this.#files.push({ ref, file });
     return Promise.resolve();
   }
+
+  publishForumReply(ref: SubmissionRef, reply: RemoteReply): Promise<void> {
+    if (!isForumRef(ref)) {
+      return Promise.reject(
+        new Error(
+          `La actividad "${ref.activity.slug}" es una entrega, no un foro: ` +
+            'la nota y el feedback se publican con publishGrade().',
+        ),
+      );
+    }
+    this.#replies.push({ ref, reply });
+    return Promise.resolve();
+  }
+}
+
+/** Foro por `kind` explícito o, en su defecto, por la convención del slug. */
+function isForumRef(ref: SubmissionRef): boolean {
+  return (ref.activity.kind ?? (isForumSlug(ref.activity.slug) ? 'forum' : 'assignment')) === 'forum';
 }
 
 /**

@@ -7,6 +7,8 @@ import { hashPassword } from '../auth/password.js';
 import { schema } from './client.js';
 import type { Database } from './client.js';
 import type { Config } from '../config.js';
+import { contextContentHash } from '../contexts/service.js';
+import { seedPrompts } from '../prompts/service.js';
 
 /**
  * Puesta en marcha de una instalación vacía.
@@ -41,9 +43,11 @@ async function readContextFile(relativePath: string): Promise<string> {
  * pisa en el siguiente arranque.
  */
 async function seedContexts(db: Database, log: (line: string) => void): Promise<void> {
-  const rows: (typeof schema.gradingContexts.$inferInsert)[] = [];
+  const rows: { level: 'global' | 'activity_kind' | 'template'; key: string; content: string }[] = [];
 
-  const global = await readContextFile('global.md');
+  const installation = await readContextFile('installation.md');
+  const globalRules = await readContextFile('global.md');
+  const global = [installation, globalRules].filter(Boolean).join('\n\n---\n\n');
   if (global !== '') rows.push({ level: 'global', key: 'global', content: global });
 
   for (const kind of ActivityKind.options) {
@@ -51,18 +55,43 @@ async function seedContexts(db: Database, log: (line: string) => void): Promise<
     if (content !== '') rows.push({ level: 'activity_kind', key: kind, content });
   }
 
+  const problemTemplate = await readContextFile('activity-kinds/assignment.md');
+  if (problemTemplate !== '') {
+    rows.push({ level: 'template', key: 'simulacro-problema', content: problemTemplate });
+  }
+  const topicTemplate = await readContextFile('activity-kinds/assignment-tema.md');
+  if (topicTemplate !== '') {
+    rows.push({ level: 'template', key: 'simulacro-tema', content: topicTemplate });
+  }
+
   if (rows.length === 0) return;
 
-  const inserted = await db
-    .insert(schema.gradingContexts)
-    .values(rows)
-    .onConflictDoNothing({
-      target: [schema.gradingContexts.level, schema.gradingContexts.key],
-    })
-    .returning({ key: schema.gradingContexts.key });
+  let inserted = 0;
+  for (const row of rows) {
+    const created = await db.transaction(async (tx) => {
+      const [context] = await tx
+        .insert(schema.gradingContexts)
+        .values({ level: row.level, key: row.key, activeVersion: 1 })
+        .onConflictDoNothing({
+          target: [schema.gradingContexts.level, schema.gradingContexts.key],
+        })
+        .returning({ id: schema.gradingContexts.id });
+      if (!context) return false;
+      await tx.insert(schema.gradingContextVersions).values({
+        contextId: context.id,
+        version: 1,
+        content: row.content,
+        contentHash: contextContentHash(row.content),
+        source: 'seed',
+        createdBy: null,
+      });
+      return true;
+    });
+    if (created) inserted += 1;
+  }
 
-  if (inserted.length > 0) {
-    log(`→ contextos de corrección sembrados desde contexts/: ${inserted.length}`);
+  if (inserted > 0) {
+    log(`→ contextos de corrección sembrados desde contexts/: ${inserted}`);
   }
 }
 
@@ -111,5 +140,6 @@ export async function bootstrap(
   log: (line: string) => void = () => {},
 ): Promise<void> {
   await seedContexts(db, log);
+  await seedPrompts(db, log);
   await ensureAdmin(db, config, log);
 }

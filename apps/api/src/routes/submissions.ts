@@ -1,4 +1,5 @@
 import { and, asc, eq, inArray } from 'drizzle-orm';
+import { createReadStream } from 'node:fs';
 import type { FastifyInstance } from 'fastify';
 import {
   hasStudentFile,
@@ -6,6 +7,8 @@ import {
   type ActivityKind,
   type CorrectionResponse,
   QueueQuery,
+  ParkSubmissionRequest,
+  ReprocessSubmissionRequest,
   type QueueCounts,
   type QueueItem,
   type QueueResponse,
@@ -21,17 +24,11 @@ import { badRequest, conflict, notFound, parseOrThrow, unprocessable } from '../
 import { asHttpError, connectorForUser } from '../lms/factory.js';
 import { publishToLms, recordPublication } from '../publish/publish.js';
 import { requireActivity } from './activities.js';
-import { visibleActivityIds } from '../auth/scope.js';
+import { assertActivityAccess, visibleActivityIds } from '../auth/scope.js';
+import { FileStore } from '../storage/files.js';
 import type { TokenPayload } from '../auth/plugin.js';
 import type { AppContext } from '../context.js';
-
-/** URLs de las páginas escaneadas. Con el conector mock son SVG generados al vuelo. */
-function scanUrls(submissionId: string, pageCount: number): string[] {
-  return Array.from({ length: pageCount }, (_, i) => `/api/scans/${submissionId}/${i + 1}.svg`);
-}
-
-/** Por debajo de este umbral, la UI señala la corrección como poco fiable. */
-const LOW_CONFIDENCE = 0.75;
+import { getSettings } from '../settings/service.js';
 
 interface QueueRow {
   id: string;
@@ -39,6 +36,11 @@ interface QueueRow {
   student_ref: string;
   student_alias: string | null;
   status: SubmissionStatus;
+  batch_run_id: string | null;
+  parked_reason: string | null;
+  parked_by: string | null;
+  triage_label: QueueItem['submission']['triageLabel'];
+  triage_confidence: string | null;
   original_filename: string | null;
   page_count: number;
   text_content: string | null;
@@ -55,6 +57,7 @@ interface QueueRow {
   score: string | null;
   low_confidence_items: string | null;
   flag_count: string | null;
+  verification_issue_count: string | null;
   total_count: string;
 }
 
@@ -68,6 +71,7 @@ export async function submissionRoutes(app: FastifyInstance, ctx: AppContext): P
     async (request): Promise<QueueResponse> => {
       const query = parseOrThrow(QueueQuery, request.query, 'Los filtros de la cola');
       const offset = (query.page - 1) * query.pageSize;
+      const { ai } = await getSettings(ctx);
 
       // Un profesor sólo ve las entregas de sus cursos. No es sólo un permiso:
       // son trabajos de alumnos concretos y enseñárselos a otro docente es un
@@ -95,6 +99,7 @@ export async function submissionRoutes(app: FastifyInstance, ctx: AppContext): P
           agg.score,
           agg.low_confidence_items,
           COALESCE(jsonb_array_length(t.flags), 0) AS flag_count,
+          COALESCE(jsonb_array_length(c.verification->'issues'), 0) AS verification_issue_count,
           COUNT(*) OVER () AS total_count
         FROM submissions s
         JOIN activities a ON a.id = s.activity_id
@@ -103,7 +108,7 @@ export async function submissionRoutes(app: FastifyInstance, ctx: AppContext): P
         LEFT JOIN LATERAL (
           SELECT
             SUM(COALESCE(ci.teacher_points, ci.ai_points))                       AS score,
-            COUNT(*) FILTER (WHERE ci.confidence < ${LOW_CONFIDENCE})            AS low_confidence_items
+            COUNT(*) FILTER (WHERE ci.confidence < ${ai.lowConfidenceThreshold}) AS low_confidence_items
           FROM correction_items ci
           WHERE ci.correction_id = c.id
         ) agg ON true
@@ -137,6 +142,12 @@ export async function submissionRoutes(app: FastifyInstance, ctx: AppContext): P
             studentRef: row.student_ref,
             studentAlias: row.student_alias,
             status: row.status,
+            batchRunId: row.batch_run_id,
+            parkedReason: row.parked_reason,
+            parkedBy: row.parked_by,
+            triageLabel: row.triage_label,
+            triageConfidence:
+              row.triage_confidence === null ? null : Number(row.triage_confidence),
             originalFilename: row.original_filename,
             pageCount: row.page_count,
             textContent: row.text_content,
@@ -156,8 +167,11 @@ export async function submissionRoutes(app: FastifyInstance, ctx: AppContext): P
           score,
           maxScore,
           confidence: row.c_confidence === null ? null : Number(row.c_confidence),
+          lowConfidence:
+            row.c_confidence !== null && Number(row.c_confidence) < ai.lowConfidenceThreshold,
           flagCount: Number(row.flag_count ?? 0),
           lowConfidenceItems: Number(row.low_confidence_items ?? 0),
+          verificationIssueCount: Number(row.verification_issue_count ?? 0),
         };
       });
 
@@ -194,6 +208,7 @@ export async function submissionRoutes(app: FastifyInstance, ctx: AppContext): P
       transcribed: 0,
       grading: 0,
       graded: 0,
+      parked: 0,
       validated: 0,
       published: 0,
       error: 0,
@@ -395,23 +410,74 @@ export async function submissionRoutes(app: FastifyInstance, ctx: AppContext): P
     { preHandler: app.authenticate },
     async (request) => {
       const submissionId = request.params.id;
+      const body = parseOrThrow(ReprocessSubmissionRequest, request.body ?? {}, 'El reproceso');
       const [submission] = await db
         .select()
         .from(schema.submissions)
         .where(eq(schema.submissions.id, submissionId))
         .limit(1);
       if (!submission) throw notFound('No existe esa entrega.');
+      await assertActivityAccess(ctx, currentUser(request), submission.activityId);
       if (submission.status === 'published') {
         throw conflict('Una entrega ya publicada no se puede reprocesar.');
       }
 
-      // Volver a 'pending' basta: el siguiente lote la recogerá.
+      // En grade_only conservamos la lectura ya pagada. El lote reconoce el
+      // estado grading y reutiliza la transcripción persistida.
       await db
         .update(schema.submissions)
-        .set({ status: 'pending', errorMessage: null, updatedAt: new Date() })
+        .set({ status: body.scope === 'grade_only' ? 'grading' : 'pending', errorMessage: null, updatedAt: new Date() })
         .where(eq(schema.submissions.id, submissionId));
 
       return { queued: true };
+    },
+  );
+
+  app.post<{ Params: { id: string } }>(
+    routes.park(':id'),
+    { preHandler: app.authenticate },
+    async (request) => {
+      const body = parseOrThrow(ParkSubmissionRequest, request.body, 'El aparcado');
+      const [submission] = await db
+        .select()
+        .from(schema.submissions)
+        .where(eq(schema.submissions.id, request.params.id))
+        .limit(1);
+      if (!submission) throw notFound('No existe esa entrega.');
+      const user = currentUser(request);
+      await assertActivityAccess(ctx, user, submission.activityId);
+      if (submission.status === 'published') throw conflict('Una entrega publicada no se puede aparcar.');
+      await db
+        .update(schema.submissions)
+        .set({
+          status: 'parked',
+          parkedReason: body.reason,
+          parkedBy: user.sub,
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.submissions.id, submission.id));
+      return { queued: false };
+    },
+  );
+
+  app.get<{ Params: { id: string } }>(
+    routes.original(':id'),
+    { preHandler: app.authenticate },
+    async (request, reply) => {
+      const [submission] = await db
+        .select()
+        .from(schema.submissions)
+        .where(eq(schema.submissions.id, request.params.id))
+        .limit(1);
+      if (!submission) throw notFound('No existe esa entrega.');
+      await assertActivityAccess(ctx, currentUser(request), submission.activityId);
+      if (submission.storagePath === null) throw notFound('Esta entrega no tiene un original real almacenado.');
+      const store = new FileStore(ctx.config.STORAGE_ROOT);
+      const filename = submission.originalFilename ?? 'entrega.pdf';
+      reply
+        .type(submission.mediaType ?? 'application/pdf')
+        .header('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(filename)}`);
+      return reply.send(createReadStream(store.absolutePathOf(submission.storagePath)));
     },
   );
 }
@@ -471,7 +537,11 @@ async function loadDetail(
     transcription: transcription ? toTranscription(transcription) : null,
     correction: correctionRow ? toCorrection(correctionRow, items) : null,
     // Una actividad sin fichero del alumno (un foro) no tiene nada que escanear.
-    scanUrls: hasStudentFile(activity.kind) ? scanUrls(submission.id, submission.pageCount) : [],
+    scanUrls: hasStudentFile(activity.kind)
+      ? submission.storagePath === null
+        ? (transcription?.pages ?? []).map((page) => page.imageUrl)
+        : [routes.original(submission.id)]
+      : [],
   };
 }
 

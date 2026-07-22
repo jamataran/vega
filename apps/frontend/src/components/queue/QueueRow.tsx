@@ -5,7 +5,6 @@ import { cn } from '@/lib/cn';
 import { formatRelativeTime, formatScore } from '@/lib/format';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
-import { LOW_CONFIDENCE } from '@/components/common/status';
 
 /**
  * Prioridad de la fila. El espinazo de color es el único adorno de la lista y
@@ -21,9 +20,10 @@ function spineClass(item: QueueItem): string {
 
 function needsAttention(item: QueueItem): boolean {
   return (
-    (item.confidence !== null && item.confidence < LOW_CONFIDENCE) ||
+    item.lowConfidence ||
     item.flagCount > 0 ||
-    item.lowConfidenceItems > 0
+    item.lowConfidenceItems > 0 ||
+    item.verificationIssueCount > 0
   );
 }
 
@@ -79,6 +79,11 @@ export function QueueRow({ item }: { item: QueueItem }) {
             <p className="mt-2 line-clamp-2 text-ui text-destructive-ink">
               {submission.errorMessage}
             </p>
+          ) : submission.status === 'parked' ? (
+            <p className="mt-2 text-ui text-muted-foreground">
+              {submission.parkedReason ?? 'Aparcada para revisarla más adelante.'}{' '}
+              <span className="whitespace-nowrap">· {formatRelativeTime(submission.updatedAt)}</span>
+            </p>
           ) : (
             <AttentionSignals item={item} />
           )}
@@ -89,8 +94,8 @@ export function QueueRow({ item }: { item: QueueItem }) {
 }
 
 function AttentionSignals({ item }: { item: QueueItem }) {
-  const lowConfidence = item.confidence !== null && item.confidence < LOW_CONFIDENCE;
-  if (!lowConfidence && item.flagCount === 0 && item.lowConfidenceItems === 0) return null;
+  const lowConfidence = item.lowConfidence;
+  if (!lowConfidence && item.flagCount === 0 && item.lowConfidenceItems === 0 && item.verificationIssueCount === 0) return null;
 
   return (
     <ul className="mt-2 flex flex-wrap gap-1.5">
@@ -112,6 +117,13 @@ function AttentionSignals({ item }: { item: QueueItem }) {
         <li>
           <Badge title="Apartados que la IA marca con baja confianza">
             {plural(item.lowConfidenceItems, 'apartado dudoso', 'apartados dudosos')}
+          </Badge>
+        </li>
+      ) : null}
+      {item.verificationIssueCount > 0 ? (
+        <li>
+          <Badge variant="warning" title="Avisos de la comprobación mecánica o del verificador">
+            {plural(item.verificationIssueCount, 'aviso de verificación', 'avisos de verificación')}
           </Badge>
         </li>
       ) : null}

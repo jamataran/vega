@@ -1,5 +1,15 @@
 import type { ComponentType } from 'react';
-import { BarChart3, FileText, Layers, ListChecks, Settings, Timer, Users } from 'lucide-react';
+import {
+  BarChart3,
+  FileText,
+  Layers,
+  ListChecks,
+  MessageSquareText,
+  Settings,
+  Timer,
+  Users,
+  ScrollText,
+} from 'lucide-react';
 import type { LucideProps } from 'lucide-react';
 
 export interface NavItem {
@@ -29,7 +39,11 @@ export const PRIMARY_NAV: readonly NavItem[] = [
  * —los enlaces «Ir a Ajustes» de los estados de error—. Dentro, las secciones
  * de instalación se siguen enseñando sólo a quien administra.
  */
-export const ADMIN_NAV: readonly NavItem[] = [{ to: '/usuarios', label: 'Usuarios', Icon: Users }];
+export const ADMIN_NAV: readonly NavItem[] = [
+  { to: '/usuarios', label: 'Usuarios', Icon: Users },
+  { to: '/prompts', label: 'Prompts', Icon: MessageSquareText },
+  { to: '/registro-ia', label: 'Registro de IA', Icon: ScrollText },
+];
 
 /**
  * Pantallas de consulta que no compiten por un sitio en la barra inferior. El

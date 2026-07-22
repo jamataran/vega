@@ -141,6 +141,30 @@ export const RemoteGrade = z.object({
 });
 export type RemoteGrade = z.infer<typeof RemoteGrade>;
 
+/**
+ * La respuesta validada a una duda de foro.
+ *
+ * Es un tipo aparte de `RemoteGrade` y no un caso suyo con la nota a `null`
+ * **a propósito**: en un foro no hay calificación, no hay apartados y no hay
+ * libro de notas. Compartir tipo invitaría a compartir también el camino de
+ * publicación, que es justo lo que HU-20 (RN-4) prohíbe — una respuesta a una
+ * duda no se escribe en el libro de notas de una tarea.
+ */
+export const RemoteReply = z.object({
+  /** Texto que verá el alumno, ya editado y aprobado por el profesor. */
+  body: z.string().min(1),
+  /**
+   * Asunto del mensaje. `null` para que el conector use el del hilo con el
+   * prefijo que su LMS acostumbre («Re: …» en Moodle): componerlo aquí obligaría
+   * a Vega a conocer las convenciones de cada destino.
+   */
+  subject: z.string().nullable().default(null),
+  /** Quién validó, para dejar rastro donde el destino lo admita. */
+  validatedBy: z.string().nullable().optional(),
+  validatedAt: IsoDate.optional(),
+});
+export type RemoteReply = z.infer<typeof RemoteReply>;
+
 export const FeedbackFile = z.object({
   filename: z.string().min(1),
   mediaType: z.string().min(1),

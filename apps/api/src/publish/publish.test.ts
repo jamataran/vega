@@ -6,11 +6,12 @@ import type {
   LmsConnectionInfo,
   LmsConnector,
   RemoteGrade,
+  RemoteReply,
   RemoteSubmission,
   SubmissionRef,
 } from '@vega/connector-lms';
 import type { Activity, Correction, CorrectionItem, Submission } from '@vega/shared';
-import { publishToLms, toRemoteGrade, type PublishInput } from './publish.js';
+import { publishToLms, toRemoteGrade, toRemoteReply, type PublishInput } from './publish.js';
 
 /**
  * La publicación es el único punto del sistema en el que Vega escribe en el
@@ -31,6 +32,8 @@ function item(overrides: Partial<CorrectionItem> = {}): CorrectionItem {
     maxPoints: 2.5,
     aiPoints: 2,
     aiFeedback: 'Lo de la IA',
+    aiQuote: null,
+    aiQuotePage: null,
     teacherPoints: null,
     teacherFeedback: null,
     confidence: 0.9,
@@ -50,6 +53,9 @@ function correction(overrides: Partial<Correction> = {}): Correction {
     teacherLatex: null,
     aiSummary: 'Resumen de la IA',
     teacherSummary: null,
+    teacherNotes: null,
+    verification: null,
+    simulated: true,
     confidence: 0.9,
     model: 'mock-1',
     usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, costCents: 0 },
@@ -77,6 +83,7 @@ function activity(overrides: Partial<Activity> = {}): Activity {
     graded: true,
     maxScore: 10,
     referenceSolution: null,
+    templateKey: null,
     pointsAllocation: [],
     autonomy: 'review_all',
     createdAt: '2026-01-01T00:00:00.000Z',
@@ -92,6 +99,11 @@ function submission(overrides: Partial<Submission> = {}): Submission {
     studentRef: 'moodle-17',
     studentAlias: null,
     status: 'validated',
+    batchRunId: null,
+    parkedReason: null,
+    parkedBy: null,
+    triageLabel: null,
+    triageConfidence: null,
     originalFilename: 'examen.pdf',
     pageCount: 3,
     textContent: null,
@@ -124,9 +136,10 @@ class LabConnector implements LmsConnector {
   readonly name = 'lab';
   readonly grades: RemoteGrade[] = [];
   readonly files: FeedbackFile[] = [];
+  readonly replies: RemoteReply[] = [];
 
   constructor(
-    private readonly fail: { grade?: string; file?: string } = {},
+    private readonly fail: { grade?: string; file?: string; reply?: string } = {},
   ) {}
 
   listCourses(): Promise<never[]> {
@@ -152,6 +165,11 @@ class LabConnector implements LmsConnector {
   publishFeedbackFile(_ref: SubmissionRef, file: FeedbackFile): Promise<void> {
     if (this.fail.file !== undefined) return Promise.reject(new Error(this.fail.file));
     this.files.push(file);
+    return Promise.resolve();
+  }
+  publishForumReply(_ref: SubmissionRef, reply: RemoteReply): Promise<void> {
+    if (this.fail.reply !== undefined) return Promise.reject(new Error(this.fail.reply));
+    this.replies.push(reply);
     return Promise.resolve();
   }
 }
@@ -215,21 +233,78 @@ test('una entrega con fichero publica nota y PDF de corrección', async () => {
   assert.equal(connector.files[0]?.mediaType, 'application/pdf');
 });
 
-test('un foro publica sólo el feedback: no hay PDF que adjuntar', async () => {
+// ── Foro: el otro camino de publicación ─────────────────────────────────────
+
+/**
+ * Estas cuatro pruebas existen por un fallo concreto y silencioso. Antes de
+ * bifurcar, un foro validado se publicaba con `publishGrade`, y el `remoteId`
+ * de una duda —`<foro>:<debate>:<mensaje>`— se parseaba sin error como
+ * `<tarea>:<usuario>:<intento>`. Es decir: la respuesta se escribía como nota
+ * de la tarea cuyo id coincidía con el del foro, a un alumno cualquiera. No
+ * lanzaba nada. Es justo lo que HU-20 (RN-4) prohíbe.
+ */
+const FORUM_REF: SubmissionRef = {
+  activity: { slug: 'foro-didactica', lmsRef: 'forum-9', kind: 'forum' },
+  studentRef: 'moodle-17',
+  remoteId: '9:311:4820',
+};
+
+function forumInput(overrides: Partial<PublishInput> = {}): PublishInput {
+  return input({
+    activity: activity({ kind: 'forum', graded: false, maxScore: null, moodleRef: 'forum-9' }),
+    submission: submission({ originalFilename: null, pageCount: 0 }),
+    correction: correction({ items: [], maxScore: null }),
+    ...overrides,
+  });
+}
+
+test('un foro publica una respuesta, no una nota', async () => {
   const connector = new LabConnector();
-  const outcome = await publishToLms(
-    connector,
-    REF,
-    input({
-      activity: activity({ kind: 'forum', graded: false, maxScore: null }),
-      submission: submission({ originalFilename: null, pageCount: 0 }),
-      correction: correction({ items: [], maxScore: null }),
+  const outcome = await publishToLms(connector, FORUM_REF, forumInput());
+
+  assert.equal(outcome.complete, true);
+  assert.equal(connector.replies.length, 1);
+  // Lo que importa de verdad: el libro de notas no se toca.
+  assert.equal(connector.grades.length, 0, 'un foro no tiene libro de notas');
+  assert.equal(connector.files.length, 0, 'un foro no adjunta PDF de corrección');
+});
+
+test('la respuesta publicada es la del profesor cuando la ha editado', () => {
+  const reply = toRemoteReply(
+    forumInput({
+      correction: correction({
+        items: [],
+        maxScore: null,
+        aiLatex: 'Lo que redactó la IA',
+        teacherLatex: 'Lo que reescribió el profesor',
+      }),
     }),
   );
 
+  assert.equal(reply.body, 'Lo que reescribió el profesor');
+  // Lo que el profesor sustituyó no puede llegar al alumno por ninguna vía.
+  assert.ok(!JSON.stringify(reply).includes('Lo que redactó la IA'));
+});
+
+test('si falla la respuesta el error sube y no queda nada publicado', async () => {
+  const connector = new LabConnector({ reply: 'Moodle no responde' });
+  await assert.rejects(
+    () => publishToLms(connector, FORUM_REF, forumInput()),
+    /Moodle no responde/,
+  );
+  assert.equal(connector.grades.length, 0);
+});
+
+test('reintentar un foro ya publicado no vuelve a escribir el mensaje', async () => {
+  const connector = new LabConnector();
+  const outcome = await publishToLms(
+    connector,
+    FORUM_REF,
+    forumInput({ alreadyPublished: { grade: true, file: false } }),
+  );
+
   assert.equal(outcome.complete, true);
-  assert.equal(connector.grades.length, 1);
-  assert.equal(connector.files.length, 0);
+  assert.equal(connector.replies.length, 0, 'el alumno vería dos respuestas a la misma duda');
 });
 
 test('si el conector no admite el fichero, la nota se publica igual y se avisa', async () => {
