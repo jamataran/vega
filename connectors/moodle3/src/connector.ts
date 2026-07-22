@@ -64,6 +64,14 @@ const SUBMISSION_FILE_AREA = 'submission_files';
  * catálogo en vez de llamarla: no es que escribiera nada, es que sin datos a la
  * vista (ningún foro, ningún debate) no hay llamada representativa que hacer.
  */
+/**
+ * Cuántos cursos se consultan al comprobar la conexión. Suficientes para dar
+ * con una tarea o un foro real con el que ensayar, sin que un profesor con
+ * cientos de cursos convierta el botón «Probar conexión» en una consulta que
+ * su Moodle tarda medio minuto en contestar.
+ */
+const MAX_PROBE_COURSES = 25;
+
 const READ_NOT_REHEARSED =
   'Está en el servicio web del token. No se ha podido ensayar con una llamada real porque este ' +
   'token aún no ve ningún foro o debate con el que probarla.';
@@ -235,7 +243,16 @@ export class Moodle3Connector implements LmsConnector {
     // Con un curso de verdad la prueba es representativa; sin ninguno se manda
     // la lista vacía, que Moodle acepta y sirve igual para saber si la función
     // está habilitada, que es justo lo que se está comprobando.
-    const courseIds = courses.length > 0 ? [parseCourseId(courses[0]!.moodleCourseId)] : [];
+    //
+    // Se preguntan **varios cursos y no sólo el primero**: en un aula real el
+    // profesor ve decenas y las tareas suelen estar en uno concreto, así que
+    // mirar el primero puede no encontrar ninguna tarea ni ningún foro con el
+    // que ensayar las funciones que de verdad usa la ingesta. El tope evita
+    // que un claustro con cientos de cursos convierta una comprobación en una
+    // consulta enorme.
+    const probeCourseIds = courses
+      .slice(0, MAX_PROBE_COURSES)
+      .map((course) => parseCourseId(course.moodleCourseId));
 
     let assignments: GetAssignmentsResponse | undefined;
     checks.push(
@@ -245,46 +262,61 @@ export class Moodle3Connector implements LmsConnector {
         async () => {
           assignments = await this.#client.call(
             WS_FUNCTIONS.getAssignments,
-            { courseids: courseIds },
+            { courseids: probeCourseIds },
             GetAssignmentsResponse,
           );
           return assignments;
         },
-        (result) =>
-          `${result.courses.length} ${result.courses.length === 1 ? 'curso' : 'cursos'} con tareas`,
+        (result) => {
+          // Cuántas TAREAS, no cuántos cursos ha devuelto Moodle: un curso sin
+          // ninguna tarea también viene en la respuesta, y contar cursos daba
+          // un «1 curso con tareas» que no significaba nada.
+          const total = result.courses.reduce((sum, course) => sum + course.assignments.length, 0);
+          return total === 0
+            ? 'Responde correctamente; este token no ve ninguna tarea todavía.'
+            : `${total} ${total === 1 ? 'tarea visible' : 'tareas visibles'}`;
+        },
       ),
     );
 
     // La ingesta no lee las tareas: lee sus **envíos**, con esta otra función.
     // Es la que suele faltar en el servicio web, y durante un tiempo este parte
     // no la cubría: importar actividades funcionaba y la ingesta fallaba entera
-    // sin que «Probar conexión» avisara de nada. Se ensaya con una tarea real
-    // si el token ve alguna; con la lista vacía la llamada sigue diciendo si la
-    // función está habilitada, que es lo que se comprueba.
+    // sin que «Probar conexión» avisara de nada.
+    //
+    // Hace falta una tarea de verdad con la que ensayar: Moodle rechaza la
+    // llamada con la lista vacía (`invalidparameter`), que es un fallo de la
+    // sonda y no del servicio web —dar eso por roto manda a arreglar algo que
+    // está bien—. Sin ninguna tarea a la vista se mira el catálogo del token.
     const assignmentIds = (assignments?.courses ?? [])
       .flatMap((course) => course.assignments.map((assignment) => assignment.id))
       .slice(0, 1);
     checks.push(
-      await this.#probe(
-        WS_FUNCTIONS.getSubmissions,
-        'Leer lo que entrega cada alumno',
-        () =>
-          this.#client.call(
+      assignmentIds.length === 0
+        ? this.#declared(
+            siteInfo,
             WS_FUNCTIONS.getSubmissions,
-            { assignmentids: assignmentIds, status: 'submitted' },
-            GetSubmissionsResponse,
+            'Leer lo que entrega cada alumno',
+            'Sin ella Vega ve la tarea pero no puede traerse ni una entrega.',
+            READ_NOT_REHEARSED,
+          )
+        : await this.#probe(
+            WS_FUNCTIONS.getSubmissions,
+            'Leer lo que entrega cada alumno',
+            () =>
+              this.#client.call(
+                WS_FUNCTIONS.getSubmissions,
+                { assignmentids: assignmentIds, status: 'submitted' },
+                GetSubmissionsResponse,
+              ),
+            (result) => {
+              const total = result.assignments.reduce(
+                (sum, assignment) => sum + assignment.submissions.length,
+                0,
+              );
+              return `${total} ${total === 1 ? 'entrega visible' : 'entregas visibles'} en la primera tarea`;
+            },
           ),
-        (result) => {
-          if (assignmentIds.length === 0) {
-            return 'Responde correctamente, aunque este token aún no ve ninguna tarea con la que ensayar.';
-          }
-          const total = result.assignments.reduce(
-            (sum, assignment) => sum + assignment.submissions.length,
-            0,
-          );
-          return `${total} ${total === 1 ? 'entrega visible' : 'entregas visibles'} en la primera tarea`;
-        },
-      ),
     );
 
     let forums: GetForumsResponse | undefined;
@@ -295,7 +327,7 @@ export class Moodle3Connector implements LmsConnector {
         async () => {
           forums = await this.#client.call(
             WS_FUNCTIONS.getForums,
-            { courseids: courseIds },
+            { courseids: probeCourseIds },
             GetForumsResponse,
           );
           return forums;

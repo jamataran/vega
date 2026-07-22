@@ -188,17 +188,33 @@ test('si el sitio no devuelve el catálogo, la comprobación se declara omitida'
 // servicio web sin la segunda daba «Probar conexión» en verde y una ingesta
 // que fallaba entera, sin pista de por qué.
 
-test('la lectura de envíos se ensaya aunque no haya tareas a la vista', async () => {
-  const { connector, llamadas } = moodleCon();
+test('sin ninguna tarea a la vista, los envíos se comprueban contra el catálogo', async () => {
+  const { connector, llamadas } = moodleCon([
+    'core_webservice_get_site_info',
+    'mod_assign_get_submissions',
+  ]);
 
   const info = await connector.verifyConnection();
   const envios = info.checks.find((check) => check.name === 'mod_assign_get_submissions');
 
-  // El mock responde `{}` a todo: la llamada se hace y el parte existe. Que
-  // aquí salga `failed` da igual; lo esencial es que se llama y se informa.
-  assert.notEqual(envios, undefined);
+  // Llamarla con la lista de tareas vacía hace que Moodle conteste
+  // `invalidparameter`, y eso se leería como «tu servicio web está mal» cuando
+  // lo que falla es la sonda. Pasó en un aula real: la función estaba bien y la
+  // comprobación la daba por rota.
+  assert.equal(envios?.status, 'ok');
+  assert.match(envios?.detail ?? '', /No se ha podido ensayar/);
+  assert.equal(llamadaA(llamadas, 'mod_assign_get_submissions'), undefined);
+});
+
+test('la que falta se sigue señalando aunque no haya tareas con las que ensayar', async () => {
+  const { connector } = moodleCon(['core_webservice_get_site_info']);
+
+  const info = await connector.verifyConnection();
+  const envios = info.checks.find((check) => check.name === 'mod_assign_get_submissions');
+
+  assert.equal(envios?.status, 'failed');
   assert.equal(envios?.required, true);
-  assert.notEqual(llamadaA(llamadas, 'mod_assign_get_submissions'), undefined);
+  assert.match(envios?.detail ?? '', /Servicios externos/);
 });
 
 test('sin foros a la vista, los debates y mensajes se comprueban contra el catálogo', async () => {
