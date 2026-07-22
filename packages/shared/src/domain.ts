@@ -610,6 +610,16 @@ export type AiCall = z.infer<typeof AiCall>;
 
 // ── Ajustes del sistema (sólo administrador) ────────────────────────────────
 
+/** La planificación de un tipo de actividad: si corre sola y cada cuánto. */
+export const ScheduleSlot = z.object({
+  enabled: z.boolean(),
+  /** Cada cuántos minutos corre solo el proceso para este tipo. */
+  everyMinutes: z.number().int().positive(),
+  lastRunAt: IsoDate.nullable(),
+  nextRunAt: IsoDate.nullable(),
+});
+export type ScheduleSlot = z.infer<typeof ScheduleSlot>;
+
 /**
  * Configuración editable desde la aplicación. Los secretos NUNCA se devuelven:
  * la API expone sólo si están configurados, y se escriben pero no se leen.
@@ -651,12 +661,14 @@ export const AppSettings = z.object({
     passwordConfigured: z.boolean(),
     from: z.string(),
   }),
+  /**
+   * Una planificación por tipo de actividad, no una global: una duda de foro
+   * no puede esperar al ritmo del lote de entregas, y el lote de entregas no
+   * tiene por qué correr cada pocos minutos.
+   */
   schedule: z.object({
-    enabled: z.boolean(),
-    /** Cada cuántos minutos corre el proceso de corrección. */
-    everyMinutes: z.number().int().positive(),
-    lastRunAt: IsoDate.nullable(),
-    nextRunAt: IsoDate.nullable(),
+    assignment: ScheduleSlot,
+    forum: ScheduleSlot,
   }),
   branding: z.object({
     name: z.string(),
@@ -673,6 +685,12 @@ export const BatchRun = z.object({
   status: z.enum(['running', 'done', 'failed']),
   /** Quién lo lanzó: `null` si fue el planificador. */
   triggeredBy: Id.nullable(),
+  /**
+   * Qué tipos de actividad barrió este proceso. El planificador corre por tipo
+   * (los foros suelen ir más frecuentes que las entregas); un proceso forzado
+   * a mano barre siempre los dos.
+   */
+  kinds: z.array(ActivityKind),
   submissionsProcessed: z.number().int().min(0),
   submissionsFailed: z.number().int().min(0),
   /** Cuántas se publicaron solas por estar en modo autónomo. */

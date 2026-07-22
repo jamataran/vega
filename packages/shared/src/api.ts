@@ -448,6 +448,12 @@ export type UpdateUserRequest = z.infer<typeof UpdateUserRequest>;
 export const SettingsResponse = z.object({ settings: AppSettings });
 export type SettingsResponse = z.infer<typeof SettingsResponse>;
 
+/** Parche de la planificación de un tipo de actividad. */
+const ScheduleSlotPatch = z.object({
+  enabled: z.boolean().optional(),
+  everyMinutes: z.number().int().positive().optional(),
+});
+
 /**
  * Los secretos se escriben pero no se leen. Enviar `null` en un secreto lo
  * borra; omitirlo lo deja como está.
@@ -492,8 +498,8 @@ export const UpdateSettingsRequest = z.object({
     .optional(),
   schedule: z
     .object({
-      enabled: z.boolean().optional(),
-      everyMinutes: z.number().int().positive().optional(),
+      assignment: ScheduleSlotPatch.optional(),
+      forum: ScheduleSlotPatch.optional(),
     })
     .optional(),
   branding: z.object({ name: z.string().min(1).optional() }).optional(),

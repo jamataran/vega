@@ -75,17 +75,17 @@ export function OverviewPage() {
                     : 'De media, bajas la nota de la IA'
               }
             />
-            {/* La métrica que decide cuándo una actividad aguanta más autonomía. */}
+            {/* La métrica que dice si el contexto de corrección está bien afinado. */}
             <Figure
               className="col-span-2"
               label="Validadas sin tocar"
               value={formatPercent(data.untouchedRatio)}
               note={
                 data.untouchedRatio >= 0.9
-                  ? 'Casi nunca cambias la propuesta: esta es la señal para dar más autonomía a una actividad.'
+                  ? 'Casi nunca cambias la propuesta: el contexto de corrección está bien afinado.'
                   : data.untouchedRatio >= 0.6
                     ? 'Sueles aceptar la propuesta, pero todavía intervienes en una de cada tres.'
-                    : 'Intervienes a menudo: conviene afinar el contexto antes de dar autonomía.'
+                    : 'Intervienes a menudo: conviene afinar el contexto de corrección.'
               }
             />
           </div>

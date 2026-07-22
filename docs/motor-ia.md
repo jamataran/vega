@@ -181,7 +181,7 @@ Configurables en Ajustes (combo por rol, sesión §3); los ids nunca se escriben
 | Rol (clave en `app_settings`) | Modelo por defecto | Parámetros | Se usa en |
 |---|---|---|---|
 | `anthropic.readingModel` | `claude-opus-4-8` | thinking adaptive, effort `high`, max_tokens 16k/bloque | Lecturas A y B |
-| `anthropic.gradingModel` | `claude-opus-4-8` | thinking adaptive, effort `xhigh`, max_tokens 32k | Corrección y respuesta experta de foro |
+| `anthropic.gradingModel` | `claude-opus-4-8` | thinking adaptive, effort `xhigh`, max_tokens ≥ 64k (**lo exige `xhigh`**; con timeout explícito para que el SDK no rechace la llamada no-streaming) | Corrección y respuesta experta de foro |
 | `anthropic.verifyModel` | `claude-sonnet-5` | thinking adaptive, effort `high`, max_tokens 8k | `verify()` y respuesta sencilla de foro |
 | `anthropic.triageModel` | `claude-haiku-4-5` | sin thinking, max_tokens 1k | Triaje de dudas |
 
@@ -204,8 +204,16 @@ Hechos de la API que condicionan esto (verificados contra la referencia actual d
 - **Subir el SDK es el primer commit del motor**: `@anthropic-ai/sdk@0.65.0` no tipa `thinking`
   adaptativo ni `output_config` (de ahí los casts de `anthropic.ts:buildParams`) ni la Batches API
   tipada que necesita §6.
-- `stop_reason: 'refusal'` y `'max_tokens'` se tratan como **fallos tipados** (reintento
-  controlado en síncrono, `error` con causa en lote), nunca se parsean como corrección.
+- `stop_reason: 'max_tokens'` se reintenta **una vez** con más presupuesto de salida;
+  `'refusal'` **no se reintenta jamás** (repetir la misma petición tras un rechazo no cambia el
+  resultado y va contra la guía de la API): fallo tipado directo, registrado en el ledger.
+- **Visión en alta resolución automática (Opus 4.8)**: las imágenes/PDF se procesan hasta 2.576 px
+  → hasta ~4.800 tokens por página densa, no los ~1.600 clásicos. Afecta directamente al
+  presupuesto (§14): los números de visión son cotas inferiores hasta medir en el piloto.
+- **Guardas por modelo en el proveedor** (`anthropic.ts`): Haiku 4.5 es de una generación anterior
+  y responde 400 a `thinking: adaptive` y a `effort` (por eso el triaje no los envía); `xhigh`
+  sólo se pide a Opus 4.8/Fable 5 y se degrada a `high` en el resto. Los combos de Ajustes ya
+  restringen las combinaciones, y el proveedor además se defiende solo.
 
 Sin enrutado dinámico ni clasificador de complejidad para entregas: la única «elección de modelo»
 en caliente es la del triaje de foros, que es una etiqueta, no un router (§10).
@@ -253,6 +261,16 @@ runBatch:  ingesta (ya existe) → FASE A: lote de lecturas (2 pasadas × bloque
   antes de optimizar más. En síncrono la caché sí rinde (mismo prefijo, entregas seguidas).
 - `submissions.batch_run_id` (nueva columna) ata cada entrega al run que la procesó — cierra la
   pregunta abierta de HU-09 y hace el coste por lote exacto en vez de «por ventana temporal».
+- **Límites del proveedor y fragmentación**: un lote admite 100k peticiones **o 256 MB**, y la
+  fase A (2 pasadas × páginas en base64) revienta el límite de tamaño mucho antes que el de
+  peticiones. Cada fase puede producir **varios `ai_batches`** (varias filas por
+  `batch_run_id`+`phase`); el empaquetador corta por tamaño estimado. Alternativa a evaluar en el
+  piloto: subir los PDF una vez a la Files API y referenciarlos por `file_id` en ambas pasadas.
+- **Resultados por `result.type`**: `succeeded` se persiste; `errored` marca la entrega en
+  `error` con causa; `canceled` idem; `expired` (el lote agotó sus 24 h) **se reenvía** en un
+  lote nuevo, porque no es un fallo de la entrega. Peor caso teórico de un run completo: 3 fases
+  secuenciales × 24 h ≈ **72 h**, no 24 h — el SLA de correcciones lo cubre con normalidad
+  (< 1 h/lote típico) pero el peor caso hay que contarlo bien.
 
 ---
 
@@ -376,11 +394,16 @@ Cierra el bloqueante nº 1 de la revisión de H2 («los 8 ficheros de `prompts/`
   `verify.system`, `forum.answer.system`, …), `version` (entera, autoincremental por clave),
   `content`, `active`, `updated_by/at`. La fila activa es la que se usa; las anteriores no se
   borran nunca.
-- **Siembra al arrancar** desde `prompts/` (mismo patrón que `contexts/`): el fichero siembra la
-  versión 1, la BD manda después. «Restaurar por defecto» crea una versión nueva con el contenido
-  del fichero embebido en la imagen.
-- Los system prompts salen de las constantes TS (`anthropic.ts:95-133`) y pasan a leerse del
-  registro (con la constante como *fallback* de emergencia).
+- **Siembra al arrancar** desde las semillas **embebidas en el código**
+  (`apps/api/src/prompts/seeds.ts`): siembran la versión 1, la BD manda después. «Restaurar por
+  defecto» crea una versión nueva con el contenido de la semilla. *(Decisión posterior al cierre:
+  la carpeta `prompts/` del repositorio se eliminó — la BD es la única fuente de verdad en
+  ejecución y las semillas viajan dentro del binario, no como ficheros a desplegar.)*
+- Existe además **`global.system`**: instrucciones que se anteponen a todas las operaciones
+  (idioma, tono, coma decimal). Vacío o recortado no molesta; las instrucciones específicas de
+  cada operación mandan sobre él.
+- Los system prompts se leen del registro (con la constante TS de `anthropic.ts` como *fallback*
+  de emergencia).
 - **Cada llamada registra `prompt_key`, `prompt_version` y el hash del contexto resuelto** en
   `ai_calls` (§11): una corrección histórica es explicable con exactitud («se puntuó con la v3 del
   prompt y este contexto»), que es la mitad de «depurar la respuesta final» del requisito.
@@ -545,16 +568,19 @@ pasa a **una constante en `@vega/shared`** alimentada por `ai.lowConfidenceThres
 
 | Operación | Composición | Coste ≈ |
 |---|---:|---:|
-| Entrega de problemas, 10 págs | 2 lecturas (32k img in / 10k out) + corrección (16k img + 5k transcr + 6k ctx / 6k out+thinking) + verificación | **0,35 €** |
-| Entrega de tema, 16 págs | 2 lecturas (51k img / 16k out) + corrección (26k img + 8k + 6k / 8k) + verificación | **0,55 €** |
+| Entrega de problemas, 10 págs | 2 lecturas (32k img in / 10k out) + corrección (16k img + 5k transcr + 6k ctx / 6k out+thinking) + verificación | **0,35–0,60 €** |
+| Entrega de tema, 16 págs | 2 lecturas (51k img / 16k out) + corrección (26k img + 8k + 6k / 8k) + verificación | **0,55–1,00 €** |
 | Duda sencilla | triaje Haiku + respuesta Sonnet + verificación | **0,02 €** |
 | Duda difícil | triaje + respuesta Opus con thinking + verificación | **0,08 €** |
 | Errata / no-duda aparcada | solo triaje | **< 0,001 €** |
 
-Mes tipo de la academia (200 problemas + 20 temas + 300 dudas mixtas): **≈ 90–120 €/mes**. El coste
-vive en la salida y en la visión duplicada; ambas son decisiones de calidad deliberadas. Los números
-finos salen del ledger con clave real en el piloto (T14) usando `count_tokens` y `usage`, nunca
-estimadores de terceros.
+Los rangos reflejan la **visión en alta resolución automática de Opus 4.8** (§5): una página densa
+puede costar hasta ~4.800 tokens en vez de ~1.600, y eso multiplica la parte de visión de las dos
+lecturas. Mes tipo de la academia (200 problemas + 20 temas + 300 dudas mixtas): **≈ 90–180 €/mes**
+según densidad real de los escaneos. El coste vive en la salida y en la visión duplicada; ambas son
+decisiones de calidad deliberadas. Los números finos salen del ledger con clave real en el piloto
+(T14) usando `count_tokens` y `usage`, nunca estimadores de terceros; si la visión domina, la
+palanca es una política de reducción de resolución medida, no adivinada.
 
 ---
 

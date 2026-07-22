@@ -1,23 +1,14 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AUTONOMY_MODE_HELP, AUTONOMY_MODE_LABEL, AutonomyMode } from '@vega/shared';
 import type { Activity, PointsAllocation, UpdateActivityRequest } from '@vega/shared';
 import { ApiClientError, api, fieldError } from '@/lib/api';
 import { queryKeys } from '@/lib/queryKeys';
 import { notify } from '@/lib/notify';
 import { formatDateTime } from '@/lib/format';
-import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
 import { EmptyState, ErrorState, PageHeader, Section } from '@/components/common/Feedback';
@@ -39,7 +30,6 @@ interface FormState {
   maxScore: string;
   referenceSolution: string;
   pointsAllocation: PointsAllocation[];
-  autonomy: AutonomyMode;
 }
 
 function fromActivity(activity: Activity): FormState {
@@ -50,7 +40,6 @@ function fromActivity(activity: Activity): FormState {
     maxScore: activity.maxScore === null ? '' : String(activity.maxScore),
     referenceSolution: activity.referenceSolution ?? '',
     pointsAllocation: activity.pointsAllocation.map((row) => ({ ...row })),
-    autonomy: activity.autonomy,
   };
 }
 
@@ -176,7 +165,6 @@ export function ActivityDetailPage() {
       // Sin nota no hay reparto que enviar.
       pointsAllocation: form.graded ? form.pointsAllocation : [],
       referenceSolution: form.referenceSolution.trim() === '' ? null : form.referenceSolution,
-      autonomy: form.autonomy,
     };
     mutation.mutate(body);
   };
@@ -276,7 +264,7 @@ export function ActivityDetailPage() {
         {form.graded ? (
           <Section
             title="Reparto de puntos"
-            description="Cuánto vale cada apartado. La IA lo usa como rúbrica."
+            description="Qué apartados tiene la entrega y cuánto vale cada uno. Los criterios de corrección detallados van en el contexto de la actividad, más abajo."
           >
             <PointsAllocationEditor
               rows={form.pointsAllocation}
@@ -285,45 +273,6 @@ export function ActivityDetailPage() {
             />
           </Section>
         ) : null}
-
-        <Section
-          title="Autonomía"
-          description="Cuánta intervención tuya exige esta actividad antes de publicar."
-        >
-          <div className="flex flex-col gap-3">
-            <Field label="Modo de autonomía" hint={AUTONOMY_MODE_HELP[form.autonomy]}>
-              {({ id: fieldId, ...aria }) => (
-                <Select
-                  value={form.autonomy}
-                  onValueChange={(next) => {
-                    const parsed = AutonomyMode.safeParse(next);
-                    if (parsed.success) update('autonomy', parsed.data);
-                  }}
-                >
-                  <SelectTrigger id={fieldId} {...aria}>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {AutonomyMode.options.map((option) => (
-                      <SelectItem key={option} value={option}>
-                        {AUTONOMY_MODE_LABEL[option]}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              )}
-            </Field>
-
-            {form.autonomy === 'autonomous' ? (
-              <Alert variant="warning">
-                <AlertDescription>
-                  En este modo Vega publica el feedback en Moodle sin que nadie lo revise. Actívalo
-                  sólo cuando lleves tiempo validando sin cambiar nada.
-                </AlertDescription>
-              </Alert>
-            ) : null}
-          </div>
-        </Section>
 
         {/*
           El mismo campo con dos papeles. En una entrega es la solución contra la

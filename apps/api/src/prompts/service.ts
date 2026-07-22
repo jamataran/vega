@@ -1,6 +1,3 @@
-import { readFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { and, asc, desc, eq } from 'drizzle-orm';
 import type { Prompt, PromptWithPrevious } from '@vega/shared';
 import { schema } from '../db/client.js';
@@ -8,24 +5,19 @@ import type { Database } from '../db/client.js';
 import { toPrompt } from '../db/mappers.js';
 import { conflict, notFound } from '../http/errors.js';
 import type { AppContext } from '../context.js';
+import { PROMPT_SEED_CONTENT } from './seeds.js';
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '../../../..');
+/**
+ * La base de datos es la única fuente de verdad de los prompts en ejecución.
+ * Las semillas embebidas en `seeds.ts` sólo aportan la v1 de una instalación
+ * nueva y el texto de «Restaurar valor predeterminado».
+ */
+export const PROMPT_KEYS = Object.keys(PROMPT_SEED_CONTENT);
 
-export const PROMPT_SEEDS = [
-  ['transcription.system', 'transcripcion.md'],
-  ['grading.problem.system', 'entrega-problema.md'],
-  ['grading.topic.system', 'entrega-tema.md'],
-  ['triage.system', 'clasificador-dudas.md'],
-  ['forum.answer.simple.system', 'duda-sencilla.md'],
-  ['forum.answer.expert.system', 'duda-dificil.md'],
-  ['verify.system', 'verificador.md'],
-  ['pd.regulation.system', 'pd-normativa.md'],
-] as const;
-
-export async function readPromptSeed(key: string): Promise<string> {
-  const entry = PROMPT_SEEDS.find(([candidate]) => candidate === key);
-  if (!entry) throw notFound('No existe un valor predeterminado para ese prompt.');
-  return readFile(join(REPO_ROOT, 'prompts', entry[1]), 'utf8');
+export function readPromptSeed(key: string): string {
+  const content = PROMPT_SEED_CONTENT[key];
+  if (content === undefined) throw notFound('No existe un valor predeterminado para ese prompt.');
+  return content;
 }
 
 export async function seedPrompts(
@@ -33,16 +25,15 @@ export async function seedPrompts(
   log: (line: string) => void = () => {},
 ): Promise<void> {
   let inserted = 0;
-  for (const [key] of PROMPT_SEEDS) {
-    const content = await readPromptSeed(key);
+  for (const key of PROMPT_KEYS) {
     const rows = await db
       .insert(schema.prompts)
-      .values({ key, version: 1, content, active: true })
+      .values({ key, version: 1, content: readPromptSeed(key), active: true })
       .onConflictDoNothing()
       .returning({ key: schema.prompts.key });
     inserted += rows.length;
   }
-  if (inserted > 0) log(`→ prompts del sistema sembrados desde prompts/: ${inserted}`);
+  if (inserted > 0) log(`→ prompts del sistema sembrados: ${inserted}`);
 }
 
 async function withPrevious(ctx: AppContext, prompt: Prompt): Promise<PromptWithPrevious> {
@@ -129,7 +120,7 @@ export async function restorePromptDefault(
 ): Promise<Prompt> {
   return savePromptVersion(ctx, {
     key,
-    content: await readPromptSeed(key),
+    content: readPromptSeed(key),
     expectedVersion,
     userId,
   });

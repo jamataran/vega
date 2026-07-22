@@ -4,6 +4,7 @@ import {
   hasStudentFile,
   routes,
   studentContextFor,
+  type ActivityKind,
   type AutonomyMode,
   type BatchRun,
   type BatchRunListResponse,
@@ -106,17 +107,25 @@ interface Logger {
 
 const SILENT: Logger = { info: () => {}, warn: () => {}, error: () => {} };
 
+/** Todos los tipos: lo que barre un proceso forzado a mano. */
+const ALL_KINDS: readonly ActivityKind[] = ['assignment', 'forum'];
+
 /**
  * Corrige las entregas pendientes de las actividades activas.
  *
  * `triggeredBy` es el usuario que lo fuerza, o `null` si lo lanzó el
  * planificador. La usan tanto la ruta como `startScheduler`.
+ *
+ * `kinds` acota el barrido a esos tipos de actividad: el planificador corre
+ * por tipo (foros más frecuentes que entregas) y no tiene sentido que la
+ * pasada rápida de foros ingiera y recorra también todas las entregas.
  */
 export async function runBatch(
   ctx: AppContext,
   triggeredBy: string | null,
   log: Logger = SILENT,
   preparedRun?: typeof schema.batchRuns.$inferSelect,
+  kinds: readonly ActivityKind[] = ALL_KINDS,
 ): Promise<RunBatchResult> {
   const { db } = ctx;
 
@@ -124,7 +133,7 @@ export async function runBatch(
   // planificador y una persona a la vez— corrigen las mismas entregas dos veces
   // y **pagan el doble**. Se comprueba antes de crear la fila para que el
   // conflicto no deje un `batch_runs` fantasma.
-  const run = preparedRun ?? await prepareBatchRun(ctx, triggeredBy);
+  const run = preparedRun ?? await prepareBatchRun(ctx, triggeredBy, kinds);
 
   // A partir de aquí la fila existe y está en `running`. Todo lo que pueda
   // lanzar va dentro del `try` de abajo, porque un lote que muere sin cerrarla
@@ -145,7 +154,7 @@ export async function runBatch(
     // siguiente. Que la ingesta falle no cancela la corrección: lo que ya
     // estaba en `pending` se corrige igual aunque Moodle no responda.
     try {
-      ingest = await ingestAll(ctx, log);
+      ingest = await ingestAll(ctx, log, kinds);
       for (const problem of ingest.problems) {
         log.warn({ slug: problem.slug, kind: problem.kind }, problem.message);
       }
@@ -153,13 +162,18 @@ export async function runBatch(
       log.error({ err: error }, 'La ingesta ha fallado entera; se corrige lo que ya había');
     }
 
-    // Sólo actividades activas, y agrupadas por actividad para aprovechar la
-    // caché del prompt.
+    // Sólo actividades activas de los tipos que barre este proceso, y
+    // agrupadas por actividad para aprovechar la caché del prompt.
     const pending = await db
       .select({ submission: schema.submissions, activity: schema.activities })
       .from(schema.submissions)
       .innerJoin(schema.activities, eq(schema.activities.id, schema.submissions.activityId))
-      .where(inArray(schema.submissions.status, ['pending', 'grading']))
+      .where(
+        and(
+          inArray(schema.submissions.status, ['pending', 'grading']),
+          inArray(schema.activities.kind, [...kinds]),
+        ),
+      )
       .orderBy(asc(schema.submissions.activityId), asc(schema.submissions.submittedAt))
       .limit(MAX_PER_RUN);
 
@@ -278,7 +292,11 @@ export async function runBatch(
   }
 }
 
-async function prepareBatchRun(ctx: AppContext, triggeredBy: string | null) {
+async function prepareBatchRun(
+  ctx: AppContext,
+  triggeredBy: string | null,
+  kinds: readonly ActivityKind[] = ALL_KINDS,
+) {
   const [alreadyRunning] = await ctx.db
     .select({ id: schema.batchRuns.id })
     .from(schema.batchRuns)
@@ -287,7 +305,7 @@ async function prepareBatchRun(ctx: AppContext, triggeredBy: string | null) {
   if (alreadyRunning) throw conflict('Ya hay un proceso de corrección en marcha. Espera a que termine.');
   const [run] = await ctx.db
     .insert(schema.batchRuns)
-    .values({ status: 'running', triggeredBy })
+    .values({ status: 'running', triggeredBy, kinds: [...kinds] })
     .returning();
   if (!run) throw new Error('No se ha podido registrar el lote.');
   return run;
@@ -450,6 +468,7 @@ async function processOne(
     pointsAllocation: activity.pointsAllocation ?? [],
     graded: activity.graded,
     maxScore,
+    templateKey: activity.templateKey,
     autonomy: activity.autonomy,
     verifyWithAi: forumRoute === 'standard' ? false : settings.ai.verify,
     lowConfidenceThreshold: settings.ai.lowConfidenceThreshold,

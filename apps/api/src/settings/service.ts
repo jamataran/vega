@@ -1,5 +1,5 @@
 import { eq } from 'drizzle-orm';
-import type { AppSettings, UpdateSettingsRequest } from '@vega/shared';
+import type { ActivityKind, AppSettings, UpdateSettingsRequest } from '@vega/shared';
 import { schema } from '../db/client.js';
 import type { AppContext } from '../context.js';
 
@@ -50,14 +50,40 @@ const bool = (map: SettingsMap, key: string, fallback: boolean): boolean => {
 
 const configured = (map: SettingsMap, key: string): boolean => (map.get(key)?.value ?? '') !== '';
 
+/**
+ * La planificación es por tipo de actividad: los foros piden cadencia corta y
+ * las entregas pueden ir espaciadas. Las claves antiguas (`schedule.enabled`,
+ * `schedule.everyMinutes`, `schedule.lastRunAt`) sirven de respaldo para que
+ * una instalación anterior conserve su comportamiento sin tocar nada.
+ */
+function scheduleSlot(
+  map: SettingsMap,
+  kind: ActivityKind,
+  defaultMinutes: number,
+): AppSettings['schedule'][ActivityKind] {
+  const enabled = bool(map, `schedule.${kind}.enabled`, bool(map, 'schedule.enabled', false));
+  const everyMinutes = int(
+    map,
+    `schedule.${kind}.everyMinutes`,
+    int(map, 'schedule.everyMinutes', defaultMinutes),
+  );
+  const lastRunRaw = str(map, `schedule.${kind}.lastRunAt`, str(map, 'schedule.lastRunAt', ''));
+  const lastRunAt = lastRunRaw === '' ? null : lastRunRaw;
+  return {
+    enabled,
+    everyMinutes,
+    lastRunAt,
+    nextRunAt:
+      enabled && lastRunAt !== null
+        ? new Date(new Date(lastRunAt).getTime() + everyMinutes * 60_000).toISOString()
+        : null,
+  };
+}
+
 export async function getSettings(ctx: AppContext): Promise<AppSettings> {
   const map = await readAll(ctx);
   const { config } = ctx;
 
-  const everyMinutes = int(map, 'schedule.everyMinutes', 60);
-  const lastRunRaw = str(map, 'schedule.lastRunAt', '');
-  const lastRunAt = lastRunRaw === '' ? null : lastRunRaw;
-  const enabled = bool(map, 'schedule.enabled', false);
   const legacyReadingModel = str(
     map,
     'anthropic.transcriptionModel',
@@ -100,28 +126,34 @@ export async function getSettings(ctx: AppContext): Promise<AppSettings> {
       from: str(map, 'smtp.from', ''),
     },
     schedule: {
-      enabled,
-      everyMinutes,
-      lastRunAt,
-      nextRunAt:
-        enabled && lastRunAt !== null
-          ? new Date(new Date(lastRunAt).getTime() + everyMinutes * 60_000).toISOString()
-          : null,
+      // Sin claves guardadas, una hora para entregas y un cuarto de hora para
+      // foros: una duda no debería esperar a la cadencia del lote pesado.
+      assignment: scheduleSlot(map, 'assignment', 60),
+      forum: scheduleSlot(map, 'forum', 15),
     },
     branding: { name: str(map, 'branding.name', config.BRAND_NAME) },
   };
 }
 
-/** Aplana `{ anthropic: { apiKey } }` a `anthropic.apiKey`, saltando lo no enviado. */
+/**
+ * Aplana `{ anthropic: { apiKey } }` a `anthropic.apiKey`, saltando lo no
+ * enviado. Recorre en profundidad porque `schedule` anida un nivel más
+ * (`schedule.assignment.enabled`).
+ */
 function flatten(patch: UpdateSettingsRequest): Map<string, string | null> {
   const flat = new Map<string, string | null>();
-  for (const [group, values] of Object.entries(patch)) {
-    if (values === undefined) continue;
-    for (const [name, value] of Object.entries(values as Record<string, unknown>)) {
+  const walk = (prefix: string, values: Record<string, unknown>): void => {
+    for (const [name, value] of Object.entries(values)) {
       if (value === undefined) continue;
-      flat.set(`${group}.${name}`, value === null ? null : String(value));
+      const key = prefix === '' ? name : `${prefix}.${name}`;
+      if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+        walk(key, value as Record<string, unknown>);
+      } else {
+        flat.set(key, value === null ? null : String(value));
+      }
     }
-  }
+  };
+  walk('', patch as Record<string, unknown>);
   return flat;
 }
 
@@ -149,11 +181,15 @@ export async function updateSettings(
   return getSettings(ctx);
 }
 
-/** Deja constancia de cuándo corrió el proceso, para calcular el siguiente. */
-export async function markScheduleRun(ctx: AppContext, when: Date): Promise<void> {
+/** Deja constancia de cuándo corrió el proceso de un tipo, para calcular el siguiente. */
+export async function markScheduleRun(
+  ctx: AppContext,
+  kind: ActivityKind,
+  when: Date,
+): Promise<void> {
   await ctx.db
     .insert(schema.appSettings)
-    .values({ key: 'schedule.lastRunAt', value: when.toISOString() })
+    .values({ key: `schedule.${kind}.lastRunAt`, value: when.toISOString() })
     .onConflictDoUpdate({
       target: schema.appSettings.key,
       set: { value: when.toISOString(), updatedAt: new Date() },

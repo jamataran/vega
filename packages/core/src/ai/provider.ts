@@ -149,10 +149,36 @@ export const GradeInput = z.object({
   maxScore: z.number().positive().nullable(),
   /** En foros permite intentar primero el modelo estándar sin anclar al experto. */
   route: z.enum(['standard', 'expert']).optional(),
+  /**
+   * Plantilla de la actividad (`activities.template_key`). Decide qué prompt de
+   * corrección se aplica: los temas se corrigen con otras instrucciones que los
+   * problemas.
+   */
+  templateKey: z.string().nullable().optional(),
   /** Genera notas internas para el profesorado; nunca se publican al alumno. */
   explanations: z.boolean().optional(),
 });
 export type GradeInput = z.infer<typeof GradeInput>;
+
+/**
+ * Qué prompt del registro corresponde a una llamada de corrección. Vive aquí
+ * —y no en el proveedor— porque el ledger tiene que registrar exactamente la
+ * misma clave que el proveedor aplica; dos copias de esta regla acabarían
+ * discrepando.
+ */
+export function gradePromptKey(
+  input: Pick<GradeInput, 'activityKind' | 'route' | 'templateKey'>,
+): string {
+  if (input.activityKind === 'forum') {
+    // Sin ruta explícita se asume la experta: es la que cubre el caso general.
+    return input.route === 'standard'
+      ? 'forum.answer.simple.system'
+      : 'forum.answer.expert.system';
+  }
+  return (input.templateKey ?? '').includes('tema')
+    ? 'grading.topic.system'
+    : 'grading.problem.system';
+}
 
 /**
  * Apartado corregido tal y como lo devuelve la IA: sin normalizar y sin ids.

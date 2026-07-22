@@ -307,6 +307,12 @@ export const batchRuns = pgTable('batch_runs', {
   status: text('status').$type<'running' | 'done' | 'failed'>().notNull().default('running'),
   /** `null` si lo lanzó el planificador y no una persona. */
   triggeredBy: uuid('triggered_by').references(() => users.id, { onDelete: 'set null' }),
+  /** Tipos de actividad que barrió: el planificador corre por tipo. */
+  kinds: text('kinds')
+    .array()
+    .$type<Array<'assignment' | 'forum'>>()
+    .notNull()
+    .default(['assignment', 'forum']),
   submissionsProcessed: integer('submissions_processed').notNull().default(0),
   submissionsFailed: integer('submissions_failed').notNull().default(0),
   submissionsAutoPublished: integer('submissions_auto_published').notNull().default(0),

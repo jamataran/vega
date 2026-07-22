@@ -19,6 +19,7 @@ import { EmptyState, ErrorState, PageHeader, Section } from '@/components/common
 import { PreviewEditor } from '@/components/PreviewEditor';
 
 const PROMPT_LABEL: Record<string, string> = {
+  'global.system': 'Instrucciones globales',
   'transcription.system': 'Transcripción',
   'grading.problem.system': 'Corrección de problemas',
   'grading.topic.system': 'Corrección de temas',
@@ -29,6 +30,49 @@ const PROMPT_LABEL: Record<string, string> = {
   'pd.regulation.system': 'Normativa de programación didáctica',
 };
 
+/**
+ * Qué hace cada prompt y cuándo se ejecuta. Se enseña junto al selector para
+ * que no haya que adivinarlo por el nombre de la clave.
+ */
+const PROMPT_HELP: Record<string, string> = {
+  'global.system':
+    'Se antepone a todas las llamadas del motor (transcripción, corrección, triaje, foro y verificación). Es el sitio para reglas comunes: idioma, tono, coma decimal…',
+  'transcription.system':
+    'Convierte el manuscrito escaneado en texto LaTeX. Se ejecuta dos veces por entrega (lecturas A y B, que luego se comparan). No ve la solución ni el reparto de puntos: quien transcribe no debe saber la respuesta.',
+  'grading.problem.system':
+    'Corrige entregas de tipo problema, apartado por apartado, contra la solución de referencia y el reparto de puntos. Cada descuento exige una cita literal del trabajo del alumno.',
+  'grading.topic.system':
+    'Corrige entregas de tipo tema (desarrollo escrito largo). Se aplica cuando la plantilla de la actividad es de tema; si no, se usa el de problemas.',
+  'triage.system':
+    'Clasifica cada mensaje de foro sin contexto de la materia: errata, consulta administrativa, no es una duda, duda sencilla o duda difícil. Las tres primeras se aparcan solas si la confianza es alta; las dudas pasan a responderse.',
+  'forum.answer.simple.system':
+    'Responde las dudas clasificadas como sencillas, con el modelo de verificación (más barato). Si la propia respuesta detecta que la duda era más difícil de lo que parecía, escala a la ruta experta.',
+  'forum.answer.expert.system':
+    'Responde las dudas difíciles (o escaladas) con el modelo de corrección, el más capaz.',
+  'verify.system':
+    'Audita cada corrección ya propuesta: coherencia entre citas, descuentos, nota y feedback. No ve la solución de referencia, sólo el trabajo y la propuesta. Se puede apagar en Ajustes; la verificación mecánica de citas nunca se apaga.',
+  'pd.regulation.system':
+    'Reservado para la corrección de programaciones didácticas contra normativa. Esa funcionalidad aún no está activa; el prompt no se usa en ninguna llamada.',
+};
+
+/** Orden de presentación: el flujo real del motor, no el alfabético de la BD. */
+const PROMPT_ORDER = [
+  'global.system',
+  'transcription.system',
+  'grading.problem.system',
+  'grading.topic.system',
+  'triage.system',
+  'forum.answer.simple.system',
+  'forum.answer.expert.system',
+  'verify.system',
+  'pd.regulation.system',
+];
+
+function promptOrder(key: string): number {
+  const index = PROMPT_ORDER.indexOf(key);
+  return index === -1 ? PROMPT_ORDER.length : index;
+}
+
 export function PromptsPage() {
   const queryClient = useQueryClient();
   const [selectedKey, setSelectedKey] = useState('');
@@ -38,7 +82,10 @@ export function PromptsPage() {
     queryKey: queryKeys.prompts,
     queryFn: ({ signal }) => api.prompts(signal),
   });
-  const prompts = useMemo(() => query.data?.items ?? [], [query.data]);
+  const prompts = useMemo(
+    () => [...(query.data?.items ?? [])].sort((a, b) => promptOrder(a.key) - promptOrder(b.key)),
+    [query.data],
+  );
   const selected = prompts.find((prompt) => prompt.key === selectedKey) ?? prompts[0] ?? null;
   const value = selected ? (drafts[selected.key] ?? selected.content) : '';
   const dirty = selected !== null && value !== selected.content;
@@ -87,8 +134,10 @@ export function PromptsPage() {
   return (
     <div>
       <PageHeader eyebrow="Administración" title="Prompts del motor">
-        Instrucciones operativas por tipo de llamada. Cada guardado crea una versión nueva y la
-        siguiente ejecución usa la versión activa.
+        Las instrucciones globales de cada operación del motor: cómo se transcribe, corrige,
+        clasifica y verifica. Viven en la base de datos; cada guardado crea una versión nueva y la
+        siguiente ejecución usa la activa. La materia y los criterios de corrección no van aquí:
+        van en «Contextos».
       </PageHeader>
 
       {query.isError ? (
@@ -108,7 +157,11 @@ export function PromptsPage() {
                 <label className="flex flex-1 flex-col gap-1.5 text-ui font-medium">
                   Operación
                   <Select value={selected.key} onValueChange={setSelectedKey}>
-                    <SelectTrigger className="max-w-xl" aria-label="Prompt del sistema">
+                    <SelectTrigger
+                      className="max-w-xl"
+                      aria-label="Prompt del sistema"
+                      aria-describedby="prompt-help"
+                    >
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -125,6 +178,12 @@ export function PromptsPage() {
                   <span>{formatDateTime(selected.updatedAt)}</span>
                 </div>
               </div>
+
+              {PROMPT_HELP[selected.key] ? (
+                <p id="prompt-help" className="text-ui text-muted-foreground">
+                  {PROMPT_HELP[selected.key]}
+                </p>
+              ) : null}
 
               <PreviewEditor
                 label="Instrucciones"

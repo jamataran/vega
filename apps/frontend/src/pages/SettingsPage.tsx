@@ -87,8 +87,10 @@ interface FormState {
   smtpFrom: string;
   smtpPassword: SecretState;
 
-  scheduleEnabled: boolean;
-  everyMinutes: string;
+  assignmentEnabled: boolean;
+  assignmentEveryMinutes: string;
+  forumEnabled: boolean;
+  forumEveryMinutes: string;
 }
 
 function fromSettings(settings: AppSettings): FormState {
@@ -116,8 +118,10 @@ function fromSettings(settings: AppSettings): FormState {
     smtpFrom: settings.smtp.from,
     smtpPassword: KEEP,
 
-    scheduleEnabled: settings.schedule.enabled,
-    everyMinutes: String(settings.schedule.everyMinutes),
+    assignmentEnabled: settings.schedule.assignment.enabled,
+    assignmentEveryMinutes: String(settings.schedule.assignment.everyMinutes),
+    forumEnabled: settings.schedule.forum.enabled,
+    forumEveryMinutes: String(settings.schedule.forum.everyMinutes),
   };
 }
 
@@ -133,6 +137,87 @@ function Row({ label, value }: { label: string; value: ReactNode }) {
       <dt className="text-base text-muted-foreground">{label}</dt>
       <dd className="min-w-0 truncate text-base">{value}</dd>
     </div>
+  );
+}
+
+/**
+ * La planificación de un tipo de actividad. Cada tipo lleva la suya: los foros
+ * suelen ir con cadencia corta y las entregas, más caras, espaciadas.
+ *
+ * `fieldset`/`legend` y no un título suelto: los dos bloques repiten las mismas
+ * etiquetas («Proceso automático», «Cada cuántos minutos») y es el grupo el que
+ * le dice al lector de pantalla a qué tipo pertenece cada control.
+ */
+function ScheduleSlotFields({
+  title,
+  hint,
+  slot,
+  enabled,
+  minutes,
+  parsedMinutes,
+  onEnabledChange,
+  onMinutesChange,
+}: {
+  title: string;
+  hint: string;
+  slot: AppSettings['schedule']['assignment'];
+  enabled: boolean;
+  minutes: string;
+  parsedMinutes: number | null;
+  onEnabledChange: (checked: boolean) => void;
+  onMinutesChange: (value: string) => void;
+}) {
+  const id = useId();
+  return (
+    <fieldset className="min-w-0">
+      <legend className="eyebrow mb-4">{title}</legend>
+      <div className="flex flex-col gap-4">
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <Label htmlFor={id} className="text-base">
+              Proceso automático
+            </Label>
+            <p id={`${id}-hint`} className="mt-0.5 text-ui text-muted-foreground">
+              {hint}
+            </p>
+          </div>
+          <Switch
+            id={id}
+            checked={enabled}
+            onCheckedChange={onEnabledChange}
+            aria-describedby={`${id}-hint`}
+          />
+        </div>
+
+        <Field
+          label="Cada cuántos minutos"
+          error={parsedMinutes === null ? 'Escribe un número entero de minutos.' : undefined}
+        >
+          {(field) => (
+            <Input
+              {...field}
+              type="number"
+              min={1}
+              inputMode="numeric"
+              value={minutes}
+              className="max-w-40"
+              onChange={(event) => onMinutesChange(event.target.value)}
+            />
+          )}
+        </Field>
+
+        <dl className="divide-y divide-border">
+          <Row
+            label="Último proceso"
+            value={slot.lastRunAt ? formatDateTime(slot.lastRunAt) : 'Todavía ninguno'}
+          />
+          <Row
+            label="Siguiente previsto"
+            value={slot.nextRunAt ? formatDateTime(slot.nextRunAt) : 'Sin planificar'}
+          />
+        </dl>
+      </div>
+    </fieldset>
   );
 }
 
@@ -212,7 +297,6 @@ function SystemStatus({
 
 export function SettingsPage() {
   const queryClient = useQueryClient();
-  const scheduleId = useId();
   const verifyId = useId();
   const explanationsId = useId();
   const [saving, setSaving] = useState<SectionId | null>(null);
@@ -319,7 +403,8 @@ export function SettingsPage() {
 
   const maxTokens = parseInteger(form.maxTokens, 1);
   const smtpPort = parseInteger(form.smtpPort, 0);
-  const everyMinutes = parseInteger(form.everyMinutes, 1);
+  const assignmentEveryMinutes = parseInteger(form.assignmentEveryMinutes, 1);
+  const forumEveryMinutes = parseInteger(form.forumEveryMinutes, 1);
   const pagesPerChunk = parseInteger(form.pagesPerChunk, 1);
   const logRetentionDays = parseInteger(form.logRetentionDays, 1);
   const lowConfidenceThreshold = Number(form.lowConfidenceThreshold);
@@ -670,72 +755,51 @@ export function SettingsPage() {
         {/* ── Planificación ─────────────────────────────────────────────── */}
         <Section
           title="Planificación"
-          description="Cada cuánto corre solo el proceso de corrección."
+          description="Cada cuánto corre solo el proceso de corrección, por tipo de actividad. Lo que esté desactivado sólo se corrige cuando alguien fuerza un proceso."
         >
           <div className="flex flex-col gap-4">
-            <div className="flex items-start justify-between gap-4">
-              <div className="min-w-0">
-                <Label htmlFor={scheduleId} className="text-base">
-                  Proceso automático
-                </Label>
-                <p id={`${scheduleId}-hint`} className="mt-0.5 text-ui text-muted-foreground">
-                  Si lo desactivas, sólo se corrige cuando alguien fuerza un proceso.
-                </p>
-              </div>
-              <Switch
-                id={scheduleId}
-                checked={form.scheduleEnabled}
-                onCheckedChange={(checked) => update('scheduleEnabled', checked)}
-                aria-describedby={`${scheduleId}-hint`}
+            <div className="grid gap-6 lg:grid-cols-2">
+              <ScheduleSlotFields
+                title="Entregas"
+                hint="Trae y corrige las entregas nuevas a este ritmo."
+                slot={settings.schedule.assignment}
+                enabled={form.assignmentEnabled}
+                minutes={form.assignmentEveryMinutes}
+                parsedMinutes={assignmentEveryMinutes}
+                onEnabledChange={(checked) => update('assignmentEnabled', checked)}
+                onMinutesChange={(value) => update('assignmentEveryMinutes', value)}
+              />
+              <ScheduleSlotFields
+                title="Foros"
+                hint="Clasifica y responde los mensajes nuevos a este ritmo."
+                slot={settings.schedule.forum}
+                enabled={form.forumEnabled}
+                minutes={form.forumEveryMinutes}
+                parsedMinutes={forumEveryMinutes}
+                onEnabledChange={(checked) => update('forumEnabled', checked)}
+                onMinutesChange={(value) => update('forumEveryMinutes', value)}
               />
             </div>
-
-            <Field
-              label="Cada cuántos minutos"
-              error={everyMinutes === null ? 'Escribe un número entero de minutos.' : undefined}
-            >
-              {(field) => (
-                <Input
-                  {...field}
-                  type="number"
-                  min={1}
-                  inputMode="numeric"
-                  value={form.everyMinutes}
-                  className="max-w-40"
-                  onChange={(event) => update('everyMinutes', event.target.value)}
-                />
-              )}
-            </Field>
-
-            <dl className="divide-y divide-border">
-              <Row
-                label="Último proceso"
-                value={
-                  settings.schedule.lastRunAt
-                    ? formatDateTime(settings.schedule.lastRunAt)
-                    : 'Todavía ninguno'
-                }
-              />
-              <Row
-                label="Siguiente previsto"
-                value={
-                  settings.schedule.nextRunAt
-                    ? formatDateTime(settings.schedule.nextRunAt)
-                    : 'Sin planificar'
-                }
-              />
-            </dl>
 
             <div className="flex justify-end">
               <Button
                 variant="default"
                 size="lg"
-                disabled={everyMinutes === null}
+                disabled={assignmentEveryMinutes === null || forumEveryMinutes === null}
                 loading={saving === 'schedule'}
                 onClick={() => {
-                  if (everyMinutes === null) return;
+                  if (assignmentEveryMinutes === null || forumEveryMinutes === null) return;
                   save('schedule', {
-                    schedule: { enabled: form.scheduleEnabled, everyMinutes },
+                    schedule: {
+                      assignment: {
+                        enabled: form.assignmentEnabled,
+                        everyMinutes: assignmentEveryMinutes,
+                      },
+                      forum: {
+                        enabled: form.forumEnabled,
+                        everyMinutes: forumEveryMinutes,
+                      },
+                    },
                   });
                 }}
               >

@@ -120,6 +120,8 @@ export interface GradeSubmissionInput {
   readonly graded: boolean;
   /** Nota máxima. `null` cuando la actividad no se puntúa. */
   readonly maxScore: number | null;
+  /** Plantilla de la actividad: decide el prompt de corrección (problema/tema). */
+  readonly templateKey?: string | null;
   /** Cuánta autonomía tiene Vega sobre la actividad. Por defecto, revisarlo todo. */
   readonly autonomy?: AutonomyMode;
   /** Apaga sólo la llamada con tokens; la verificación mecánica siempre corre. */
@@ -224,6 +226,7 @@ export async function gradeSubmission(input: GradeSubmissionInput): Promise<Grad
     pointsAllocation: [...input.pointsAllocation],
     graded: input.graded,
     maxScore: input.maxScore,
+    templateKey: input.templateKey ?? null,
     route: input.forumRoute,
     explanations: input.explanations ?? true,
   });

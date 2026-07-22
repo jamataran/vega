@@ -13,7 +13,7 @@ import type {
   TranscribeInput,
   VerifyInput,
 } from '@vega/core';
-import { UnpricedModelError } from '@vega/core';
+import { UnpricedModelError, gradePromptKey } from '@vega/core';
 import { schema } from '../db/client.js';
 import { lt } from 'drizzle-orm';
 import type { AppContext } from '../context.js';
@@ -125,7 +125,9 @@ export function withAiLedger(
     grade: (input: GradeInput) => execute({
       operation: input.activityKind === 'forum' ? 'forum_answer' : 'grade',
       submissionId: input.submissionId,
-      promptKey: input.activityKind === 'forum' ? 'forum.answer.expert.system' : 'grading.problem.system',
+      // La misma regla que aplica el proveedor: si divergieran, el registro
+      // atribuiría la llamada a un prompt que no se usó.
+      promptKey: gradePromptKey(input),
       segments: input.context,
       request: input,
       call: () => provider.grade(input),

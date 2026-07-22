@@ -312,8 +312,10 @@ async function main(): Promise<void> {
     // El planificador arranca desactivado: en desarrollo no queremos que se
     // ponga a corregir solo mientras se prueba la UI.
     await db.insert(schema.appSettings).values([
-      { key: 'schedule.enabled', value: 'false', updatedBy: admin.id },
-      { key: 'schedule.everyMinutes', value: '60', updatedBy: admin.id },
+      { key: 'schedule.assignment.enabled', value: 'false', updatedBy: admin.id },
+      { key: 'schedule.assignment.everyMinutes', value: '60', updatedBy: admin.id },
+      { key: 'schedule.forum.enabled', value: 'false', updatedBy: admin.id },
+      { key: 'schedule.forum.everyMinutes', value: '15', updatedBy: admin.id },
       { key: 'branding.name', value: 'Vega', updatedBy: admin.id },
       // Si el entorno apunta a un Moodle de verdad, sembramos ese y su conector:
       // así `pnpm db:seed` deja la instalación lista para probar contra él sin

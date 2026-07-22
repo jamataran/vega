@@ -90,8 +90,9 @@ export async function buildServer(config: Config): Promise<BuiltServer> {
   // desde Ajustes, no desde el entorno.
   const scheduler = startScheduler(
     ctx,
-    // El planificador no tiene usuario detrás: `triggeredBy` va a `null`.
-    (triggeredBy) => runBatch(ctx, triggeredBy, app.log),
+    // El planificador no tiene usuario detrás (`triggeredBy` a `null`) y corre
+    // por tipo de actividad: sólo barre los tipos a los que les toca.
+    (kinds) => runBatch(ctx, null, app.log, undefined, kinds),
     app.log,
   );
 

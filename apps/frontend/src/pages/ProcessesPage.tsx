@@ -50,9 +50,19 @@ function Figure({ label, value, emphasis }: { label: string; value: string; emph
   );
 }
 
+/**
+ * Qué tipos barrió el proceso. Cuando barre los dos no se etiqueta: es el caso
+ * normal y la etiqueta sólo aportaría ruido.
+ */
+function kindsLabel(run: BatchRun): string | null {
+  if (run.kinds.length !== 1) return null;
+  return run.kinds[0] === 'forum' ? 'Sólo foros' : 'Sólo entregas';
+}
+
 function RunCard({ run }: { run: BatchRun }) {
   const scheduled = run.triggeredBy === null;
   const elapsed = duration(run);
+  const scope = kindsLabel(run);
 
   return (
     <Card asChild>
@@ -67,6 +77,7 @@ function RunCard({ run }: { run: BatchRun }) {
             )}
             {scheduled ? 'Planificador' : 'Forzado a mano'}
           </Badge>
+          {scope ? <Badge variant="outline">{scope}</Badge> : null}
           <Badge variant={RUN_STATUS_VARIANT[run.status]}>{RUN_STATUS_LABEL[run.status]}</Badge>
           <span className="text-ui text-muted-foreground">
             {formatDateTime(run.startedAt)}
@@ -104,8 +115,8 @@ function RunCard({ run }: { run: BatchRun }) {
         {run.submissionsAutoPublished > 0 ? (
           <p className="mt-3 text-ui text-muted-foreground">
             {run.submissionsAutoPublished === 1
-              ? 'Una corrección se publicó sin revisión, por el modo de autonomía de su actividad.'
-              : `${formatInteger(run.submissionsAutoPublished)} correcciones se publicaron sin revisión, por el modo de autonomía de sus actividades.`}
+              ? 'Una corrección se publicó automáticamente, sin revisión docente.'
+              : `${formatInteger(run.submissionsAutoPublished)} correcciones se publicaron automáticamente, sin revisión docente.`}
           </p>
         ) : null}
       </li>

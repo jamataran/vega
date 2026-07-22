@@ -78,9 +78,11 @@ export type ScoreSource = z.infer<typeof ScoreSource>;
 /**
  * Grado de autonomía con el que trabaja Vega sobre una actividad.
  *
- * El objetivo del producto es llegar a `autonomous`: cuando el contexto está
- * suficientemente afinado, nadie valida. Se decide por actividad porque la
- * confianza se gana actividad a actividad, no de golpe.
+ * **Concepto aplazado**: la publicación en Moodle está fuera del alcance de
+ * esta iteración (motor-ia.md D15), así que hoy nada se publica solo, la UI no
+ * expone este ajuste y toda actividad opera como `review_all`. La columna y el
+ * enum se conservan para los datos existentes y para cuando la publicación
+ * vuelva al alcance.
  */
 export const AutonomyMode = z.enum([
   'review_all', // el profesor valida todo (por defecto)

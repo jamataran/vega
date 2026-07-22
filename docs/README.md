@@ -9,6 +9,7 @@ diseño de producto y de ingeniería.
 
 | Documento | Qué contiene |
 |---|---|
+| [`configuracion.md`](configuracion.md) | **Cómo se configura la aplicación**, pantalla a pantalla: clave de Anthropic, prompts, contextos y actividades |
 | [`hitos.md`](hitos.md) | El plan de trabajo: cinco hitos, qué HU entra en cada uno y qué falta |
 | [`arquitectura.md`](arquitectura.md) | Componentes, flujo de una entrega de principio a fin y por qué el monorepo está partido así |
 | [`modelo-de-datos.md`](modelo-de-datos.md) | Diagrama entidad-relación y máquina de estados de `SubmissionStatus` |

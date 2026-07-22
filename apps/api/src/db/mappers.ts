@@ -299,6 +299,7 @@ export function toBatchRun(row: Row<typeof schema.batchRuns>): BatchRun {
     finishedAt: isoOrNull(row.finishedAt),
     status: row.status,
     triggeredBy: row.triggeredBy,
+    kinds: row.kinds,
     submissionsProcessed: row.submissionsProcessed,
     submissionsFailed: row.submissionsFailed,
     submissionsAutoPublished: row.submissionsAutoPublished,

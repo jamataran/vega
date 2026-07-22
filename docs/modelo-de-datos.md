@@ -228,6 +228,7 @@ erDiagram
     timestamptz finished_at "nullable"
     text status "running | done | failed"
     uuid triggered_by FK "nullable · NULL si fue el planificador"
+    text_array kinds "tipos barridos · el planificador corre por tipo"
     integer submissions_processed
     integer submissions_failed
     integer submissions_auto_published

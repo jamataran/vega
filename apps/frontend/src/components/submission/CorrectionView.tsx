@@ -60,8 +60,7 @@ export function CorrectionView({
           <Alert variant="info">
             <AlertTitle>Publicada sin revisión docente</AlertTitle>
             <AlertDescription className="mt-1">
-              Se publicó sola por el modo de autonomía de la actividad. Nadie la revisó antes de que
-              llegara al alumno.
+              Se publicó automáticamente: ningún profesor la revisó antes de que llegara al alumno.
             </AlertDescription>
           </Alert>
         ) : null}
