@@ -14,6 +14,10 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: 'autoUpdate',
+      // El registro lo hace `lib/pwa.ts`, no el script que inyecta el plugin:
+      // ese sólo registra y se olvida, y hacía falta además preguntar por
+      // versiones nuevas y recargar cuando llega una. Ver ese módulo.
+      injectRegister: false,
       includeAssets: ['favicon.svg', 'health.txt'],
       manifest: {
         name: 'Vega',
@@ -35,6 +39,14 @@ export default defineConfig({
         // Los escaneos son grandes: no los precacheamos, se sirven desde el API.
         globPatterns: ['**/*.{js,css,html,svg,woff,woff2,txt}'],
         navigateFallbackDenylist: [/^\/api\//],
+        // Explícitos y no heredados del `registerType`: el plugin sólo los
+        // deduce cuando además inyecta él el registro, y aquí el registro es
+        // nuestro. Sin `clientsClaim`, el service worker nuevo se queda mirando
+        // y nunca toma el control de una pestaña ya abierta, que es justo la
+        // que hay que actualizar.
+        skipWaiting: true,
+        clientsClaim: true,
+        cleanupOutdatedCaches: true,
       },
     }),
   ],

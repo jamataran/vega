@@ -3,19 +3,30 @@ import type { PDFDocumentProxy } from 'pdfjs-dist';
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { Skeleton } from '@/components/ui/skeleton';
 
-export function usePdfDocument(url: string | undefined): {
+/**
+ * Abre el PDF que se ha descargado del API.
+ *
+ * Recibe el **fichero**, no una URL, y se lo entrega a pdf.js como bytes. Antes
+ * se creaba un `blob:` con `URL.createObjectURL` y pdf.js iba a buscarlo por su
+ * cuenta; eso fallaba con «Unexpected server response (0)» porque la CSP de la
+ * aplicación declara `connect-src 'self'` y ahí un `blob:` no entra. Además
+ * abría una carrera: al refrescarse la consulta se revocaba la URL anterior
+ * mientras pdf.js seguía leyéndola. Pasando los bytes no hay ni CSP que valga
+ * ni URL que revocar.
+ */
+export function usePdfDocument(file: Blob | undefined): {
   document: PDFDocumentProxy | null;
   loading: boolean;
   error: Error | null;
 } {
   const [document, setDocument] = useState<PDFDocumentProxy | null>(null);
-  const [loading, setLoading] = useState(url !== undefined);
+  const [loading, setLoading] = useState(file !== undefined);
   const [error, setError] = useState<Error | null>(null);
 
   useEffect(() => {
     setDocument(null);
     setError(null);
-    if (!url) {
+    if (!file) {
       setLoading(false);
       return;
     }
@@ -26,7 +37,11 @@ export function usePdfDocument(url: string | undefined): {
         setLoading(true);
         const { GlobalWorkerOptions, getDocument } = await import('pdfjs-dist');
         GlobalWorkerOptions.workerSrc = workerUrl;
-        const task = getDocument(url);
+        // Una copia nueva en cada intento: pdf.js se queda con el buffer que le
+        // pasan —lo transfiere al worker— y reutilizarlo daría un buffer vacío.
+        const data = new Uint8Array(await file.arrayBuffer());
+        if (canceled) return;
+        const task = getDocument({ data });
         loaded = await task.promise;
         if (canceled) {
           void loaded.destroy();
@@ -45,7 +60,7 @@ export function usePdfDocument(url: string | undefined): {
       canceled = true;
       if (loaded) void loaded.destroy();
     };
-  }, [url]);
+  }, [file]);
 
   return { document, loading, error };
 }

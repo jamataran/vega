@@ -9,6 +9,7 @@ import { queryKeys } from '@/lib/queryKeys';
 import { formatScore } from '@/lib/format';
 import { notify } from '@/lib/notify';
 import { useAuth } from '@/lib/auth';
+import { setUnsavedWork } from '@/lib/pwa';
 import { useCorrectionDraft } from '@/hooks/useCorrectionDraft';
 import { useCorrectionMutations } from '@/hooks/useCorrectionMutations';
 import { useNextInQueue } from '@/hooks/useNextInQueue';
@@ -119,7 +120,6 @@ export function SubmissionPage() {
 
   const [view, setView] = useState<ViewId>('correction');
   const [originalPage, setOriginalPage] = useState(0);
-  const [originalUrl, setOriginalUrl] = useState<string | undefined>();
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [validatedOpen, setValidatedOpen] = useState(false);
   const [parkOpen, setParkOpen] = useState(false);
@@ -143,17 +143,15 @@ export function SubmissionPage() {
     queryFn: ({ signal }) => api.original(id, signal),
     enabled: id !== '' && protectedOriginal,
   });
-  useEffect(() => {
-    if (!originalQuery.data) {
-      setOriginalUrl(undefined);
-      return;
-    }
-    const url = URL.createObjectURL(originalQuery.data);
-    setOriginalUrl(url);
-    return () => URL.revokeObjectURL(url);
-  }, [originalQuery.data]);
-  const originalPdf = usePdfDocument(originalUrl);
+  const originalPdf = usePdfDocument(originalQuery.data);
   const draft = useCorrectionDraft(detail?.correction ?? null);
+
+  // Lo que decide si una versión nueva puede recargar la página sola. Es la
+  // única pantalla de Vega donde se escribe algo que se puede perder.
+  useEffect(() => {
+    setUnsavedWork(draft.dirty);
+    return () => setUnsavedWork(false);
+  }, [draft.dirty]);
   const { save, validate, publish } = useCorrectionMutations(id);
   const next = useNextInQueue(id);
   const park = useMutation({
