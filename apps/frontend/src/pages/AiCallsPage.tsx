@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import type { AiCall, AiOperation } from '@vega/shared';
 import { AI_OPERATION_LABEL } from '@vega/shared';
@@ -11,6 +12,7 @@ import { Badge } from '@/components/ui/badge';
 import { Card } from '@/components/ui/card';
 import { ErrorState, EmptyState, PageHeader } from '@/components/common/Feedback';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { X } from 'lucide-react';
 
 const OPERATIONS = ['reading_a', 'reading_b', 'grade', 'triage', 'verify', 'forum_answer', 'connection_test'] as const;
 
@@ -23,7 +25,17 @@ export function AiCallsPage() {
   const [errorsOnly, setErrorsOnly] = useState(false);
   const [page, setPage] = useState(1);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const params = { ...(operation === 'all' ? {} : { operation }), ...(errorsOnly ? { errorsOnly: true } : {}), page, pageSize: 50 };
+  // El filtro por entrega llega desde la propia entrega, no de un control de
+  // esta pantalla: es el camino de «esto ha fallado» a «por qué ha fallado».
+  const [search, setSearch] = useSearchParams();
+  const submissionId = search.get('submissionId');
+  const params = {
+    ...(operation === 'all' ? {} : { operation }),
+    ...(errorsOnly ? { errorsOnly: true } : {}),
+    ...(submissionId === null ? {} : { submissionId }),
+    page,
+    pageSize: 50,
+  };
   const query = useQuery({
     queryKey: queryKeys.aiCalls(params),
     queryFn: ({ signal }) => api.aiCalls(params, signal),
@@ -48,10 +60,25 @@ export function AiCallsPage() {
           <SelectContent><SelectItem value="all">Todas las operaciones</SelectItem>{OPERATIONS.map((item) => <SelectItem key={item} value={item}>{AI_OPERATION_LABEL[item]}</SelectItem>)}</SelectContent>
         </Select>
         <Button variant={errorsOnly ? 'default' : 'outline'} aria-pressed={errorsOnly} onClick={() => { setErrorsOnly((value) => !value); setPage(1); setSelectedId(null); }}>Sólo errores</Button>
+        {submissionId === null ? null : (
+          <Button
+            variant="default"
+            onClick={() => {
+              const next = new URLSearchParams(search);
+              next.delete('submissionId');
+              setSearch(next, { replace: true });
+              setPage(1);
+              setSelectedId(null);
+            }}
+          >
+            <X aria-hidden="true" />
+            Sólo una entrega
+          </Button>
+        )}
       </div>
       {query.isPending ? <p role="status" className="mb-3 text-ui text-muted-foreground">Cargando llamadas…</p> : null}
       {query.isError ? <ErrorState error={query.error} onRetry={() => void query.refetch()} /> : null}
-      {!query.isPending && query.data?.items.length === 0 ? <EmptyState title="Sin llamadas" description="No hay intentos que coincidan con estos filtros." /> : null}
+      {!query.isPending && query.data?.items.length === 0 ? <EmptyState title="Sin llamadas" description={submissionId === null ? 'No hay intentos que coincidan con estos filtros.' : 'Esta entrega no llegó a generar ninguna llamada a la IA: el fallo ocurrió antes, al leerla o al prepararla.'} /> : null}
       {/* El detalle se abre pegado a la tarjeta pulsada, no al final de la
           lista: con cincuenta llamadas por página quedaba fuera de pantalla y
           parecía que el registro no guardaba nada más que el resumen. */}

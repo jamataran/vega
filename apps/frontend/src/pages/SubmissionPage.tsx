@@ -2,12 +2,13 @@ import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ChevronLeft, Info, Lock, RefreshCw, SkipForward, Trash2 } from 'lucide-react';
+import { AlertTriangle, ChevronLeft, Info, Lock, RefreshCw, SkipForward, Trash2 } from 'lucide-react';
 import { ACTIVITY_KIND_LABEL, hasStudentFile, studentLabel as labelOf } from '@vega/shared';
 import { api } from '@/lib/api';
 import { queryKeys } from '@/lib/queryKeys';
 import { formatScore } from '@/lib/format';
 import { notify } from '@/lib/notify';
+import { useAuth } from '@/lib/auth';
 import { useCorrectionDraft } from '@/hooks/useCorrectionDraft';
 import { useCorrectionMutations } from '@/hooks/useCorrectionMutations';
 import { useNextInQueue } from '@/hooks/useNextInQueue';
@@ -125,6 +126,9 @@ export function SubmissionPage() {
   const [parkReason, setParkReason] = useState('');
   const [reprocessOpen, setReprocessOpen] = useState(false);
   const [discardOpen, setDiscardOpen] = useState(false);
+  // El registro de IA es de administración: ofrecer el enlace a un profesor le
+  // llevaría a un 403 justo cuando busca ayuda.
+  const isAdmin = useAuth().user?.role === 'admin';
 
   const detailQuery = useQuery({
     queryKey: queryKeys.submission(id),
@@ -422,6 +426,43 @@ export function SubmissionPage() {
               </Button>
             ) : null}
           </div>
+        ) : null}
+
+        {/*
+          Un fallo tiene que verse **entero y en la propia entrega**. Antes sólo
+          asomaba recortado a dos líneas en la fila de la cola, así que abrir la
+          entrega que había fallado no decía absolutamente nada de por qué: la
+          pantalla enseñaba «todavía no hay corrección» y el motivo se quedaba en
+          el log del servidor.
+        */}
+        {status === 'error' && detail.submission.errorMessage ? (
+          <div className="border-t border-border bg-destructive-soft px-4 py-3">
+            <div className="mx-auto max-w-3xl">
+              <p className="flex items-center gap-2 font-semibold text-destructive-ink">
+                <AlertTriangle className="size-4 shrink-0" aria-hidden="true" />
+                {publicationRetry ? 'Ha fallado la publicación' : 'Ha fallado la corrección'}
+              </p>
+              {/* Seleccionable y sin recortar: es lo que se copia y se pega al
+                  pedir ayuda, y suele traer el nombre exacto de la función de
+                  Moodle o del modelo que hay que revisar. */}
+              <p className="mt-1.5 whitespace-pre-wrap break-words text-ui text-destructive-ink">
+                {detail.submission.errorMessage}
+              </p>
+              {isAdmin ? (
+                <Button asChild variant="link" size="sm" className="mt-1 px-0">
+                  <Link to={`/registro-ia?submissionId=${detail.submission.id}`}>
+                    Ver el registro de IA de esta entrega
+                  </Link>
+                </Button>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+
+        {status === 'parked' && detail.submission.parkedReason ? (
+          <p className="border-t border-border bg-muted px-4 py-2 text-center text-ui text-muted-foreground">
+            {detail.submission.parkedReason}
+          </p>
         ) : null}
 
         {validated || published || publicationRetry ? (

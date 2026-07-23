@@ -96,6 +96,14 @@ export async function ingestAll(
   ctx: AppContext,
   log: Logger = SILENT,
   kinds: readonly ActivityKind[] = ['assignment', 'forum'],
+  /**
+   * Corta la ingesta cuando alguien para el proceso o vence el límite de doce
+   * horas. **Sí lanza** al abortar, y es la única excepción a la regla de arriba:
+   * quien para un proceso espera que pare, no que siga bajando exámenes hasta
+   * acabar la ronda. Se comprueba entre actividades y entre entregas, así que el
+   * corte tarda como mucho lo que dure la llamada a Moodle que esté en vuelo.
+   */
+  signal?: AbortSignal,
 ): Promise<IngestReport> {
   const { db } = ctx;
   const store = new FileStore(ctx.config.STORAGE_ROOT);
@@ -128,7 +136,10 @@ export async function ingestAll(
   // hacerse con la misma instancia que listó.
   const connectors = new Map<string, LmsConnector>();
 
+  log.info({ activities: activities.length, kinds }, 'Actividades que se van a consultar');
+
   for (const activity of activities) {
+    signal?.throwIfAborted();
     if (activity.importedBy === null) {
       activitiesFailed += 1;
       problems.push({
@@ -160,11 +171,23 @@ export async function ingestAll(
     }
 
     try {
-      const outcome = await ingestActivity(ctx, store, connector, activity, log, cutoff);
+      const outcome = await ingestActivity(ctx, store, connector, activity, log, cutoff, signal);
       ingested += outcome.created;
       skippedTooOld += outcome.skippedTooOld;
       activitiesVisited += 1;
+      // Una línea por actividad, siempre. Sin esto la ingesta es un silencio de
+      // varios minutos —bajar los exámenes de una clase entera no escribe nada—
+      // y desde fuera no hay forma de distinguirla de un proceso colgado.
+      log.info(
+        {
+          slug: activity.slug,
+          ingested: outcome.created,
+          skippedTooOld: outcome.skippedTooOld,
+        },
+        'Actividad ingerida',
+      );
     } catch (error) {
+      if (signal?.aborted) throw error;
       activitiesFailed += 1;
       problems.push({
         activityId: activity.id,
@@ -193,6 +216,7 @@ async function ingestActivity(
   activity: ActivityRow,
   log: Logger,
   cutoff: Date | null,
+  signal: AbortSignal | undefined,
 ): Promise<{ created: number; skippedTooOld: number }> {
   const { db } = ctx;
 
@@ -209,6 +233,7 @@ async function ingestActivity(
   let skippedTooOld = 0;
 
   for (const item of remote) {
+    signal?.throwIfAborted();
     // La antigüedad se mira **antes** de tocar nada: ni ficha del alumno, ni
     // fila, ni descarga. Una entrega de hace meses que no se va a corregir
     // tampoco tiene por qué ocupar disco ni ensuciar la cola.
@@ -247,6 +272,7 @@ async function ingestActivity(
 
       await downloadInto(ctx, store, connector, row.id, item, log);
     } catch (error) {
+      if (signal?.aborted) throw error;
       log.warn(
         { err: error, slug: activity.slug, remoteId: item.ref.remoteId },
         'Fallo al ingerir una entrega concreta',

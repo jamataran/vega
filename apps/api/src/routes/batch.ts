@@ -321,11 +321,15 @@ export async function runBatch(
     if (options.ingest ?? options.submissionId === undefined) {
       try {
         log.info({ batchRunId: run.id, kinds }, 'Ingesta iniciada');
-        ingest = await ingestAll(ctx, log, kinds);
+        ingest = await ingestAll(ctx, log, kinds, controller.signal);
         for (const problem of ingest.problems) {
           log.warn({ slug: problem.slug, kind: problem.kind }, problem.message);
         }
       } catch (error) {
+        // Que la ingesta falle no cancela la corrección… salvo que lo que haya
+        // fallado sea que alguien ha parado el proceso. Tragarse eso aquí es lo
+        // que hacía que «Parar» cerrara la fila y el trabajo siguiera corriendo.
+        if (controller.signal.aborted) throw error;
         log.error({ err: error }, 'La ingesta ha fallado entera; se corrige lo que ya había');
       }
     }
