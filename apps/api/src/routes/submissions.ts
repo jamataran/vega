@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull } from 'drizzle-orm';
 import { createReadStream } from 'node:fs';
 import type { FastifyInstance } from 'fastify';
 import {
@@ -29,6 +29,13 @@ import { FileStore } from '../storage/files.js';
 import type { TokenPayload } from '../auth/plugin.js';
 import type { AppContext } from '../context.js';
 import { getSettings } from '../settings/service.js';
+import { prepareBatchRun, runBatch } from './batch.js';
+
+const REPROCESSABLE_STATUSES = ['graded', 'parked', 'error'] as const;
+
+export function isReprocessableStatus(status: SubmissionStatus): boolean {
+  return (REPROCESSABLE_STATUSES as readonly SubmissionStatus[]).includes(status);
+}
 
 interface QueueRow {
   id: string;
@@ -237,11 +244,21 @@ export async function submissionRoutes(app: FastifyInstance, ctx: AppContext): P
         throw conflict('Esta entrega todavía no tiene corrección que descargar.');
       }
 
+      const [storedOriginal] = await db
+        .select({
+          storagePath: schema.submissions.storagePath,
+          mediaType: schema.submissions.mediaType,
+        })
+        .from(schema.submissions)
+        .where(eq(schema.submissions.id, request.params.id))
+        .limit(1);
+
       const pdf = await buildFeedbackPdf({
         submission: detail.submission,
         activity: detail.activity,
         correction: detail.correction,
         transcription: detail.transcription,
+        originalFile: await readStoredOriginal(ctx, storedOriginal),
       });
 
       const filename = feedbackFilename({
@@ -290,14 +307,37 @@ export async function submissionRoutes(app: FastifyInstance, ctx: AppContext): P
       }
 
       const now = new Date();
-      await db
-        .update(schema.corrections)
-        .set({ validatedBy: session.sub, validatedAt: now })
-        .where(eq(schema.corrections.id, correction.id));
-      await db
-        .update(schema.submissions)
-        .set({ status: 'validated', updatedAt: now })
-        .where(eq(schema.submissions.id, submissionId));
+      await db.transaction(async (tx) => {
+        // Reclamar el estado dentro de la misma transacción impide que un
+        // reproceso o aparcado simultáneo quede sobrescrito por esta validación.
+        const [claimed] = await tx
+          .update(schema.submissions)
+          .set({ status: 'validated', updatedAt: now })
+          .where(
+            and(
+              eq(schema.submissions.id, submissionId),
+              eq(schema.submissions.status, 'graded'),
+            ),
+          )
+          .returning({ id: schema.submissions.id });
+        if (!claimed) {
+          throw conflict('El estado de la entrega ha cambiado; actualiza la página antes de validar.');
+        }
+
+        const [validatedCorrection] = await tx
+          .update(schema.corrections)
+          .set({ validatedBy: session.sub, validatedAt: now })
+          .where(
+            and(
+              eq(schema.corrections.id, correction.id),
+              isNull(schema.corrections.publishedAt),
+            ),
+          )
+          .returning({ id: schema.corrections.id });
+        if (!validatedCorrection) {
+          throw conflict('La corrección ya no está disponible para validar.');
+        }
+      });
 
       return loadCorrectionResponse(ctx, submissionId, currentUser(request));
     },
@@ -386,6 +426,7 @@ export async function submissionRoutes(app: FastifyInstance, ctx: AppContext): P
             file: correctionRow.feedbackFilePublishedAt !== null,
           },
           transcription: detail.transcription,
+          originalFile: await readStoredOriginal(ctx, submissionRow),
         });
       } catch (error) {
         // La nota no ha llegado: nada ha cambiado en el LMS. La entrega queda
@@ -408,27 +449,108 @@ export async function submissionRoutes(app: FastifyInstance, ctx: AppContext): P
   app.post<{ Params: { id: string } }>(
     routes.reprocess(':id'),
     { preHandler: app.authenticate },
-    async (request) => {
+    async (request, reply) => {
       const submissionId = request.params.id;
       const body = parseOrThrow(ReprocessSubmissionRequest, request.body ?? {}, 'El reproceso');
+      const user = currentUser(request);
       const [submission] = await db
         .select()
         .from(schema.submissions)
         .where(eq(schema.submissions.id, submissionId))
         .limit(1);
       if (!submission) throw notFound('No existe esa entrega.');
-      await assertActivityAccess(ctx, currentUser(request), submission.activityId);
-      if (submission.status === 'published') {
-        throw conflict('Una entrega ya publicada no se puede reprocesar.');
+      await assertActivityAccess(ctx, user, submission.activityId);
+      if (!isReprocessableStatus(submission.status)) {
+        if (submission.status === 'validated') {
+          throw conflict('Una corrección validada queda fijada: sólo se puede publicar.');
+        }
+        if (submission.status === 'published') {
+          throw conflict('Una entrega ya publicada no se puede reprocesar.');
+        }
+        throw conflict('Esta entrega ya está pendiente o dentro de un proceso de corrección.');
       }
 
-      // En grade_only conservamos la lectura ya pagada. El lote reconoce el
-      // estado grading y reutiliza la transcripción persistida.
-      await db
-        .update(schema.submissions)
-        .set({ status: body.scope === 'grade_only' ? 'grading' : 'pending', errorMessage: null, updatedAt: new Date() })
-        .where(eq(schema.submissions.id, submissionId));
+      const [[activity], [correction]] = await Promise.all([
+        db
+          .select({ kind: schema.activities.kind })
+          .from(schema.activities)
+          .where(eq(schema.activities.id, submission.activityId))
+          .limit(1),
+        db
+          .select({ validatedAt: schema.corrections.validatedAt })
+          .from(schema.corrections)
+          .where(eq(schema.corrections.submissionId, submissionId))
+          .limit(1),
+      ]);
+      if (!activity) throw notFound('La actividad de esta entrega ya no existe.');
+      if (correction?.validatedAt) {
+        throw conflict('Una corrección validada queda fijada: sólo se puede publicar.');
+      }
 
+      if (body.scope === 'grade_only' && hasStudentFile(activity.kind)) {
+        const [transcription] = await db
+          .select({ passCount: schema.transcriptions.passCount })
+          .from(schema.transcriptions)
+          .where(eq(schema.transcriptions.submissionId, submissionId))
+          .limit(1);
+        if (!transcription || transcription.passCount < 2) {
+          throw conflict(
+            'No hay una lectura doble completa que reutilizar. Elige «Lectura y corrección».',
+          );
+        }
+      }
+
+      // Reservar primero el ejecutor garantiza que un 409 por otro lote no
+      // deja la entrega en un estado intermedio que nadie vaya a recoger.
+      const run = await prepareBatchRun(ctx, user.sub, [activity.kind]);
+
+      // En grade_only conservamos la lectura ya pagada. El lote reconoce el
+      // estado grading y reutiliza la transcripción persistida. Se limpia el
+      // lote anterior: el nuevo se asigna justo cuando empieza esta entrega.
+      let claimed: { id: string } | undefined;
+      try {
+        [claimed] = await db
+          .update(schema.submissions)
+          .set({
+            status: body.scope === 'grade_only' ? 'grading' : 'pending',
+            batchRunId: null,
+            errorMessage: null,
+            parkedReason: null,
+            parkedBy: null,
+            triageLabel: null,
+            triageConfidence: null,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(schema.submissions.id, submissionId),
+              inArray(schema.submissions.status, [...REPROCESSABLE_STATUSES]),
+            ),
+          )
+          .returning({ id: schema.submissions.id });
+      } catch (error) {
+        await closeUnusedBatch(ctx, run.id);
+        throw error;
+      }
+
+      if (!claimed) {
+        await closeUnusedBatch(ctx, run.id);
+        throw conflict('El estado de la entrega ha cambiado; actualiza la página antes de reprocesar.');
+      }
+
+      void runBatch(ctx, user.sub, app.log, {
+        preparedRun: run,
+        kinds: [activity.kind],
+        submissionId,
+        ingest: false,
+      }).catch((error) => {
+        app.log.error(
+          { err: error, batchRunId: run.id, submissionId },
+          'El reproceso individual en segundo plano ha fallado',
+        );
+      });
+
+      reply.code(202);
       return { queued: true };
     },
   );
@@ -446,8 +568,16 @@ export async function submissionRoutes(app: FastifyInstance, ctx: AppContext): P
       if (!submission) throw notFound('No existe esa entrega.');
       const user = currentUser(request);
       await assertActivityAccess(ctx, user, submission.activityId);
-      if (submission.status === 'published') throw conflict('Una entrega publicada no se puede aparcar.');
-      await db
+      if (submission.status === 'validated') {
+        throw conflict('Una corrección validada queda fijada: sólo se puede publicar.');
+      }
+      if (submission.status === 'published') {
+        throw conflict('Una entrega publicada no se puede aparcar.');
+      }
+      if (submission.status !== 'graded' && submission.status !== 'error') {
+        throw conflict('Sólo se pueden aparcar entregas pendientes de decisión docente.');
+      }
+      const [parked] = await db
         .update(schema.submissions)
         .set({
           status: 'parked',
@@ -455,8 +585,85 @@ export async function submissionRoutes(app: FastifyInstance, ctx: AppContext): P
           parkedBy: user.sub,
           updatedAt: new Date(),
         })
-        .where(eq(schema.submissions.id, submission.id));
+        .where(
+          and(
+            eq(schema.submissions.id, submission.id),
+            inArray(schema.submissions.status, ['graded', 'error']),
+          ),
+        )
+        .returning({ id: schema.submissions.id });
+      if (!parked) {
+        throw conflict('El estado de la entrega ha cambiado; actualiza la página antes de aparcar.');
+      }
       return { queued: false };
+    },
+  );
+
+  // ── Descartar lo que propuso la IA ────────────────────────────────────────
+  //
+  // Distinto de reprocesar, y por eso es otra ruta: reprocesar vuelve a llamar
+  // al modelo **ahora** y cuesta dinero en ese momento; descartar sólo tira la
+  // propuesta y devuelve la entrega a la cola, para que la recoja el siguiente
+  // proceso. Es la salida del profesor que mira una corrección, decide que no
+  // vale nada y no quiere ni validarla ni aparcarla.
+  app.post<{ Params: { id: string } }>(
+    routes.discardCorrection(':id'),
+    { preHandler: app.authenticate },
+    async (request) => {
+      const submissionId = request.params.id;
+      const [submission] = await db
+        .select()
+        .from(schema.submissions)
+        .where(eq(schema.submissions.id, submissionId))
+        .limit(1);
+      if (!submission) throw notFound('No existe esa entrega.');
+      await assertActivityAccess(ctx, currentUser(request), submission.activityId);
+
+      if (submission.status === 'published') {
+        throw conflict('Lo que ya vio el alumno no se puede descartar desde aquí.');
+      }
+      if (submission.status === 'validated') {
+        throw conflict('Una corrección validada queda fijada: sólo se puede publicar.');
+      }
+      if (!isReprocessableStatus(submission.status)) {
+        throw conflict('Esta entrega ya está pendiente o dentro de un proceso de corrección.');
+      }
+
+      await db.transaction(async (tx) => {
+        const [claimed] = await tx
+          .update(schema.submissions)
+          .set({
+            status: 'pending',
+            batchRunId: null,
+            errorMessage: null,
+            parkedReason: null,
+            parkedBy: null,
+            triageLabel: null,
+            triageConfidence: null,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(schema.submissions.id, submissionId),
+              inArray(schema.submissions.status, [...REPROCESSABLE_STATUSES]),
+            ),
+          )
+          .returning({ id: schema.submissions.id });
+        if (!claimed) {
+          throw conflict('El estado de la entrega ha cambiado; actualiza la página antes de descartar.');
+        }
+
+        // Se va todo, también la transcripción: una entrega en `pending` se
+        // vuelve a leer de cero, así que conservarla sólo dejaría en la base un
+        // resto que nadie va a usar y que enseñaría una lectura vieja al abrir
+        // la entrega. Los apartados caen con la corrección (ON DELETE CASCADE).
+        await tx.delete(schema.corrections).where(eq(schema.corrections.submissionId, submissionId));
+        await tx
+          .delete(schema.transcriptions)
+          .where(eq(schema.transcriptions.submissionId, submissionId));
+      });
+
+      return { queued: true };
     },
   );
 
@@ -490,7 +697,32 @@ export async function submissionRoutes(app: FastifyInstance, ctx: AppContext): P
   );
 }
 
+async function readStoredOriginal(
+  ctx: AppContext,
+  source: { readonly storagePath: string | null; readonly mediaType: string | null } | undefined,
+): Promise<{ bytes: Uint8Array; mediaType: string } | null> {
+  if (!source?.storagePath) return null;
+  try {
+    return {
+      bytes: await new FileStore(ctx.config.STORAGE_ROOT).read(source.storagePath),
+      mediaType: source.mediaType ?? 'application/octet-stream',
+    };
+  } catch {
+    // El PDF de feedback sigue siendo útil con la transcripción. La descarga
+    // del original tiene su propia ruta y allí sí se muestra el fallo de disco.
+    return null;
+  }
+}
+
 // ── Ayudantes ───────────────────────────────────────────────────────────────
+
+async function closeUnusedBatch(ctx: AppContext, runId: string): Promise<void> {
+  await ctx.db
+    .update(schema.batchRuns)
+    .set({ status: 'failed', finishedAt: new Date() })
+    .where(and(eq(schema.batchRuns.id, runId), eq(schema.batchRuns.status, 'running')))
+    .catch(() => {});
+}
 
 async function loadDetail(
   ctx: AppContext,
@@ -582,6 +814,12 @@ async function applyTeacherEdits(
     .where(eq(schema.submissions.id, submissionId))
     .limit(1);
   if (!submission) throw notFound('No existe esa entrega.');
+  if (submission.status !== 'graded') {
+    if (submission.status === 'validated') {
+      throw conflict('Una corrección validada queda fijada: sólo se puede publicar.');
+    }
+    throw conflict('Sólo se puede editar una corrección pendiente de validación.');
+  }
 
   const [activity] = await db
     .select()
@@ -652,9 +890,18 @@ async function applyTeacherEdits(
         teacherLatex: body.teacherLatex,
       })
       .where(eq(schema.corrections.id, correction.id));
-    await tx
+    const [stillEditable] = await tx
       .update(schema.submissions)
       .set({ updatedAt: new Date() })
-      .where(eq(schema.submissions.id, submissionId));
+      .where(
+        and(
+          eq(schema.submissions.id, submissionId),
+          eq(schema.submissions.status, 'graded'),
+        ),
+      )
+      .returning({ id: schema.submissions.id });
+    if (!stillEditable) {
+      throw conflict('El estado de la entrega ha cambiado; actualiza la página antes de guardar.');
+    }
   });
 }

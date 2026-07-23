@@ -24,13 +24,78 @@ import { seedPrompts } from '../prompts/service.js';
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '../../../..');
 
-/** Lee un contexto del repositorio; cadena vacía si el fichero no está. */
-async function readContextFile(relativePath: string): Promise<string> {
-  try {
-    return await readFile(join(REPO_ROOT, 'contexts', relativePath), 'utf8');
-  } catch {
-    return '';
+/**
+ * La primera ruta es la copia inmutable que viaja en la imagen. La segunda
+ * conserva compatibilidad con ejecuciones desde la raíz del paquete y la
+ * tercera con `tsx`, donde `import.meta.url` todavía apunta al árbol fuente.
+ */
+const DEFAULT_CONTEXT_SEED_ROOTS = [
+  join(process.cwd(), 'context-seeds'),
+  join(process.cwd(), 'contexts'),
+  join(REPO_ROOT, 'contexts'),
+] as const;
+
+export interface ContextSeedRow {
+  readonly level: 'global' | 'activity_kind' | 'template';
+  readonly key: string;
+  readonly content: string;
+}
+
+async function readContextFile(
+  relativePath: string,
+  roots: readonly string[],
+): Promise<string> {
+  for (const root of new Set(roots)) {
+    try {
+      return await readFile(join(root, relativePath), 'utf8');
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') throw error;
+    }
   }
+
+  throw new Error(
+    `No se ha encontrado el contexto obligatorio ${relativePath} en: ${roots.join(', ')}. ` +
+      'La aplicación no debe arrancar sin los criterios de corrección.',
+  );
+}
+
+/** Carga todos los contextos mínimos que una instalación nueva necesita. */
+export async function loadContextSeedRows(
+  roots: readonly string[] = DEFAULT_CONTEXT_SEED_ROOTS,
+): Promise<readonly ContextSeedRow[]> {
+  const installation = await readContextFile('installation.md', roots);
+  const globalRules = await readContextFile('global.md', roots);
+  const rows: ContextSeedRow[] = [
+    {
+      level: 'global',
+      key: 'global',
+      content: `${installation}\n\n---\n\n${globalRules}`,
+    },
+  ];
+
+  for (const kind of ActivityKind.options) {
+    rows.push({
+      level: 'activity_kind',
+      key: kind,
+      content: await readContextFile(`activity-kinds/${kind}.md`, roots),
+    });
+  }
+
+  rows.push(
+    {
+      level: 'template',
+      key: 'simulacro-problema',
+      content: await readContextFile('activity-kinds/assignment.md', roots),
+    },
+    {
+      level: 'template',
+      key: 'simulacro-tema',
+      content: await readContextFile('activity-kinds/assignment-tema.md', roots),
+    },
+  );
+
+  return rows;
 }
 
 /**
@@ -43,28 +108,7 @@ async function readContextFile(relativePath: string): Promise<string> {
  * pisa en el siguiente arranque.
  */
 async function seedContexts(db: Database, log: (line: string) => void): Promise<void> {
-  const rows: { level: 'global' | 'activity_kind' | 'template'; key: string; content: string }[] = [];
-
-  const installation = await readContextFile('installation.md');
-  const globalRules = await readContextFile('global.md');
-  const global = [installation, globalRules].filter(Boolean).join('\n\n---\n\n');
-  if (global !== '') rows.push({ level: 'global', key: 'global', content: global });
-
-  for (const kind of ActivityKind.options) {
-    const content = await readContextFile(`activity-kinds/${kind}.md`);
-    if (content !== '') rows.push({ level: 'activity_kind', key: kind, content });
-  }
-
-  const problemTemplate = await readContextFile('activity-kinds/assignment.md');
-  if (problemTemplate !== '') {
-    rows.push({ level: 'template', key: 'simulacro-problema', content: problemTemplate });
-  }
-  const topicTemplate = await readContextFile('activity-kinds/assignment-tema.md');
-  if (topicTemplate !== '') {
-    rows.push({ level: 'template', key: 'simulacro-tema', content: topicTemplate });
-  }
-
-  if (rows.length === 0) return;
+  const rows = await loadContextSeedRows();
 
   let inserted = 0;
   for (const row of rows) {

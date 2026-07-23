@@ -306,6 +306,7 @@ export function toBatchRun(row: Row<typeof schema.batchRuns>): BatchRun {
     submissionsIngested: row.submissionsIngested,
     activitiesFailed: row.activitiesFailed,
     problems: row.problems,
+    closedReason: row.closedReason,
     usage: toUsage(row),
   };
 }

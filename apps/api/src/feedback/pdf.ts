@@ -1,5 +1,5 @@
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
-import type { PDFFont, PDFPage } from 'pdf-lib';
+import type { PDFFont, PDFImage, PDFPage } from 'pdf-lib';
 import {
   effectiveLatex,
   effectivePoints,
@@ -10,23 +10,29 @@ import {
   type Submission,
   type Transcription,
 } from '@vega/shared';
+import { MATH_UNITS_PER_EM, renderMath } from './math.js';
+import type { MathDrawing } from './math.js';
 
 /**
  * PDF de feedback: el original del alumno seguido de las páginas de corrección.
  *
- * ESTAMOS MOCKEANDO EL LATEX. No se compila LaTeX de verdad (eso pediría una
- * distribución TeX completa o un servicio aparte): se vuelca
- * `effectiveLatex(correction)` como texto legible y paginado, quitándole los
- * comandos que sólo estorban al leer. Cuando haya compilación real, lo único
- * que cambia es `renderCorrectionPages`.
+ * **Las fórmulas se componen de verdad.** `splitLatexSegments` separa la prosa
+ * del TeX y `feedback/math.ts` compone cada fórmula con MathJax; el paginador
+ * dibuja las dos cosas sobre la misma línea base. Lo que no es fórmula —los
+ * títulos, las listas, el andamiaje del documento— sí se aplana con
+ * `latexToReadableText`, que además hace de respaldo cuando una fórmula no se
+ * puede componer: se lee peor, pero se lee.
  *
- * El "original del alumno" también es simulado: con el conector mock no hay
- * PDF descargado del LMS, así que se reconstruye a partir de la transcripción,
- * página a página y etiquetado como reproducción. Con un conector real habrá
- * que embeber el PDF de verdad con `PDFDocument.copyPages`.
+ * No se compila LaTeX entero, y no es lo mismo: un `\\usepackage` no hace nada
+ * aquí. Lo que se compone es la parte matemática, que es la que quedaba
+ * ilegible al aplanarla.
  *
- * pdf-lib es JS puro a propósito: sin dependencias nativas, el contenedor del
- * API sigue siendo una imagen de Node sin compilador.
+ * Cuando el fichero original está disponible, sus páginas se incorporan sin
+ * reconstruirlas. Si no se puede abrir, la transcripción queda claramente
+ * rotulada como tal para no confundirla con el documento entregado.
+ *
+ * pdf-lib y MathJax son JS puro a propósito: sin dependencias nativas, el
+ * contenedor del API sigue siendo una imagen de Node sin compilador ni Chromium.
  */
 
 // ── Geometría ───────────────────────────────────────────────────────────────
@@ -154,14 +160,131 @@ const MATH_MACROS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\\(varepsilon|epsilon)(?![a-zA-Z])/g, 'epsilon'],
 ];
 
+// ── Separación de prosa y fórmula ───────────────────────────────────────────
+
+/**
+ * Un trozo del documento: prosa, o una fórmula que hay que componer.
+ *
+ * `display` es la fórmula que va en su propio renglón y centrada (`\[…\]`,
+ * `equation`, `align`…); `inline`, la que viaja dentro de una frase (`$…$`).
+ * La distinción no es cosmética: MathJax compone distinto —los límites de un
+ * sumatorio van encima en display y al lado en línea— y el paginador también.
+ */
+export interface LatexSegment {
+  readonly kind: 'text' | 'inline' | 'display';
+  readonly value: string;
+}
+
+/** Entornos que TeX compone como fórmula suelta. */
+const DISPLAY_ENVIRONMENTS = [
+  'equation',
+  'align',
+  'gather',
+  'multline',
+  'displaymath',
+  'eqnarray',
+  'alignat',
+  'flalign',
+] as const;
+
+/**
+ * Parte el LaTeX en prosa y fórmulas **sin tocar el contenido de ninguna**.
+ *
+ * Va antes que cualquier limpieza porque la limpieza destruye justo lo que
+ * MathJax necesita: `latexToReadableText` borra `$`, deshace `\frac` y se lleva
+ * por delante las macros que no conoce. Separar primero es lo que permite darle
+ * a cada trozo el tratamiento que le toca.
+ */
+export function splitLatexSegments(latex: string): readonly LatexSegment[] {
+  const segments: LatexSegment[] = [];
+  let text = '';
+  let index = 0;
+
+  const flushText = (): void => {
+    if (text !== '') segments.push({ kind: 'text', value: text });
+    text = '';
+  };
+  const pushMath = (kind: 'inline' | 'display', value: string): void => {
+    flushText();
+    if (value.trim() !== '') segments.push({ kind, value });
+  };
+
+  /** Delimitadores por pares, del más largo al más corto: `$$` antes que `$`. */
+  const FENCES = [
+    { open: '$$', close: '$$', kind: 'display' },
+    { open: '\\[', close: '\\]', kind: 'display' },
+    { open: '\\(', close: '\\)', kind: 'inline' },
+    { open: '$', close: '$', kind: 'inline' },
+  ] as const;
+
+  while (index < latex.length) {
+    const rest = latex.slice(index);
+
+    // Un dólar escapado es un dólar, no el principio de una fórmula.
+    if (rest.startsWith('\\$')) {
+      text += '\\$';
+      index += 2;
+      continue;
+    }
+
+    const environment = DISPLAY_ENVIRONMENTS.find(
+      (name) => rest.startsWith(`\\begin{${name}}`) || rest.startsWith(`\\begin{${name}*}`),
+    );
+    if (environment !== undefined) {
+      const closing = rest.startsWith(`\\begin{${environment}*}`)
+        ? `\\end{${environment}*}`
+        : `\\end{${environment}}`;
+      const end = rest.indexOf(closing);
+      if (end !== -1) {
+        // El entorno viaja entero, con su `\begin` y su `\end`: es lo que
+        // MathJax necesita para alinear las filas de un `align`.
+        pushMath('display', rest.slice(0, end + closing.length));
+        index += end + closing.length;
+        continue;
+      }
+    }
+
+    const fence = FENCES.find((candidate) => rest.startsWith(candidate.open));
+    if (fence !== undefined) {
+      const end = findClosing(rest, fence.open, fence.close);
+      if (end !== -1) {
+        pushMath(fence.kind, rest.slice(fence.open.length, end));
+        index += end + fence.close.length;
+        continue;
+      }
+    }
+
+    // Delimitador sin pareja: es un símbolo del texto, no una fórmula a medias.
+    text += rest[0];
+    index += 1;
+  }
+
+  flushText();
+  return segments;
+}
+
+/** Posición del cierre, saltándose lo que vaya escapado con `\`. */
+function findClosing(rest: string, open: string, close: string): number {
+  for (let position = open.length; position < rest.length; position += 1) {
+    if (rest[position] === '\\' && !rest.startsWith(close, position)) {
+      position += 1;
+      continue;
+    }
+    if (rest.startsWith(close, position)) return position;
+  }
+  return -1;
+}
+
 /**
  * Convierte el LaTeX de la corrección en algo que se pueda leer sin compilar.
  *
- * No es un intérprete de LaTeX ni pretende serlo: quita el andamiaje del
- * documento, traduce las macros matemáticas más frecuentes y deja el resto de
- * la fórmula tal cual, que es como la lee un profesor de matemáticas. Cualquier
- * comando que no conozca se sustituye por un espacio, nunca por nada: si se
- * borrase a secas, `\pm\sqrt{66}` acabaría pegado como una sola palabra.
+ * Es el **respaldo**: lo que se usa cuando la fórmula no se puede componer y
+ * para la prosa que rodea a las que sí. No es un intérprete de LaTeX ni pretende
+ * serlo: quita el andamiaje del documento, traduce las macros matemáticas más
+ * frecuentes y deja el resto de la fórmula tal cual, que es como la lee un
+ * profesor de matemáticas. Cualquier comando que no conozca se sustituye por un
+ * espacio, nunca por nada: si se borrase a secas, `\pm\sqrt{66}` acabaría pegado
+ * como una sola palabra.
  */
 export function latexToReadableText(latex: string): string {
   let out = latex
@@ -267,6 +390,61 @@ function wrap(text: string, font: PDFFont, size: number, maxWidth: number): stri
   return lines;
 }
 
+/**
+ * Reparto vertical aproximado de una fuente estándar respecto a su cuerpo. No
+ * se pide a la fuente porque las métricas de pdf-lib no separan ascenso de
+ * descenso, y para decidir el alto de una línea con esto basta.
+ */
+const ASCENT_RATIO = 0.75;
+const DESCENT_RATIO = 0.25;
+
+/** Aire alrededor de una fórmula suelta, en puntos. */
+const DISPLAY_MATH_MARGIN = 6;
+
+/** Una pieza de una línea: o palabra que se escribe, o fórmula que se dibuja. */
+type Piece = {
+  readonly width: number;
+  readonly ascent: number;
+  readonly descent: number;
+  readonly spaceBefore: number;
+} & (
+  | { readonly kind: 'word'; readonly text: string }
+  | { readonly kind: 'math'; readonly drawing: MathDrawing }
+);
+
+function wordPiece(text: string, font: PDFFont, size: number, spaceWidth: number): Piece {
+  return {
+    kind: 'word',
+    text,
+    width: font.widthOfTextAtSize(text, size),
+    ascent: size * ASCENT_RATIO,
+    descent: size * DESCENT_RATIO,
+    spaceBefore: spaceWidth,
+  };
+}
+
+/** Trocea por caracteres lo que no quepa entero: una URL, un identificador largo. */
+function splitOverlongWord(
+  word: string,
+  font: PDFFont,
+  size: number,
+  maxWidth: number,
+): readonly string[] {
+  if (font.widthOfTextAtSize(word, size) <= maxWidth) return [word];
+  const chunks: string[] = [];
+  let chunk = '';
+  for (const char of word) {
+    if (chunk !== '' && font.widthOfTextAtSize(chunk + char, size) > maxWidth) {
+      chunks.push(chunk);
+      chunk = char;
+    } else {
+      chunk += char;
+    }
+  }
+  if (chunk !== '') chunks.push(chunk);
+  return chunks;
+}
+
 export class PdfWriter {
   readonly #doc: PDFDocument;
   readonly #fonts: Fonts;
@@ -339,6 +517,167 @@ export class PdfWriter {
     }
   }
 
+  /**
+   * Igual que `text`, pero componiendo las fórmulas en vez de aplanarlas.
+   *
+   * El ajuste de línea deja de ser «palabras que caben» para ser «piezas que
+   * caben»: una palabra se mide con la fuente y una fórmula con la caja que
+   * devuelve MathJax. La línea base es común a las dos, que es lo que hace que
+   * un `$x^2$` se asiente sobre el mismo renglón que el texto que lo rodea en
+   * vez de flotar.
+   */
+  richText(
+    latex: string,
+    options: {
+      size?: number;
+      leading?: number;
+      color?: ReturnType<typeof rgb>;
+      indent?: number;
+    } = {},
+  ): void {
+    const size = options.size ?? SIZE.body;
+    const leading = options.leading ?? LEADING.body;
+    const color = options.color ?? INK;
+    const indent = options.indent ?? 0;
+    const width = CONTENT_WIDTH - indent;
+    const font = this.#fonts.regular;
+    /** De unidades de MathJax a puntos del PDF. */
+    const unit = size / MATH_UNITS_PER_EM;
+
+    let line: Piece[] = [];
+    let lineWidth = 0;
+
+    const flushLine = (): void => {
+      if (line.length === 0) return;
+      // La altura la manda la pieza más alta: una fracción ocupa el doble que
+      // una minúscula y solaparía la línea de arriba si el paso fuera fijo.
+      const ascent = Math.max(size * ASCENT_RATIO, ...line.map((piece) => piece.ascent));
+      const descent = Math.max(size * DESCENT_RATIO, ...line.map((piece) => piece.descent));
+      const height = Math.max(leading, ascent + descent + 2);
+      this.#ensure(height);
+      const baseline = this.#cursor.y - ascent;
+
+      let x = MARGIN + indent;
+      for (const piece of line) {
+        x += piece.spaceBefore;
+        if (piece.kind === 'word') {
+          this.#cursor.page.drawText(piece.text, { x, y: baseline, size, font, color });
+        } else {
+          for (const path of piece.drawing.paths) {
+            this.#cursor.page.drawSvgPath(path, { x, y: baseline, scale: unit, color });
+          }
+        }
+        x += piece.width;
+      }
+
+      this.#cursor.y -= height;
+      line = [];
+      lineWidth = 0;
+    };
+
+    const place = (piece: Piece): void => {
+      const spaceBefore = line.length === 0 ? 0 : piece.spaceBefore;
+      if (line.length > 0 && lineWidth + spaceBefore + piece.width > width) flushLine();
+      const adjusted = line.length === 0 ? { ...piece, spaceBefore: 0 } : piece;
+      line.push(adjusted);
+      lineWidth += adjusted.spaceBefore + adjusted.width;
+    };
+
+    const spaceWidth = font.widthOfTextAtSize(' ', size);
+
+    /**
+     * Si entre la pieza anterior y la siguiente había un blanco en el LaTeX.
+     *
+     * Se mira el origen y no se pone un hueco fijo porque las dos formas
+     * aparecen: `la ecuación $ax^2$` lleva espacio y `el $n$-ésimo` no. Un
+     * hueco constante junta la primera o separa la segunda, y ambas cosas se
+     * leen mal.
+     */
+    let pendingSpace = false;
+    const gap = (): number => (pendingSpace ? spaceWidth : 0);
+
+    for (const segment of splitLatexSegments(latex)) {
+      if (segment.kind === 'display') {
+        flushLine();
+        pendingSpace = false;
+        const drawing = renderMath(segment.value, true);
+        if (drawing === null) {
+          this.text(latexToReadableText(segment.value), { size, leading, color, indent });
+        } else {
+          this.#drawDisplayMath(drawing, size, color);
+        }
+        continue;
+      }
+
+      if (segment.kind === 'inline') {
+        const drawing = renderMath(segment.value, false);
+        if (drawing !== null && drawing.width * unit <= width) {
+          place({
+            kind: 'math',
+            drawing,
+            width: drawing.width * unit,
+            ascent: drawing.ascent * unit,
+            descent: drawing.descent * unit,
+            spaceBefore: gap(),
+          });
+        } else {
+          // Sin composición posible —o más ancha que la caja—, la fórmula sigue
+          // siendo texto: peor compuesta, pero legible y dentro del papel.
+          for (const word of latexToReadableText(segment.value).split(/\s+/)) {
+            if (word === '') continue;
+            place({ ...wordPiece(word, font, size, spaceWidth), spaceBefore: gap() });
+            pendingSpace = true;
+          }
+        }
+        // Que haya blanco tras la fórmula lo dice el trozo de prosa siguiente.
+        pendingSpace = false;
+        continue;
+      }
+
+      if (/^\s/.test(segment.value)) pendingSpace = true;
+      // La prosa conserva sus saltos: son los que separan párrafos y viñetas.
+      const paragraphs = toWinAnsi(latexToReadableText(segment.value)).split('\n');
+      paragraphs.forEach((paragraph, position) => {
+        if (position > 0) {
+          flushLine();
+          pendingSpace = false;
+          // Una línea vacía en el original es una separación de bloques: sin
+          // ella, el título de un apartado se pega al párrafo de arriba.
+          if (paragraph.trim() === '') this.space(leading / 2);
+        }
+        for (const word of paragraph.split(/\s+/)) {
+          if (word === '') continue;
+          for (const chunk of splitOverlongWord(word, font, size, width)) {
+            place({ ...wordPiece(chunk, font, size, spaceWidth), spaceBefore: gap() });
+            pendingSpace = true;
+          }
+        }
+      });
+      pendingSpace = /\s$/.test(segment.value);
+    }
+
+    flushLine();
+  }
+
+  /** Una fórmula suelta: su propio renglón, centrada y con aire alrededor. */
+  #drawDisplayMath(drawing: MathDrawing, size: number, color: ReturnType<typeof rgb>): void {
+    // Una fórmula de display puede no caber a lo ancho —una ecuación larga, una
+    // matriz—; se reduce lo justo en vez de salirse del papel.
+    const natural = size / MATH_UNITS_PER_EM;
+    const scale = Math.min(natural, CONTENT_WIDTH / drawing.width);
+    const ascent = drawing.ascent * scale;
+    const descent = drawing.descent * scale;
+    const height = ascent + descent + DISPLAY_MATH_MARGIN * 2;
+
+    this.#ensure(height);
+    const baseline = this.#cursor.y - DISPLAY_MATH_MARGIN - ascent;
+    const x = MARGIN + Math.max(0, (CONTENT_WIDTH - drawing.width * scale) / 2);
+    for (const path of drawing.paths) {
+      this.#cursor.page.drawSvgPath(path, { x, y: baseline, scale, color });
+    }
+    this.#cursor.y -= height;
+  }
+
   /** Numera las páginas al final, cuando ya se sabe cuántas hay. */
   paginate(label: string): void {
     const pages = this.#doc.getPages();
@@ -360,8 +699,15 @@ export interface FeedbackPdfInput {
   readonly submission: Submission;
   readonly activity: Activity;
   readonly correction: Correction;
-  /** Sólo en actividades con fichero; es de donde se reconstruye el original. */
+  /** Fichero original descargado del LMS, cuando el almacenamiento lo conserva. */
+  readonly originalFile?: FeedbackOriginalFile | null;
+  /** Respaldo textual cuando el fichero original no está o no se puede abrir. */
   readonly transcription: Transcription | null;
+}
+
+export interface FeedbackOriginalFile {
+  readonly bytes: Uint8Array;
+  readonly mediaType: string;
 }
 
 /** Nota efectiva, o `null` si la actividad no se puntúa. */
@@ -421,27 +767,35 @@ function renderCover(writer: PdfWriter, input: FeedbackPdfInput): void {
   writer.rule();
 }
 
-/**
- * Reproducción del original del alumno. MOCK: no hay PDF descargado, así que se
- * pinta la transcripción (o el texto del foro) como sustituto, etiquetado para
- * que nadie lo confunda con el escaneo real.
- */
-function renderOriginal(writer: PdfWriter, input: FeedbackPdfInput): void {
+/** Pinta la transcripción sólo como respaldo, nunca como si fuera el original. */
+function renderTranscribedOriginal(writer: PdfWriter, input: FeedbackPdfInput): void {
   const { activity, submission, transcription } = input;
   if (!hasStudentFile(activity.kind)) return;
 
   const pages = transcription?.pages ?? [];
-  if (pages.length === 0) return;
 
   writer.newPage();
-  writer.text('Original del alumno', { size: SIZE.heading, bold: true, leading: LEADING.heading });
+  writer.text('Transcripción del original', {
+    size: SIZE.heading,
+    bold: true,
+    leading: LEADING.heading,
+  });
   writer.text(
-    `Reproducción del documento entregado${
+    `Representación textual del documento entregado${
       submission.originalFilename === null ? '' : ` (${submission.originalFilename})`
-    }. El escaneo original se sirve desde Vega; aquí se incluye su transcripción.`,
+    }. No sustituye al fichero original.`,
     { size: SIZE.meta, color: MUTED, leading: LEADING.meta },
   );
   writer.rule();
+
+  if (pages.length === 0) {
+    writer.text('No hay una transcripción disponible para incluir en este documento.', {
+      size: SIZE.meta,
+      color: MUTED,
+      leading: LEADING.meta,
+    });
+    return;
+  }
 
   pages.forEach((page, index) => {
     if (index > 0) writer.newPage();
@@ -469,6 +823,113 @@ function renderOriginal(writer: PdfWriter, input: FeedbackPdfInput): void {
   }
 }
 
+type OriginalFileKind = 'pdf' | 'png' | 'jpeg';
+
+/** El contenido manda sobre el MIME: algunos LMS descargan todo como octet-stream. */
+function originalFileKind(file: FeedbackOriginalFile): OriginalFileKind | null {
+  const { bytes } = file;
+  if (
+    bytes.length >= 5 &&
+    bytes[0] === 0x25 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x44 &&
+    bytes[3] === 0x46 &&
+    bytes[4] === 0x2d
+  ) {
+    return 'pdf';
+  }
+  if (
+    bytes.length >= 8 &&
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47 &&
+    bytes[4] === 0x0d &&
+    bytes[5] === 0x0a &&
+    bytes[6] === 0x1a &&
+    bytes[7] === 0x0a
+  ) {
+    return 'png';
+  }
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return 'jpeg';
+  }
+
+  switch (file.mediaType.split(';', 1)[0]?.trim().toLowerCase()) {
+    case 'application/pdf':
+      return 'pdf';
+    case 'image/png':
+      return 'png';
+    case 'image/jpeg':
+    case 'image/jpg':
+      return 'jpeg';
+    default:
+      return null;
+  }
+}
+
+function appendImagePage(doc: PDFDocument, image: PDFImage): void {
+  const page = doc.addPage([A4.width, A4.height]);
+  const maxWidth = A4.width - MARGIN * 2;
+  const maxHeight = A4.height - MARGIN * 2;
+  const scale = Math.min(maxWidth / image.width, maxHeight / image.height);
+  const width = image.width * scale;
+  const height = image.height * scale;
+
+  page.drawImage(image, {
+    x: (A4.width - width) / 2,
+    y: (A4.height - height) / 2,
+    width,
+    height,
+  });
+}
+
+/**
+ * Añade el fichero original tal cual. Un fichero corrupto o con MIME incorrecto
+ * no debe impedir descargar el feedback: en ese caso el llamador usa el
+ * respaldo textual.
+ */
+async function appendOriginalFile(writer: PdfWriter, file: FeedbackOriginalFile): Promise<boolean> {
+  if (file.bytes.length === 0) return false;
+
+  try {
+    switch (originalFileKind(file)) {
+      case 'pdf': {
+        const source = await PDFDocument.load(file.bytes);
+        const indices = source.getPageIndices();
+        if (indices.length === 0) return false;
+        const pages = await writer.doc.copyPages(source, indices);
+        for (const page of pages) writer.doc.addPage(page);
+        return true;
+      }
+      case 'png': {
+        appendImagePage(writer.doc, await writer.doc.embedPng(file.bytes));
+        return true;
+      }
+      case 'jpeg': {
+        appendImagePage(writer.doc, await writer.doc.embedJpg(file.bytes));
+        return true;
+      }
+      default:
+        return false;
+    }
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Las páginas de corrección, con las fórmulas compuestas.
+ *
+ * El TeX en crudo llega a `richText`, no a `latexToReadableText`: es ahí donde
+ * se separa la prosa de la fórmula y donde cada una recibe su tratamiento. El
+ * texto plano sigue existiendo como respaldo dentro de `richText`, para las
+ * fórmulas que no se puedan componer.
+ *
+ * **Todos los apartados salen, también los que no tienen feedback**: un
+ * desglose con huecos es la única forma de que el alumno vea que un apartado se
+ * puntuó y con cuánto, aunque nadie escribiera nada sobre él.
+ */
 function renderCorrectionPages(writer: PdfWriter, input: FeedbackPdfInput): void {
   const { activity, correction } = input;
 
@@ -476,8 +937,12 @@ function renderCorrectionPages(writer: PdfWriter, input: FeedbackPdfInput): void
   writer.text('Corrección', { size: SIZE.heading, bold: true, leading: LEADING.heading });
   writer.rule();
 
-  const body = latexToReadableText(effectiveLatex(correction));
-  writer.text(body === '' ? 'La corrección no tiene contenido redactado.' : body);
+  const body = effectiveLatex(correction);
+  if (body.trim() === '') {
+    writer.text('La corrección no tiene contenido redactado.');
+  } else {
+    writer.richText(body);
+  }
 
   // Desglose por apartados: sólo tiene sentido si la actividad se puntúa.
   if (activity.graded && correction.items.length > 0) {
@@ -492,17 +957,26 @@ function renderCorrectionPages(writer: PdfWriter, input: FeedbackPdfInput): void
         { bold: true, leading: LEADING.body },
       );
       const feedback = item.teacherFeedback ?? item.aiFeedback;
-      if (feedback !== '') writer.text(feedback, { indent: 14 });
+      if (feedback.trim() === '') {
+        writer.text('Sin comentarios sobre este apartado.', {
+          indent: 14,
+          color: MUTED,
+          size: SIZE.meta,
+          leading: LEADING.meta,
+        });
+      } else {
+        writer.richText(feedback, { indent: 14 });
+      }
       writer.space(6);
     }
   }
 
   const summary = correction.teacherSummary ?? correction.aiSummary;
-  if (summary !== '') {
+  if (summary.trim() !== '') {
     writer.space(6);
     writer.rule();
     writer.text('Comentario global', { bold: true, leading: LEADING.heading });
-    writer.text(summary);
+    writer.richText(summary);
   }
 }
 
@@ -521,7 +995,14 @@ export async function buildFeedbackPdf(input: FeedbackPdfInput): Promise<Uint8Ar
 
   const writer = new PdfWriter(doc, fonts);
   renderCover(writer, input);
-  renderOriginal(writer, input);
+  const includesStudentFile = hasStudentFile(input.activity.kind);
+  const originalEmbedded =
+    !includesStudentFile || input.originalFile === null || input.originalFile === undefined
+      ? false
+      : await appendOriginalFile(writer, input.originalFile);
+  if (includesStudentFile && !originalEmbedded) {
+    renderTranscribedOriginal(writer, input);
+  }
   renderCorrectionPages(writer, input);
   writer.paginate(
     `Vega · ${input.submission.studentAlias ?? input.submission.studentRef} · ${input.activity.name}`,

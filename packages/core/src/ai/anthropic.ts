@@ -6,6 +6,7 @@ import type { TranscriptionFlag, TranscriptionPage } from '@vega/shared';
 import { estimateCostCents } from '../cost/pricing.js';
 import { gradePromptKey } from './provider.js';
 import type {
+  AiCallOptions,
   AiProvider,
   GradedItem,
   GradeInput,
@@ -155,6 +156,12 @@ const GradingAnswer = z.object({
   items: z.array(
     z.object({
       label: z.string(),
+      /**
+       * Máximo del apartado. Cuando la actividad trae un reparto configurado
+       * manda ese reparto; cuando no lo trae, el modelo propone uno que suma la
+       * nota máxima para que la interfaz no muestre cada apartado «sobre 10».
+       */
+      maxPoints: z.number(),
       aiPoints: z.number(),
       aiFeedback: z.string(),
       aiQuote: z.string().nullable(),
@@ -212,6 +219,9 @@ puntos que se te dan. Reglas:
 - El feedback va dirigido al alumno, en español de España, concreto y breve:
   qué hace bien, qué falla y cuántos puntos cuesta ("...; -0,25").
 - Nunca puntúes por encima del máximo del apartado.
+- Devuelve siempre \`maxPoints\` en cada apartado. Si no se proporciona un
+  reparto, propón uno razonable cuyos máximos sumen exactamente la nota máxima
+  de la actividad y explica esa hipótesis en \`teacherNotes\`.
 - Si la transcripción trae marcas [ILEGIBLE] o [DUDA] en ese apartado, baja la
   confianza: la decisión final es del profesor.
 - Si la actividad NO se puntúa, devuelve "items": [] y no inventes ninguna
@@ -280,7 +290,8 @@ export class AnthropicAiProvider implements AiProvider {
     return blocks;
   }
 
-  async transcribe(input: TranscribeInput): Promise<TranscribeResult> {
+  async transcribe(input: TranscribeInput, options?: AiCallOptions): Promise<TranscribeResult> {
+    options?.signal?.throwIfAborted();
     const attachments = await Promise.all(
       input.pages.map(async (page): Promise<Anthropic.ContentBlockParam[]> => [
         {
@@ -290,6 +301,7 @@ export class AnthropicAiProvider implements AiProvider {
         await toContentBlock(page),
       ]),
     );
+    options?.signal?.throwIfAborted();
 
     // Los números de página REALES del original, no cuántos bloques se mandan.
     // El PDF viaja troceado (`ai.pagesPerChunk`), así que `input.pages` son
@@ -332,7 +344,7 @@ export class AnthropicAiProvider implements AiProvider {
             ],
           },
         ],
-        }, { signal }).finalMessage()),
+        }, { signal }).finalMessage(), options?.signal),
       // Un examen entero de manuscrito pasado a LaTeX no cabe en topes
       // pequeños, y el razonamiento adaptativo consume del mismo presupuesto:
       // con 16k, seis páginas cortaban el JSON a mitad de una cadena. Se
@@ -363,8 +375,10 @@ export class AnthropicAiProvider implements AiProvider {
     };
   }
 
-  async grade(input: GradeInput): Promise<GradeResult> {
+  async grade(input: GradeInput, options?: AiCallOptions): Promise<GradeResult> {
+    options?.signal?.throwIfAborted();
     const originals = await Promise.all(input.document.map((page) => toContentBlock(page)));
+    options?.signal?.throwIfAborted();
     const allocation = input.pointsAllocation
       .map((entry) => `- ${entry.label} (${entry.maxPoints} puntos): ${entry.statement}`)
       .join('\n');
@@ -383,7 +397,9 @@ export class AnthropicAiProvider implements AiProvider {
           }`;
 
     const scoring = input.graded
-      ? `Reparto de puntos (nota máxima ${input.maxScore ?? 0}):\n${allocation}`
+      ? input.pointsAllocation.length > 0
+        ? `Reparto de puntos (nota máxima ${input.maxScore ?? 0}):\n${allocation}`
+        : `No hay reparto de puntos configurado. Propón un máximo para cada apartado y haz que la suma de todos los maxPoints sea exactamente ${input.maxScore ?? 0}.`
       : 'Esta actividad NO se puntúa: no devuelvas apartados ni nota.';
 
     // Los datos del alumno van con SU trabajo y no con el contexto de la
@@ -431,7 +447,7 @@ export class AnthropicAiProvider implements AiProvider {
         },
         system,
         messages: [{ role: 'user', content: [...originals, { type: 'text', text: `${about}AI_TEACHER_NOTES=${input.explanations === false ? 'false' : 'true'}\n\n${work}` }] }],
-        }, { signal }).finalMessage()),
+        }, { signal }).finalMessage(), options?.signal),
       Math.max(this.#maxTokens, 32_000, minTokensFor(effort)),
       maxOutputFor(model),
     );
@@ -441,14 +457,16 @@ export class AnthropicAiProvider implements AiProvider {
 
     // El máximo de cada apartado lo pone el profesor, no el modelo: lo
     // recuperamos del reparto en lugar de fiarnos de lo que devuelva la IA.
-    const maxByLabel = new Map(input.pointsAllocation.map((entry) => [entry.label, entry.maxPoints]));
+    const maxByLabel = new Map(
+      input.pointsAllocation.map((entry) => [allocationLabel(entry.label), entry.maxPoints]),
+    );
     const items: GradedItem[] = answer.items.map((item) => ({
       ...item,
       aiPoints: Math.max(0, item.aiPoints),
       aiQuotePage:
         item.aiQuotePage === null ? null : Math.max(1, Math.trunc(item.aiQuotePage)),
       confidence: clamp01(item.confidence),
-      maxPoints: maxByLabel.get(item.label) ?? 0,
+      maxPoints: maxByLabel.get(allocationLabel(item.label)) ?? Math.max(0, item.maxPoints),
     }));
 
     return {
@@ -464,7 +482,7 @@ export class AnthropicAiProvider implements AiProvider {
     };
   }
 
-  async triage(input: TriageInput): Promise<TriageResult> {
+  async triage(input: TriageInput, options?: AiCallOptions): Promise<TriageResult> {
     // Sin `thinking` ni `effort` a propósito: el modelo de triaje por defecto
     // es Haiku 4.5, de una generación que responde 400 a ambos parámetros.
     const response = await withStopRetry(
@@ -477,7 +495,7 @@ export class AnthropicAiProvider implements AiProvider {
           role: 'user',
           content: `Hilo previo:\n${input.thread.join('\n---\n') || '(vacío)'}\n\nMensaje nuevo:\n${input.message}`,
         }],
-      }, { signal }).finalMessage()),
+      }, { signal }).finalMessage(), options?.signal),
       1_000,
       maxOutputFor(this.#triageModel),
     );
@@ -491,7 +509,7 @@ export class AnthropicAiProvider implements AiProvider {
     };
   }
 
-  async verify(input: VerifyInput): Promise<VerifyResult> {
+  async verify(input: VerifyInput, options?: AiCallOptions): Promise<VerifyResult> {
     const transcript = input.transcription?.pages
       .map((page) => `Página ${page.page}:\n${page.latex}`)
       .join('\n\n') ?? '(sin transcripción; intervención de foro)';
@@ -510,7 +528,7 @@ export class AnthropicAiProvider implements AiProvider {
           role: 'user',
           content: `Trabajo:\n${transcript}\n\nApartados propuestos:\n${JSON.stringify(input.items)}\n\nResumen:\n${input.aiSummary}\n\nDocumento de corrección:\n${input.aiLatex}`,
         }],
-      }, { signal }).finalMessage()),
+      }, { signal }).finalMessage(), options?.signal),
       Math.min(this.#maxTokens, 8_000),
       maxOutputFor(model),
     );
@@ -530,17 +548,20 @@ export class AnthropicAiProvider implements AiProvider {
    * tubería responde, no se corrige nada. Nunca lanza:
    * un fallo de credencial se devuelve como `ok: false` con un mensaje accionable.
    */
-  async verifyConnection(): Promise<VerifyConnectionResult> {
+  async verifyConnection(options?: AiCallOptions): Promise<VerifyConnectionResult> {
     try {
-      const response = await withDeadline(this.#shortCallTimeoutMs, (signal) =>
-        this.#client.messages.create(
-          {
-            model: this.#gradingModel,
-            max_tokens: 8,
-            messages: [{ role: 'user', content: 'Responde solo con: OK' }],
-          },
-          { signal },
-        ),
+      const response = await withDeadline(
+        this.#shortCallTimeoutMs,
+        (signal) =>
+          this.#client.messages.create(
+            {
+              model: this.#gradingModel,
+              max_tokens: 8,
+              messages: [{ role: 'user', content: 'Responde solo con: OK' }],
+            },
+            { signal },
+          ),
+        options?.signal,
       );
       return {
         ok: true,
@@ -578,6 +599,14 @@ function positiveTimeout(value: number | undefined, fallback: number): number {
   return timeout;
 }
 
+/** «1.a» y «1a» deben encontrar el mismo máximo configurado. */
+function allocationLabel(label: string): string {
+  return label
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[^a-z0-9]/g, '');
+}
+
 /**
  * Deadline de la operación completa, no sólo de la conexión HTTP.
  *
@@ -588,10 +617,13 @@ function positiveTimeout(value: number | undefined, fallback: number): number {
 async function withDeadline<T>(
   timeoutMs: number,
   operation: (signal: AbortSignal) => Promise<T>,
+  externalSignal?: AbortSignal,
 ): Promise<T> {
+  externalSignal?.throwIfAborted();
   const controller = new AbortController();
   const seconds = Math.max(1, Math.ceil(timeoutMs / 1_000));
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let onExternalAbort: (() => void) | undefined;
   const timeout = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => {
       const error = new Error(
@@ -602,13 +634,28 @@ async function withDeadline<T>(
     }, timeoutMs);
     timer.unref?.();
   });
+  const canceled = new Promise<never>((_resolve, reject) => {
+    if (!externalSignal) return;
+    onExternalAbort = () => {
+      const reason = externalSignal.reason instanceof Error
+        ? externalSignal.reason
+        : new Error('La operación de Anthropic se ha cancelado.');
+      controller.abort(reason);
+      reject(reason);
+    };
+    externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+  });
 
   try {
-    // La carrera es una segunda defensa: hoy el SDK respeta `signal`, pero el
-    // deadline también debe vencer si una implementación inyectada lo ignora.
-    return await Promise.race([operation(controller.signal), timeout]);
+    // La carrera es una segunda defensa: el transporte recibe la señal y se
+    // aborta activamente; además dejamos de esperar aunque una implementación
+    // inyectada no la respete.
+    return await Promise.race([operation(controller.signal), timeout, canceled]);
   } finally {
     if (timer !== undefined) clearTimeout(timer);
+    if (externalSignal && onExternalAbort) {
+      externalSignal.removeEventListener('abort', onExternalAbort);
+    }
   }
 }
 

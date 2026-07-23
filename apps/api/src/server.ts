@@ -94,7 +94,7 @@ export async function buildServer(config: Config): Promise<BuiltServer> {
     ctx,
     // El planificador no tiene usuario detrás (`triggeredBy` a `null`) y corre
     // por tipo de actividad: sólo barre los tipos a los que les toca.
-    (kinds) => runBatch(ctx, null, app.log, undefined, kinds),
+    (kinds) => runBatch(ctx, null, app.log, { kinds, ingest: true }),
     app.log,
   );
 

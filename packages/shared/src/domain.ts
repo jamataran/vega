@@ -645,6 +645,19 @@ export const AppSettings = z.object({
     pagesPerChunk: z.number().int().positive(),
     logRetentionDays: z.number().int().positive(),
   }),
+  /** Qué recoge Vega del LMS y qué deja fuera antes de gastar un solo token. */
+  ingest: z.object({
+    /**
+     * Antigüedad máxima, en días, de una entrega para que Vega la corrija.
+     * `0` desactiva el límite.
+     *
+     * Existe porque al conectar un curso con historial, el primer proceso se
+     * encuentra meses de entregas que ya nadie va a leer —y muchas ni siquiera
+     * están bien en Moodle—. Corregirlas cuesta dinero real y llena la cola de
+     * ruido que tapa lo que sí importa.
+     */
+    maxAgeDays: z.number().int().min(0),
+  }),
   /**
    * De la **instalación**, no del profesor: a qué Moodle apunta Vega y con qué
    * conector habla. El token no está aquí — es de cada usuario
@@ -700,7 +713,11 @@ export const BatchRun = z.object({
   id: Id,
   startedAt: IsoDate,
   finishedAt: IsoDate.nullable(),
-  status: z.enum(['running', 'done', 'failed']),
+  /**
+   * `cancelled` es una decisión de una persona, no un fallo: distinguirlo de
+   * `failed` es lo que permite leer el panel sin investigar cada línea roja.
+   */
+  status: z.enum(['running', 'done', 'failed', 'cancelled']),
   /** Quién lo lanzó: `null` si fue el planificador. */
   triggeredBy: Id.nullable(),
   /**
@@ -726,6 +743,11 @@ export const BatchRun = z.object({
    * saber si es el token, una función que falta en Moodle o el LMS caído.
    */
   problems: z.array(BatchRunProblem),
+  /**
+   * Por qué se cerró el proceso, cuando hay algo que contar: quién lo paró, o
+   * que alcanzó el límite de doce horas. `null` en un final normal.
+   */
+  closedReason: z.string().nullable(),
   usage: UsageMetrics,
 });
 export type BatchRun = z.infer<typeof BatchRun>;

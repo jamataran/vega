@@ -1,7 +1,7 @@
 import { useMutation } from '@tanstack/react-query';
 import { Download, Undo2 } from 'lucide-react';
 import { effectiveLatex } from '@vega/shared';
-import type { Correction } from '@vega/shared';
+import type { ActivityKind, Correction } from '@vega/shared';
 import { api } from '@/lib/api';
 import { notify } from '@/lib/notify';
 import { formatPreciseEurosFromCents, formatTokens } from '@/lib/format';
@@ -13,6 +13,7 @@ import { Card } from '@/components/ui/card';
 import { AutoTextarea } from '@/components/ui/textarea';
 import { EmptyState } from '@/components/common/Feedback';
 import { ConfidenceBadge } from '@/components/common/status';
+import { Markdown } from '@/components/Markdown';
 import { PreviewEditor } from '@/components/PreviewEditor';
 import { CorrectionItemCard } from './CorrectionItemCard';
 
@@ -20,19 +21,25 @@ export function CorrectionView({
   correction,
   submissionId,
   feedbackName,
+  activityKind,
   graded,
   draft,
   readOnly,
+  published,
   onQuoteOpen,
 }: {
   correction: Correction | null;
   submissionId: string;
   /** Nombre de reserva del PDF si el servidor no propone ninguno. */
   feedbackName: string;
+  /** Determina qué campos publica realmente el conector de Moodle. */
+  activityKind: ActivityKind;
   /** Si la actividad se puntúa: sin nota no hay apartados que repartir. */
   graded: boolean;
   draft: CorrectionDraftController;
   readOnly: boolean;
+  /** La corrección ya salió de Vega hacia Moodle. */
+  published: boolean;
   onQuoteOpen: (page: number) => void;
 }) {
   const download = useMutation({
@@ -52,6 +59,9 @@ export function CorrectionView({
   const latexValue = draft.latex ?? correction.aiLatex;
   const usingAiLatex = draft.latex === null;
   const latexSaved = effectiveLatex(correction) === latexValue;
+  const summaryValue = draft.summary ?? correction.aiSummary;
+  const usingAiSummary = draft.summary === null;
+  const publishesAsForumReply = activityKind === 'forum';
 
   return (
     <div className="scroll-pane h-full px-4 py-4">
@@ -64,6 +74,31 @@ export function CorrectionView({
             </AlertDescription>
           </Alert>
         ) : null}
+
+        <Alert variant="info" role="note">
+          <AlertTitle>
+            {publishesAsForumReply
+              ? published
+                ? 'Respuesta publicada en Moodle'
+                : 'Respuesta que se publicará en Moodle'
+              : published
+                ? 'Contenido publicado en Moodle'
+                : 'Contenido para Moodle'}
+          </AlertTitle>
+          <AlertDescription className="mt-1">
+            {publishesAsForumReply
+              ? published
+                ? 'Moodle recibió el contenido de «Respuesta en Moodle» como contestación en el foro. El resumen, el desglose, el PDF y las notas para el profesor no se enviaron.'
+                : 'Moodle recibirá el contenido de «Respuesta en Moodle» como contestación en el foro. El resumen, el desglose, el PDF y las notas para el profesor no se envían.'
+              : graded
+                ? published
+                  ? 'Moodle recibió el comentario global, el feedback y la puntuación de cada apartado, y la nota total. El PDF se descarga aparte desde Vega y las notas para el profesor no se enviaron.'
+                  : 'Moodle recibirá el comentario global, el feedback y la puntuación de cada apartado, y la nota total. El PDF se descarga aparte desde Vega y las notas para el profesor no se envían.'
+                : published
+                  ? 'Moodle recibió el comentario global. El PDF se descarga aparte desde Vega y las notas para el profesor no se enviaron.'
+                  : 'Moodle recibirá el comentario global. El PDF se descarga aparte desde Vega y las notas para el profesor no se envían.'}
+          </AlertDescription>
+        </Alert>
 
         <Card asChild>
           <section className="p-4">
@@ -84,24 +119,42 @@ export function CorrectionView({
               <span className="font-mono text-ui text-muted-foreground">{correction.model}</span>
             </div>
 
-            <label className="eyebrow mb-1.5 block" htmlFor="teacher-summary">
-              Resumen para el alumno
-            </label>
+            <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
+              <label className="eyebrow block" htmlFor="teacher-summary">
+                {publishesAsForumReply ? 'Resumen interno' : 'Comentario global en Moodle'}
+              </label>
+              {!readOnly && !usingAiSummary ? (
+                <Button size="sm" variant="ghost" onClick={() => draft.restoreSummary()}>
+                  <Undo2 aria-hidden="true" />
+                  Restaurar propuesta de la IA
+                </Button>
+              ) : null}
+            </div>
             <AutoTextarea
               id="teacher-summary"
-              value={draft.summary ?? ''}
-              placeholder={correction.aiSummary || 'Escribe un resumen de la corrección…'}
+              value={summaryValue}
+              placeholder="Escribe un comentario global…"
               disabled={readOnly}
               minRows={3}
               aria-describedby="teacher-summary-hint"
-              onChange={(event) =>
-                draft.setSummary(event.target.value === '' ? null : event.target.value)
-              }
+              onChange={(event) => draft.setSummary(event.target.value)}
             />
             <p id="teacher-summary-hint" className="mt-1.5 text-ui text-muted-foreground">
-              {draft.summary === null
-                ? 'Se enviará el resumen de la IA. Escribe aquí para sustituirlo.'
-                : 'Has reescrito el resumen.'}
+              {publishesAsForumReply
+                ? usingAiSummary
+                  ? 'Propuesta de la IA para la revisión interna. No se publica en el foro.'
+                  : 'Resumen revisado para uso interno. No se publica en el foro.'
+                : published
+                  ? usingAiSummary
+                    ? 'Se publicó la propuesta de la IA.'
+                    : 'Se publicó la versión revisada por el profesor.'
+                  : readOnly
+                    ? usingAiSummary
+                      ? 'Propuesta de la IA validada. Se publicará al confirmar la publicación.'
+                      : 'Versión del profesor validada. Se publicará al confirmar la publicación.'
+                  : usingAiSummary
+                    ? 'Se publicará esta propuesta de la IA. Puedes revisarla antes de validar.'
+                    : 'Has revisado el comentario global. Se publicará tu versión.'}
             </p>
           </section>
         </Card>
@@ -111,6 +164,8 @@ export function CorrectionView({
               <CorrectionItemCard
                 key={item.id}
                 item={item}
+                publishesToMoodle={!publishesAsForumReply}
+                published={published}
                 onQuoteOpen={onQuoteOpen}
                 readOnly={readOnly}
                 onPointsChange={(points) => draft.setPoints(item.id, points)}
@@ -138,22 +193,36 @@ export function CorrectionView({
         ) : null}
 
         {correction.teacherNotes ? (
-          <Alert variant="info"><AlertTitle>Notas para el profesor</AlertTitle><AlertDescription className="mt-1">{correction.teacherNotes}</AlertDescription></Alert>
+          <Alert variant="info" role="note">
+            <AlertTitle>Notas para el profesor</AlertTitle>
+            <AlertDescription className="mt-1 overflow-x-auto [overflow-wrap:anywhere]">
+              <p className="mb-2">Información interna: no se publica ni se incluye en el PDF.</p>
+              <Markdown>{correction.teacherNotes}</Markdown>
+            </AlertDescription>
+          </Alert>
         ) : null}
 
         <Card asChild>
           <section className="p-4">
             <PreviewEditor
-              label="Documento de corrección"
+              label={publishesAsForumReply ? 'Respuesta en Moodle' : 'Contenido del PDF de corrección'}
               mode="latex"
               value={latexValue}
               minHeight="16rem"
               disabled={readOnly}
               onChange={(value) => draft.setLatex(value)}
               hint={
-                usingAiLatex
-                  ? 'Propuesta de la IA. Edítala para reescribir lo que verá el alumno.'
-                  : 'Has reescrito el documento: se publicará tu versión.'
+                publishesAsForumReply
+                  ? published
+                    ? usingAiLatex
+                      ? 'Se publicó la propuesta de la IA como respuesta en el foro.'
+                      : 'Se publicó tu versión como respuesta en el foro.'
+                    : usingAiLatex
+                      ? 'Propuesta de la IA. Se publicará como respuesta en el foro cuando la valides y publiques.'
+                      : 'Has revisado la respuesta. Se publicará tu versión en el foro.'
+                  : usingAiLatex
+                    ? 'Propuesta de la IA para el PDF descargable. No forma parte del comentario de Moodle.'
+                    : 'Has reescrito el contenido del PDF descargable. No forma parte del comentario de Moodle.'
               }
             />
 

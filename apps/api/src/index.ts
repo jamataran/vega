@@ -5,6 +5,7 @@ import { bootstrap } from './db/bootstrap.js';
 import { runMigrations } from './db/migrate.js';
 import { recoverInterruptedWork } from './batch/recovery.js';
 import { buildServer } from './server.js';
+import { getSettings } from './settings/service.js';
 
 /**
  * Punto de entrada del API.
@@ -53,12 +54,18 @@ try {
   await migrationSql.end();
 }
 
-const { app } = await buildServer(config);
+const { app, ctx } = await buildServer(config);
 
 try {
+  const settings = await getSettings(ctx);
   await app.listen({ port: config.API_PORT, host: config.API_HOST });
   app.log.info(
-    `Vega API lista · proveedor de IA: ${config.AI_PROVIDER} · conector LMS: ${config.LMS_CONNECTOR}`,
+    {
+      aiProvider: settings.anthropic.provider,
+      aiTransport: settings.ai.transport,
+      lmsConnector: settings.moodle.connector,
+    },
+    'Vega API lista con la configuración efectiva',
   );
 } catch (error) {
   app.log.error(error);

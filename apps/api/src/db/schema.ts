@@ -305,7 +305,10 @@ export const batchRuns = pgTable('batch_runs', {
   id: uuid('id').primaryKey().defaultRandom(),
   startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
   finishedAt: timestamp('finished_at', { withTimezone: true }),
-  status: text('status').$type<'running' | 'done' | 'failed'>().notNull().default('running'),
+  status: text('status')
+    .$type<'running' | 'done' | 'failed' | 'cancelled'>()
+    .notNull()
+    .default('running'),
   /** `null` si lo lanzó el planificador y no una persona. */
   triggeredBy: uuid('triggered_by').references(() => users.id, { onDelete: 'set null' }),
   /** Tipos de actividad que barrió: el planificador corre por tipo. */
@@ -327,6 +330,8 @@ export const batchRuns = pgTable('batch_runs', {
   outputTokens: integer('output_tokens').notNull().default(0),
   cachedInputTokens: integer('cached_input_tokens').notNull().default(0),
   costCents: numeric('cost_cents', { precision: 10, scale: 4 }).notNull().default('0'),
+  /** Por qué se cerró el proceso, cuando hay algo que contar. */
+  closedReason: text('closed_reason'),
 });
 
 export const gradingContextVersions = pgTable(

@@ -487,6 +487,11 @@ export const UpdateSettingsRequest = z.object({
       logRetentionDays: z.number().int().positive().optional(),
     })
     .optional(),
+  ingest: z
+    .object({
+      maxAgeDays: z.number().int().min(0).optional(),
+    })
+    .optional(),
   moodle: z
     .object({
       baseUrl: z.string().optional(),
@@ -740,6 +745,12 @@ export const routes = {
   validate: (id: string) => `/api/submissions/${id}/validate`,
   publish: (id: string) => `/api/submissions/${id}/publish`,
   reprocess: (id: string) => `/api/submissions/${id}/reprocess`,
+  /**
+   * Tira lo que propuso la IA y devuelve la entrega a la cola sin corregir.
+   * Es distinto de reprocesar: reprocesar vuelve a llamar al modelo ahora, y
+   * esto sólo deja la entrega esperando al siguiente proceso.
+   */
+  discardCorrection: (id: string) => `/api/submissions/${id}/discard`,
   park: (id: string) => `/api/submissions/${id}/park`,
   original: (id: string) => `/api/submissions/${id}/original`,
   /** Descarga del PDF de feedback (original + páginas de corrección). */
@@ -797,4 +808,6 @@ export const routes = {
   costBreakdown: '/api/stats/cost',
   batchRuns: '/api/batch/runs',
   triggerBatch: '/api/batch/run',
+  /** Para un proceso en marcha. Sólo admin, igual que lanzarlo. */
+  cancelBatchRun: (id: string) => `/api/batch/runs/${id}/cancel`,
 } as const;

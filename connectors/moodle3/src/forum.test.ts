@@ -63,22 +63,38 @@ function comoMensajeModerno(post: Record<string, unknown>): Record<string, unkno
 }
 
 /**
+ * Cómo se comporta el Moodle de laboratorio. `catalogo` es lo que el sitio
+ * **anuncia** en `core_webservice_get_site_info`; `autorizadas`, lo que de
+ * verdad deja llamar. Que puedan diferir no es un capricho del test: es el
+ * fallo del piloto, un sitio que anunciaba una función y la rechazaba al
+ * llamarla porque el usuario del token no tenía acceso a ese foro.
+ */
+interface Laboratorio {
+  readonly dialecto?: Dialecto;
+  readonly catalogo?: readonly string[];
+  readonly autorizadas?: readonly string[];
+}
+
+/**
  * Moodle de laboratorio: enruta por `wsfunction` igual que el servidor real,
  * que distingue las llamadas por ese parámetro y no por la URL. Sólo contesta
- * a las funciones de su catálogo; al resto responde con el `accessexception`
+ * a las funciones autorizadas; al resto responde con el `accessexception`
  * que devolvería un Moodle de verdad, para que llamar al dialecto equivocado
  * falle aquí igual de fuerte que en un aula.
  */
 function moodleCon(
   paginas: readonly (readonly Debate[])[],
-  dialecto: Dialecto = 'moderno',
+  opciones: Dialecto | Laboratorio = 'moderno',
 ): {
   connector: Moodle3Connector;
   llamadas: URLSearchParams[];
 } {
+  const config: Laboratorio = typeof opciones === 'string' ? { dialecto: opciones } : opciones;
+  const dialecto = config.dialecto ?? 'moderno';
+  const catalogo = config.catalogo ?? CATALOGO[dialecto];
   const llamadas: URLSearchParams[] = [];
   const debates = paginas.flat();
-  const permitidas = new Set(CATALOGO[dialecto]);
+  const permitidas = new Set(config.autorizadas ?? catalogo);
 
   const fetchImpl: typeof fetch = (_url, init) => {
     const params = new URLSearchParams(String(init?.body));
@@ -92,7 +108,7 @@ function moodleCon(
         sitename: 'Academia Hipatia',
         username: 'profesora',
         userid: 3,
-        functions: CATALOGO[dialecto].map((name) => ({ name })),
+        functions: catalogo.map((name) => ({ name })),
       };
     } else if (wsfunction.startsWith('mod_forum_') && !permitidas.has(wsfunction)) {
       payload = {
@@ -330,6 +346,74 @@ test('un catálogo sin las funciones modernas manda al dialecto anterior a 3.7',
     undefined,
     'a un Moodle sin la función moderna no hay que llamarla: contesta accessexception',
   );
+});
+
+/** Las cuatro funciones de foro anunciadas, que es lo que declaraba el piloto. */
+const CATALOGO_COMPLETO = [...CATALOGO.moderno, ...CATALOGO.antiguo];
+
+test('un sitio que anuncia la función moderna de mensajes pero la rechaza cae a la anterior', async () => {
+  // El fallo del piloto exacto: el catálogo declaraba todas las mod_forum_get_*
+  // y aun así `mod_forum_get_discussion_posts` contestaba accessexception, de
+  // modo que el foro entero se caía. Los debates sí se leían: el dialecto no
+  // puede decidirse en bloque.
+  const { connector, llamadas } = moodleCon(
+    [[{ id: 900, posts: [mensaje({ id: 9000, userid: 6, discussion: 900 })] }]],
+    {
+      catalogo: CATALOGO_COMPLETO,
+      autorizadas: ['mod_forum_get_forum_discussions', 'mod_forum_get_forum_discussion_posts'],
+    },
+  );
+
+  const entregas = await connector.listSubmissions(FORO);
+
+  assert.equal(entregas.length, 1, 'la duda pendiente tiene que llegar igual');
+  assert.equal(entregas[0]?.ref.remoteId, '42:900:9000');
+  assert.ok(
+    llamadas.some((params) => params.get('wsfunction') === 'mod_forum_get_forum_discussions'),
+    'los debates se siguen leyendo con la función moderna, que sí está autorizada',
+  );
+  assert.ok(
+    llamadas.some((params) => params.get('wsfunction') === 'mod_forum_get_forum_discussion_posts'),
+    'los mensajes tienen que reintentarse con la función anterior a 3.7',
+  );
+});
+
+test('el dialecto que funciona se memoriza y no se paga un intento fallido por debate', async () => {
+  const { connector, llamadas } = moodleCon(
+    [[debateSinResponder(1), debateSinResponder(2), debateSinResponder(3)]],
+    {
+      catalogo: CATALOGO_COMPLETO,
+      autorizadas: ['mod_forum_get_forum_discussions', 'mod_forum_get_forum_discussion_posts'],
+    },
+  );
+
+  const entregas = await connector.listSubmissions(FORO);
+
+  assert.equal(entregas.length, 3);
+  const rechazadas = llamadas.filter(
+    (params) => params.get('wsfunction') === 'mod_forum_get_discussion_posts',
+  );
+  assert.equal(
+    rechazadas.length,
+    1,
+    'el intento con la función que no vale se hace una vez, no una por debate',
+  );
+});
+
+test('si Moodle rechaza las dos funciones de mensajes, el aviso nombra las dos', async () => {
+  const { connector } = moodleCon(
+    [[{ id: 700, posts: [mensaje({ id: 7000, userid: 4, discussion: 700 })] }]],
+    { catalogo: CATALOGO_COMPLETO, autorizadas: ['mod_forum_get_forum_discussions'] },
+  );
+
+  // Nombrar sólo una manda a añadirla al servicio, comprobar que sigue fallando
+  // y volver a empezar. Con las dos delante, el profesor sabe qué mirar.
+  await assert.rejects(connector.listSubmissions(FORO), (error: Error) => {
+    assert.match(error.message, /mod_forum_get_discussion_posts/);
+    assert.match(error.message, /mod_forum_get_forum_discussion_posts/);
+    assert.equal((error as { code?: string }).code, 'LMS_AUTH');
+    return true;
+  });
 });
 
 test('una respuesta borrada no cuenta como respuesta', async () => {

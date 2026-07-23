@@ -44,6 +44,11 @@ En la misma pantalla, sección «Motor de IA»:
 - **Umbral de confianza** (0,75 por defecto): por debajo, la corrección queda señalada en la cola.
 - **Páginas por bloque** (4 por defecto): en cuántas páginas se trocea el PDF para la lectura.
 - **Días de registro** (180): cuánto se conserva el registro técnico de llamadas a la IA.
+- **Antigüedad máxima** (0 = sin límite): días de antigüedad a partir de los cuales una entrega ya
+  no se corrige. Al conectar un curso con historial, el primer proceso se encuentra meses de
+  entregas que nadie va a leer y que cuestan dinero real; con esto no se descargan siquiera. Lo que
+  ya estuviera en la cola y supere el límite se **aparca** con el motivo escrito, no se borra: si
+  resulta que sí la querías, un «Volver a procesar» la recupera.
 
 ## 4. Ajustes → Moodle, correo y planificación
 

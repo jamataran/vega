@@ -28,6 +28,7 @@ import {
   MoodleClient,
   SORTORDER_CREATED_ASC,
   WS_FUNCTIONS,
+  moodleErrorcodeOf,
   normalizeModernPost,
 } from './api.js';
 import type {
@@ -76,6 +77,46 @@ const SUBMISSION_FILE_AREA = 'submission_files';
  */
 const MAX_PROBE_COURSES = 25;
 
+/**
+ * Las dos lecturas de foro que Vega necesita. Cada una tiene su propia pareja
+ * de funciones y se resuelve por separado: ver `#forumDialectFor`.
+ */
+type ForumOperation = 'discussions' | 'posts';
+
+/** Moodle 3.7+ (`modern`) o el juego de funciones anterior (`legacy`). */
+type ForumDialect = 'modern' | 'legacy';
+
+const FORUM_FUNCTIONS: Readonly<Record<ForumOperation, { modern: string; legacy: string }>> = {
+  discussions: {
+    modern: WS_FUNCTIONS.getForumDiscussions,
+    legacy: WS_FUNCTIONS.getForumDiscussionsLegacy,
+  },
+  posts: {
+    modern: WS_FUNCTIONS.getDiscussionPosts,
+    legacy: WS_FUNCTIONS.getDiscussionPostsLegacy,
+  },
+};
+
+const FORUM_OPERATION_LABEL: Readonly<Record<ForumOperation, string>> = {
+  discussions: 'leer los debates de un foro',
+  posts: 'leer los mensajes de un debate',
+};
+
+/**
+ * Qué generación declara el catálogo del token para una operación de foro.
+ * `undefined` cuando no declara ninguna de las dos: entonces el catálogo no
+ * dice nada y hay que decidir por otra vía.
+ */
+function declaredForumDialect(
+  names: ReadonlySet<string>,
+  operation: ForumOperation,
+): ForumDialect | undefined {
+  const { modern, legacy } = FORUM_FUNCTIONS[operation];
+  if (names.has(modern)) return 'modern';
+  if (names.has(legacy)) return 'legacy';
+  return undefined;
+}
+
 const READ_NOT_REHEARSED =
   'Está en el servicio web del token. No se ha podido ensayar con una llamada real porque este ' +
   'token aún no ve ningún foro o debate con el que probarla.';
@@ -118,7 +159,12 @@ export class Moodle3Connector implements LmsConnector {
   /** Cache por sesión: `remoteId` → URL del fichero, para no re-listar al descargar. */
   readonly #fileUrls = new Map<string, string>();
   #siteInfo: Promise<GetSiteInfoResponse> | undefined;
-  #forumDialect: 'modern' | 'legacy' | undefined;
+  /**
+   * Un dialecto **por operación**, no uno para todo el foro: hay sitios que
+   * ofrecen la lista moderna de debates y no la moderna de mensajes. Ver
+   * `#forumDialectFor`.
+   */
+  readonly #forumDialect = new Map<ForumOperation, ForumDialect>();
 
   /**
    * `fetchImpl` sólo lo usan las pruebas. Sin él no habría forma de ejercitar
@@ -350,11 +396,8 @@ export class Moodle3Connector implements LmsConnector {
     // anterior, según el catálogo del token): dar el verde con una pareja de
     // funciones y leer luego con otra es justo la clase de mentira que este
     // parte existe para evitar.
-    const dialect = await this.#resolveForumDialect();
-    const discussionsFn =
-      dialect === 'legacy' ? WS_FUNCTIONS.getForumDiscussionsLegacy : WS_FUNCTIONS.getForumDiscussions;
-    const postsFn =
-      dialect === 'legacy' ? WS_FUNCTIONS.getDiscussionPostsLegacy : WS_FUNCTIONS.getDiscussionPosts;
+    const discussionsDialect = await this.#forumDialectFor('discussions');
+    const discussionsFn = FORUM_FUNCTIONS.discussions[discussionsDialect];
 
     const forumId = forums?.[0]?.id;
     let discussions: GetForumDiscussionsResponse | undefined;
@@ -371,12 +414,16 @@ export class Moodle3Connector implements LmsConnector {
             discussionsFn,
             'Leer los debates del foro',
             async () => {
-              discussions = await this.#client.call(
-                discussionsFn,
-                dialect === 'legacy'
-                  ? { forumid: forumId, page: 0, perpage: 1, sortby: 'timemodified', sortdirection: 'ASC' }
-                  : { forumid: forumId, page: 0, perpage: 1, sortorder: SORTORDER_CREATED_ASC },
-                GetForumDiscussionsResponse,
+              // Con el mismo reintento que la ingesta: un parte que aprueba con
+              // una función y luego lee con otra no sirve para diagnosticar.
+              discussions = await this.#withForumDialect('discussions', (dialect) =>
+                this.#client.call(
+                  FORUM_FUNCTIONS.discussions[dialect],
+                  dialect === 'legacy'
+                    ? { forumid: forumId, page: 0, perpage: 1, sortby: 'timemodified', sortdirection: 'ASC' }
+                    : { forumid: forumId, page: 0, perpage: 1, sortorder: SORTORDER_CREATED_ASC },
+                  GetForumDiscussionsResponse,
+                ),
               );
               return discussions;
             },
@@ -390,6 +437,10 @@ export class Moodle3Connector implements LmsConnector {
     const firstDiscussion = discussions?.discussions[0];
     const discussionId =
       firstDiscussion === undefined ? undefined : (firstDiscussion.discussion ?? firstDiscussion.id);
+    // Se resuelve **después** de leer los debates: si aquella llamada tuvo que
+    // caer al otro dialecto, la memoria ya lo sabe y aquí no se hereda una
+    // suposición equivocada. Los mensajes se resuelven aparte de todos modos.
+    const postsFn = FORUM_FUNCTIONS.posts[await this.#forumDialectFor('posts')];
     checks.push(
       discussionId === undefined
         ? this.#declared(
@@ -542,19 +593,25 @@ export class Moodle3Connector implements LmsConnector {
   }
 
   /**
-   * Con qué pareja de funciones se leen los foros de este Moodle.
+   * Con qué función se lee **esta** operación de foro en este Moodle.
    *
    * Las funciones de foro cambiaron en Moodle 3.7, y los sitios posteriores ya
    * no ofrecen las antiguas en el selector de funciones del servicio web —fue
    * exactamente el fallo del piloto: un Moodle 3.11 donde era imposible añadir
    * `mod_forum_get_forum_discussions_paginated` y los foros caían enteros con
    * `accessexception`—. Se decide con el catálogo de funciones del token:
-   * moderno salvo que el sitio sólo declare las antiguas. Sin catálogo se asume
-   * moderno, que es lo que existe desde 3.7; si ni siquiera hay identificación,
-   * la llamada de verdad ya dirá qué falla, y con el nombre de la función buena.
+   * moderno salvo que el sitio sólo declare la antigua. Sin catálogo se asume
+   * moderno, que es lo que existe desde 3.7.
+   *
+   * La decisión es **por operación** porque el catálogo de un servicio web se
+   * rellena función a función y no hay nada que obligue a añadir la pareja
+   * entera: en el piloto convivían `mod_forum_get_forum_discussions` (moderna,
+   * autorizada) y `mod_forum_get_discussion_posts` (moderna, sin autorizar), y
+   * elegir el dialecto mirando sólo la primera condenaba el foro completo.
    */
-  async #resolveForumDialect(): Promise<'modern' | 'legacy'> {
-    if (this.#forumDialect !== undefined) return this.#forumDialect;
+  async #forumDialectFor(operation: ForumOperation): Promise<ForumDialect> {
+    const known = this.#forumDialect.get(operation);
+    if (known !== undefined) return known;
 
     let declared: readonly { name: string }[] | undefined;
     try {
@@ -565,12 +622,64 @@ export class Moodle3Connector implements LmsConnector {
     if (declared === undefined) return 'modern';
 
     const names = new Set(declared.map((entry) => entry.name));
-    this.#forumDialect =
-      !names.has(WS_FUNCTIONS.getForumDiscussions) &&
-      names.has(WS_FUNCTIONS.getForumDiscussionsLegacy)
-        ? 'legacy'
-        : 'modern';
-    return this.#forumDialect;
+    // Si el catálogo no declara ninguna de las dos funciones de esta operación,
+    // manda la generación que revele la otra: en un Moodle anterior a 3.7 la
+    // función moderna de mensajes ni siquiera existe, y mandar a añadirla al
+    // servicio es mandar a buscar algo que no está en la lista.
+    const resolved =
+      declaredForumDialect(names, operation) ??
+      declaredForumDialect(names, operation === 'discussions' ? 'posts' : 'discussions') ??
+      'modern';
+    this.#forumDialect.set(operation, resolved);
+    return resolved;
+  }
+
+  /**
+   * Ejecuta una operación de foro y, si el dialecto elegido resulta no valer,
+   * **reintenta con el otro** antes de darse por vencida.
+   *
+   * El catálogo del token es una pista, no una garantía: dice qué funciones
+   * están en el servicio, no si el usuario tiene la capacidad de usarlas en ese
+   * foro concreto. Un `accessexception` puede venir de cualquiera de las dos
+   * cosas y, en ambos casos, la función de la otra generación es la única
+   * alternativa que queda. Sólo se reintenta ante un fallo de acceso: si Moodle
+   * está caído o ha devuelto algo con otra forma, repetir con otro nombre de
+   * función es ruido.
+   *
+   * El dialecto que funciona se memoriza para no pagar el intento fallido en
+   * cada debate de cada foro.
+   */
+  async #withForumDialect<T>(
+    operation: ForumOperation,
+    run: (dialect: ForumDialect) => Promise<T>,
+  ): Promise<T> {
+    const preferred = await this.#forumDialectFor(operation);
+    try {
+      const result = await run(preferred);
+      this.#forumDialect.set(operation, preferred);
+      return result;
+    } catch (error) {
+      const alternate: ForumDialect = preferred === 'modern' ? 'legacy' : 'modern';
+      if (moodleErrorcodeOf(error) !== 'accessexception') throw error;
+
+      try {
+        const result = await run(alternate);
+        this.#forumDialect.set(operation, alternate);
+        return result;
+      } catch (fallbackError) {
+        if (moodleErrorcodeOf(fallbackError) !== 'accessexception') throw fallbackError;
+        // Ninguna de las dos vale: el mensaje tiene que nombrar las dos, o el
+        // profesor añade al servicio la que le dijimos y sigue sin funcionar.
+        const { modern, legacy } = FORUM_FUNCTIONS[operation];
+        throw new LmsAuthError(
+          `Moodle ha rechazado las dos funciones que Vega sabe usar para ${FORUM_OPERATION_LABEL[operation]}: ` +
+            `«${modern}» (Moodle 3.7+) y «${legacy}» (anterior). Añade una de las dos al servicio web del token en ` +
+            'Administración del sitio → Servidor → Servicios web → Servicios externos → Funciones, y comprueba que ' +
+            'el usuario dueño del token tenga acceso al foro y la capacidad webservice/rest:use.',
+          { cause: error },
+        );
+      }
+    }
   }
 
   /**
@@ -861,13 +970,15 @@ export class Moodle3Connector implements LmsConnector {
    * debate salga dos veces o ninguna.
    */
   async #listDiscussions(forumId: number): Promise<MoodleForumDiscussion[]> {
-    const dialect = await this.#resolveForumDialect();
     const all: MoodleForumDiscussion[] = [];
 
     for (let page = 0; page < MAX_DISCUSSION_PAGES; page += 1) {
-      const { discussions } =
+      // El reintento envuelve **una página**, no el recorrido entero: si el
+      // dialecto falla lo hará en la primera, y a partir de ahí el que funciona
+      // ya está memorizado y las siguientes no pagan nada.
+      const { discussions } = await this.#withForumDialect('discussions', (dialect) =>
         dialect === 'legacy'
-          ? await this.#client.call(
+          ? this.#client.call(
               WS_FUNCTIONS.getForumDiscussionsLegacy,
               {
                 forumid: forumId,
@@ -878,7 +989,7 @@ export class Moodle3Connector implements LmsConnector {
               },
               GetForumDiscussionsResponse,
             )
-          : await this.#client.call(
+          : this.#client.call(
               WS_FUNCTIONS.getForumDiscussions,
               {
                 forumid: forumId,
@@ -887,7 +998,8 @@ export class Moodle3Connector implements LmsConnector {
                 sortorder: SORTORDER_CREATED_ASC,
               },
               GetForumDiscussionsResponse,
-            );
+            ),
+      );
 
       all.push(...discussions);
       // Una página incompleta es la última: Moodle no dice cuántos debates hay
@@ -903,23 +1015,25 @@ export class Moodle3Connector implements LmsConnector {
    * la regla de producto del foro se decide siempre sobre la misma forma.
    */
   async #discussionPosts(discussionId: number): Promise<MoodleForumPost[]> {
-    if ((await this.#resolveForumDialect()) === 'legacy') {
-      const { posts } = await this.#client.call(
-        WS_FUNCTIONS.getDiscussionPostsLegacy,
-        { discussionid: discussionId },
-        GetDiscussionPostsResponse,
-      );
-      return [...posts];
-    }
+    return this.#withForumDialect('posts', async (dialect) => {
+      if (dialect === 'legacy') {
+        const { posts } = await this.#client.call(
+          WS_FUNCTIONS.getDiscussionPostsLegacy,
+          { discussionid: discussionId },
+          GetDiscussionPostsResponse,
+        );
+        return [...posts];
+      }
 
-    const { posts } = await this.#client.call(
-      WS_FUNCTIONS.getDiscussionPosts,
-      { discussionid: discussionId },
-      GetModernDiscussionPostsResponse,
-    );
-    return posts
-      .map(normalizeModernPost)
-      .filter((post): post is MoodleForumPost => post !== null);
+      const { posts } = await this.#client.call(
+        WS_FUNCTIONS.getDiscussionPosts,
+        { discussionid: discussionId },
+        GetModernDiscussionPostsResponse,
+      );
+      return posts
+        .map(normalizeModernPost)
+        .filter((post): post is MoodleForumPost => post !== null);
+    });
   }
 
   /**

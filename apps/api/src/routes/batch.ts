@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, lt, sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import {
   TriggerBatchRequest,
@@ -19,9 +19,11 @@ import { currentUser } from '../auth/plugin.js';
 import { aiProviderForInstall } from '../ai/factory.js';
 import { withAiLedger } from '../ai/ledger.js';
 import { schema } from '../db/client.js';
-import { toBatchRun } from '../db/mappers.js';
-import { conflict, parseOrThrow } from '../http/errors.js';
-import { ingestAll, type IngestReport } from '../ingest/run.js';
+import { toActivity, toBatchRun, toCorrection, toSubmission, toTranscription } from '../db/mappers.js';
+import { conflict, notFound, parseOrThrow } from '../http/errors.js';
+import { ingestAll, ingestCutoff, type IngestReport } from '../ingest/run.js';
+import { connectorForUser } from '../lms/factory.js';
+import { publishToLms, recordPublication } from '../publish/publish.js';
 import { FileStore } from '../storage/files.js';
 import { getSettings } from '../settings/service.js';
 import { readActiveContext } from '../contexts/service.js';
@@ -49,6 +51,12 @@ import { listActivePrompts } from '../prompts/service.js';
 
 /** Tope por ejecución: evita que un lote manual se coma la tarde. */
 const MAX_PER_RUN = 25;
+
+/** Ningún proceso puede monopolizar el ejecutor más de doce horas. */
+export const BATCH_MAX_RUNTIME_MS = 12 * 60 * 60_000;
+
+/** Serializa el SELECT+INSERT que reserva el único ejecutor de la instalación. */
+const BATCH_RUN_LOCK_KEY = 0x7645_6743; // "vEgC"
 
 /** Por debajo de aquí, una corrección no se publica sola. */
 const AUTONOMY_CONFIDENCE_THRESHOLD = 0.75;
@@ -83,11 +91,58 @@ export async function batchRoutes(app: FastifyInstance, ctx: AppContext): Promis
       const body = parseOrThrow(TriggerBatchRequest, request.body ?? {}, 'El disparo del proceso');
       const kinds = body.kinds ?? ALL_KINDS;
       const run = await prepareBatchRun(ctx, session.sub, kinds);
-      void runBatch(ctx, session.sub, app.log, run, kinds).catch((error) => {
+      void runBatch(ctx, session.sub, app.log, {
+        preparedRun: run,
+        kinds,
+        ingest: true,
+      }).catch((error) => {
         app.log.error({ err: error, batchRunId: run.id }, 'El lote en segundo plano ha fallado');
       });
       reply.code(202);
       return { run: toBatchRun(run) };
+    },
+  );
+
+  // Parar es tan sensible como lanzar: interrumpe trabajo que se está pagando.
+  app.post<{ Params: { id: string } }>(
+    routes.cancelBatchRun(':id'),
+    { preHandler: app.requireRole('admin') },
+    async (request): Promise<TriggerBatchResponse> => {
+      const session = currentUser(request);
+      const runId = request.params.id;
+
+      const [run] = await db
+        .select()
+        .from(schema.batchRuns)
+        .where(eq(schema.batchRuns.id, runId))
+        .limit(1);
+      if (!run) throw notFound('No existe ese proceso.');
+      if (run.status !== 'running') {
+        throw conflict('Ese proceso ya había terminado.');
+      }
+
+      const [user] = await db
+        .select({ name: schema.users.name })
+        .from(schema.users)
+        .where(eq(schema.users.id, session.sub))
+        .limit(1);
+
+      const cancelled = await cancelBatchRun(
+        ctx,
+        runId,
+        session.sub,
+        `Parado desde la aplicación por ${user?.name ?? 'un administrador'}.`,
+      );
+      if (!cancelled) throw conflict('Ese proceso ya había terminado.');
+
+      app.log.info({ batchRunId: runId, cancelledBy: session.sub }, 'Proceso parado a mano');
+
+      const [closed] = await db
+        .select()
+        .from(schema.batchRuns)
+        .where(eq(schema.batchRuns.id, runId))
+        .limit(1);
+      return { run: toBatchRun(closed ?? run) };
     },
   );
 }
@@ -101,6 +156,74 @@ export interface RunBatchResult {
   readonly ingested: number;
   readonly queued: number;
   readonly run: BatchRun;
+}
+
+export interface RunBatchOptions {
+  readonly preparedRun?: typeof schema.batchRuns.$inferSelect;
+  readonly kinds?: readonly ActivityKind[];
+  /** Si existe, procesa exclusivamente esta entrega. */
+  readonly submissionId?: string;
+  /** El reproceso individual no vuelve a consultar Moodle. */
+  readonly ingest?: boolean;
+  /** Inyectable para probar el deadline sin esperar doce horas. */
+  readonly maxRuntimeMs?: number;
+}
+
+export class BatchDeadlineError extends Error {
+  constructor() {
+    super('El proceso ha alcanzado el límite de 12 horas y se ha detenido.');
+    this.name = 'BatchDeadlineError';
+  }
+}
+
+export class BatchCancelledError extends Error {
+  constructor(readonly cancelledBy: string | null) {
+    super('Alguien ha parado el proceso desde la aplicación.');
+    this.name = 'BatchCancelledError';
+  }
+}
+
+/**
+ * Procesos vivos **en esta instancia**, para poder pararlos.
+ *
+ * En memoria y no en base de datos porque lo que hay que cortar es un
+ * `AbortController` de este proceso de Node: una bandera en una tabla no
+ * interrumpe una petición HTTP en vuelo hacia Anthropic. La consecuencia es
+ * que un lote huérfano —de una instancia que se murió— no tiene aquí su
+ * controlador; `cancelBatchRun` lo detecta y cierra la fila igual, que es lo
+ * que desatasca el cerrojo y permite lanzar el siguiente.
+ */
+const LIVE_RUNS = new Map<string, AbortController>();
+
+/**
+ * Para un proceso en marcha. Devuelve `false` si ese proceso ya no estaba
+ * corriendo, para que la interfaz pueda decirlo en vez de fingir que lo paró.
+ */
+export async function cancelBatchRun(
+  ctx: AppContext,
+  runId: string,
+  cancelledBy: string | null,
+  reason: string,
+): Promise<boolean> {
+  // Primero la fila: es lo único que ven las demás instancias y el panel. Se
+  // exige `running` para que parar dos veces no reescriba el desenlace de un
+  // proceso que ya había terminado solo entre medias.
+  const [closed] = await ctx.db
+    .update(schema.batchRuns)
+    .set({
+      status: 'cancelled',
+      finishedAt: new Date(),
+      closedReason: reason.slice(0, 500),
+    })
+    .where(and(eq(schema.batchRuns.id, runId), eq(schema.batchRuns.status, 'running')))
+    .returning({ id: schema.batchRuns.id });
+  if (!closed) return false;
+
+  // Y después el trabajo en vuelo. `runBatch` verá la señal, devolverá a la
+  // cola lo que estuviera a medias y no volverá a tocar la fila, porque todas
+  // sus escrituras exigen que siga en `running`.
+  LIVE_RUNS.get(runId)?.abort(new BatchCancelledError(cancelledBy));
+  return true;
 }
 
 interface Logger {
@@ -145,16 +268,24 @@ export async function runBatch(
   ctx: AppContext,
   triggeredBy: string | null,
   log: Logger = SILENT,
-  preparedRun?: typeof schema.batchRuns.$inferSelect,
-  kinds: readonly ActivityKind[] = ALL_KINDS,
+  options: RunBatchOptions = {},
 ): Promise<RunBatchResult> {
   const { db } = ctx;
+  const kinds = options.kinds ?? ALL_KINDS;
+  const maxRuntimeMs = options.maxRuntimeMs ?? BATCH_MAX_RUNTIME_MS;
+  if (!Number.isFinite(maxRuntimeMs) || maxRuntimeMs <= 0) {
+    throw new RangeError('El límite de ejecución del proceso debe ser mayor que cero.');
+  }
 
   // Un solo lote a la vez (HU-09, RN-3). Sin esto, dos disparos seguidos —o el
   // planificador y una persona a la vez— corrigen las mismas entregas dos veces
   // y **pagan el doble**. Se comprueba antes de crear la fila para que el
   // conflicto no deje un `batch_runs` fantasma.
-  const run = preparedRun ?? await prepareBatchRun(ctx, triggeredBy, kinds);
+  const run = options.preparedRun ?? await prepareBatchRun(ctx, triggeredBy, kinds);
+  const controller = new AbortController();
+  const deadline = setTimeout(() => controller.abort(new BatchDeadlineError()), maxRuntimeMs);
+  deadline.unref?.();
+  LIVE_RUNS.set(run.id, controller);
 
   // A partir de aquí la fila existe y está en `running`. Todo lo que pueda
   // lanzar va dentro del `try` de abajo, porque un lote que muere sin cerrarla
@@ -164,7 +295,18 @@ export async function runBatch(
     ingested: 0,
     activitiesFailed: 0,
     activitiesVisited: 0,
+    skippedTooOld: 0,
     problems: [],
+  };
+  let processed = 0;
+  let failed = 0;
+  let autoPublished = 0;
+  let queued = 0;
+  const usage: UsageMetrics = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cachedInputTokens: 0,
+    costCents: 0,
   };
 
   try {
@@ -176,14 +318,33 @@ export async function runBatch(
     // una entrega que llegó hace un minuto se corrija esta misma noche y no la
     // siguiente. Que la ingesta falle no cancela la corrección: lo que ya
     // estaba en `pending` se corrige igual aunque Moodle no responda.
-    try {
-      log.info({ batchRunId: run.id, kinds }, 'Ingesta iniciada');
-      ingest = await ingestAll(ctx, log, kinds);
-      for (const problem of ingest.problems) {
-        log.warn({ slug: problem.slug, kind: problem.kind }, problem.message);
+    if (options.ingest ?? options.submissionId === undefined) {
+      try {
+        log.info({ batchRunId: run.id, kinds }, 'Ingesta iniciada');
+        ingest = await ingestAll(ctx, log, kinds);
+        for (const problem of ingest.problems) {
+          log.warn({ slug: problem.slug, kind: problem.kind }, problem.message);
+        }
+      } catch (error) {
+        log.error({ err: error }, 'La ingesta ha fallado entera; se corrige lo que ya había');
       }
-    } catch (error) {
-      log.error({ err: error }, 'La ingesta ha fallado entera; se corrige lo que ya había');
+    }
+    controller.signal.throwIfAborted();
+    await updateRunProgress(ctx, run.id, { processed, failed, autoPublished, ingest, usage });
+
+    // La antigüedad máxima también tiene que alcanzar a lo que ya está en la
+    // cola: filtrarla sólo en la ingesta dejaría corrigiéndose para siempre el
+    // historial que entró antes de configurarla, que es justo lo que se quería
+    // evitar. Un reproceso dirigido no pasa por aquí: si alguien pide a mano
+    // que se corrija una entrega vieja, se corrige.
+    if (options.submissionId === undefined) {
+      const parkedByAge = await parkSubmissionsTooOld(ctx, kinds);
+      if (parkedByAge > 0) {
+        log.info(
+          { batchRunId: run.id, parkedByAge },
+          'Entregas aparcadas por superar la antigüedad máxima',
+        );
+      }
     }
 
     // Sólo actividades activas de los tipos que barre este proceso, y
@@ -201,21 +362,15 @@ export async function runBatch(
         and(
           inArray(schema.submissions.status, ['pending', 'grading']),
           inArray(schema.activities.kind, [...kinds]),
-          eq(schema.activities.enabled, true),
+          options.submissionId
+            ? eq(schema.submissions.id, options.submissionId)
+            : eq(schema.activities.enabled, true),
         ),
       )
       .orderBy(asc(schema.submissions.activityId), asc(schema.submissions.submittedAt))
       .limit(MAX_PER_RUN);
-
-    let processed = 0;
-    let failed = 0;
-    let autoPublished = 0;
-    const usage: UsageMetrics = {
-      inputTokens: 0,
-      outputTokens: 0,
-      cachedInputTokens: 0,
-      costCents: 0,
-    };
+    queued = enabled.length;
+    controller.signal.throwIfAborted();
 
     // Memoria del contexto ya resuelto por actividad: dentro de un lote no cambia.
     const contextCache = new Map<string, ResolveContextInput>();
@@ -245,6 +400,7 @@ export async function runBatch(
     });
 
     for (const { submission, activity } of enabled) {
+      controller.signal.throwIfAborted();
       try {
         log.info(
           { batchRunId: run.id, submissionId: submission.id, activityId: activity.id, kind: activity.kind },
@@ -258,26 +414,44 @@ export async function runBatch(
           contextCache,
           provider,
           settings.ai.pagesPerChunk,
+          run.id,
+          controller.signal,
+          triggeredBy,
         );
         processed += 1;
         if (outcome.autoPublished) autoPublished += 1;
+        await updateRunProgress(ctx, run.id, { processed, failed, autoPublished, ingest, usage });
         log.info(
           { batchRunId: run.id, submissionId: submission.id, activityId: activity.id },
           'Corrección de entrega terminada',
         );
       } catch (error) {
+        if (controller.signal.aborted) throw controller.signal.reason;
         failed += 1;
+        const message = error instanceof Error ? error.message : String(error);
         await db
           .update(schema.submissions)
           .set({
             status: 'error',
-            errorMessage: (error as Error).message.slice(0, 500),
+            errorMessage: message.slice(0, 500),
             updatedAt: new Date(),
           })
           .where(eq(schema.submissions.id, submission.id));
+        await updateRunProgress(ctx, run.id, { processed, failed, autoPublished, ingest, usage });
         log.error({ err: error, submissionId: submission.id }, 'Fallo al corregir una entrega');
+        if (isFatalProviderError(error)) {
+          log.error(
+            { err: error, batchRunId: run.id, submissionId: submission.id },
+            'Fallo global del proveedor; se detiene el lote para no repetir llamadas inútiles',
+          );
+          // Una lectura doble puede tener otra petición gemela aún abierta.
+          // Cortarla evita consumir más tiempo/crédito después del fallo global.
+          controller.abort(error instanceof Error ? error : new Error(String(error)));
+          throw error;
+        }
       }
     }
+    controller.signal.throwIfAborted();
 
     const [finished] = await db
       .update(schema.batchRuns)
@@ -295,7 +469,7 @@ export async function runBatch(
         cachedInputTokens: usage.cachedInputTokens,
         costCents: usage.costCents.toFixed(4),
       })
-      .where(eq(schema.batchRuns.id, run.id))
+      .where(and(eq(schema.batchRuns.id, run.id), eq(schema.batchRuns.status, 'running')))
       .returning();
 
     log.info(
@@ -308,45 +482,257 @@ export async function runBatch(
       failed,
       autoPublished,
       ingested: ingest.ingested,
-      queued: enabled.length,
+      queued,
       run: toBatchRun(finished ?? run),
     };
   } catch (error) {
+    const failure = error instanceof Error ? error : new Error(String(error));
+    // Caducar y que alguien lo pare son el mismo desenlace desde la entrega:
+    // nadie ha dictaminado nada sobre su contenido, así que vuelve a la cola.
+    const reason = controller.signal.reason;
+    const interrupted =
+      reason instanceof BatchDeadlineError || reason instanceof BatchCancelledError;
+    if (interrupted) {
+      // La llamada al proveedor recibe esta misma señal y se aborta de forma
+      // cooperativa. La entrega que estaba a medias vuelve a la cola: no ha
+      // fallado por su contenido y no debe exigir una intervención manual.
+      await db
+        .update(schema.submissions)
+        .set({ status: 'pending', errorMessage: null, updatedAt: new Date() })
+        .where(
+          and(
+            eq(schema.submissions.batchRunId, run.id),
+            inArray(schema.submissions.status, ['transcribing', 'grading']),
+          ),
+        )
+        .catch(() => {});
+      await db
+        .update(schema.aiCalls)
+        .set({
+          error: failure.message.slice(0, 500),
+          stopReason: reason instanceof BatchCancelledError ? 'batch_cancelled' : 'batch_timeout',
+        })
+        .where(
+          and(
+            eq(schema.aiCalls.batchRunId, run.id),
+            eq(schema.aiCalls.parsedOk, false),
+            isNull(schema.aiCalls.error),
+            isNull(schema.aiCalls.latencyMs),
+          ),
+        )
+        .catch(() => {});
+    } else if (options.submissionId) {
+      // Si un reproceso dirigido falla antes de llegar a `processOne` (por
+      // ejemplo, configuración inválida del proveedor), no puede quedarse en
+      // `pending/grading` sin ningún trabajador que vaya a recogerlo.
+      await db
+        .update(schema.submissions)
+        .set({
+          status: 'error',
+          batchRunId: run.id,
+          errorMessage: failure.message.slice(0, 500),
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(schema.submissions.id, options.submissionId),
+            inArray(schema.submissions.status, ['pending', 'transcribing', 'grading']),
+          ),
+        )
+        .catch(() => {});
+    }
+
     // El lote se ha caído entero. Cerrar la fila es lo que permite que el
     // siguiente pueda arrancar; el error se propaga para que quien lo lanzó lo
     // vea, en vez de recibir un «terminado» que no ocurrió.
+    //
+    // Una parada a mano ya cerró la fila como `cancelled` antes de mandar la
+    // señal: el `where` de abajo exige `running` y por eso no la pisa.
     await db
       .update(schema.batchRuns)
       .set({
         status: 'failed',
         finishedAt: new Date(),
+        closedReason: failure.message.slice(0, 500),
         submissionsIngested: ingest.ingested,
         activitiesFailed: ingest.activitiesFailed,
         problems: storedProblems(ingest),
+        submissionsProcessed: processed,
+        submissionsFailed: failed,
+        submissionsAutoPublished: autoPublished,
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens,
+        cachedInputTokens: usage.cachedInputTokens,
+        costCents: usage.costCents.toFixed(4),
       })
-      .where(eq(schema.batchRuns.id, run.id))
+      .where(and(eq(schema.batchRuns.id, run.id), eq(schema.batchRuns.status, 'running')))
       .catch(() => {});
     throw error;
+  } finally {
+    clearTimeout(deadline);
+    LIVE_RUNS.delete(run.id);
   }
 }
 
-async function prepareBatchRun(
+export async function prepareBatchRun(
   ctx: AppContext,
   triggeredBy: string | null,
   kinds: readonly ActivityKind[] = ALL_KINDS,
 ) {
-  const [alreadyRunning] = await ctx.db
-    .select({ id: schema.batchRuns.id })
-    .from(schema.batchRuns)
-    .where(eq(schema.batchRuns.status, 'running'))
-    .limit(1);
-  if (alreadyRunning) throw conflict('Ya hay un proceso de corrección en marcha. Espera a que termine.');
-  const [run] = await ctx.db
-    .insert(schema.batchRuns)
-    .values({ status: 'running', triggeredBy, kinds: [...kinds] })
-    .returning();
-  if (!run) throw new Error('No se ha podido registrar el lote.');
-  return run;
+  return ctx.db.transaction(async (tx) => {
+    // El cerrojo transaccional convierte la comprobación y el alta en una sola
+    // reserva lógica. Dos peticiones simultáneas ya no pueden ver ambas «cero».
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(${BATCH_RUN_LOCK_KEY})`);
+    const [alreadyRunning] = await tx
+      .select({ id: schema.batchRuns.id })
+      .from(schema.batchRuns)
+      .where(eq(schema.batchRuns.status, 'running'))
+      .limit(1);
+    if (alreadyRunning) {
+      throw conflict('Ya hay un proceso de corrección en marcha. Espera a que termine.');
+    }
+    const [run] = await tx
+      .insert(schema.batchRuns)
+      .values({ status: 'running', triggeredBy, kinds: [...kinds] })
+      .returning();
+    if (!run) throw new Error('No se ha podido registrar el lote.');
+    return run;
+  });
+}
+
+/**
+ * Aparca —no borra— lo que ya estaba en la cola y supera la antigüedad máxima.
+ *
+ * Aparcar y no descartar es deliberado: la entrega existe, el alumno la hizo, y
+ * dejarla visible con su motivo permite que el profesor la recupere con un
+ * reproceso si resulta que sí la quería. Descartarla en silencio sería perder
+ * trabajo de un alumno sin decírselo a nadie.
+ *
+ * Sólo alcanza a `pending`: algo que ya está transcribiéndose o corrigiéndose
+ * tiene una llamada de IA pagada en vuelo, y cortarla aquí no ahorra nada.
+ */
+async function parkSubmissionsTooOld(
+  ctx: AppContext,
+  kinds: readonly ActivityKind[],
+): Promise<number> {
+  const { maxAgeDays } = (await getSettings(ctx)).ingest;
+  const cutoff = ingestCutoff(maxAgeDays);
+  if (cutoff === null) return 0;
+
+  const stale = await ctx.db
+    .select({ id: schema.submissions.id })
+    .from(schema.submissions)
+    .innerJoin(schema.activities, eq(schema.activities.id, schema.submissions.activityId))
+    .where(
+      and(
+        eq(schema.submissions.status, 'pending'),
+        inArray(schema.activities.kind, [...kinds]),
+        lt(schema.submissions.submittedAt, cutoff),
+      ),
+    );
+  if (stale.length === 0) return 0;
+
+  const parked = await ctx.db
+    .update(schema.submissions)
+    .set({
+      status: 'parked',
+      parkedReason:
+        `Entregada antes del límite de antigüedad configurado (${maxAgeDays} ` +
+        `${maxAgeDays === 1 ? 'día' : 'días'}). Vuelve a procesarla si quieres corregirla igualmente.`,
+      parkedBy: null,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        inArray(
+          schema.submissions.id,
+          stale.map((row) => row.id),
+        ),
+        // Se relee el estado: entre el SELECT y el UPDATE alguien ha podido
+        // reprocesar una de ellas a mano, y ese gesto manda sobre el límite.
+        eq(schema.submissions.status, 'pending'),
+      ),
+    )
+    .returning({ id: schema.submissions.id });
+
+  return parked.length;
+}
+
+interface RunProgress {
+  readonly processed: number;
+  readonly failed: number;
+  readonly autoPublished: number;
+  readonly ingest: IngestReport;
+  readonly usage: UsageMetrics;
+}
+
+/**
+ * Persiste cada avance para que «Proceso en marcha» muestre trabajo real y un
+ * reinicio no borre de la vista todo lo que ya terminó.
+ */
+async function updateRunProgress(
+  ctx: AppContext,
+  runId: string,
+  progress: RunProgress,
+): Promise<void> {
+  await ctx.db
+    .update(schema.batchRuns)
+    .set({
+      submissionsProcessed: progress.processed,
+      submissionsFailed: progress.failed,
+      submissionsAutoPublished: progress.autoPublished,
+      submissionsIngested: progress.ingest.ingested,
+      activitiesFailed: progress.ingest.activitiesFailed,
+      problems: storedProblems(progress.ingest),
+      inputTokens: progress.usage.inputTokens,
+      outputTokens: progress.usage.outputTokens,
+      cachedInputTokens: progress.usage.cachedInputTokens,
+      costCents: progress.usage.costCents.toFixed(4),
+    })
+    .where(and(eq(schema.batchRuns.id, runId), eq(schema.batchRuns.status, 'running')));
+}
+
+/**
+ * Distingue un fallo de una entrega de un fallo de cuenta/proveedor. Seguir
+ * recorriendo alumnos después de un 401 o de quedarse sin crédito sólo genera
+ * más ruido, latencia y filas de error idénticas.
+ */
+export function isFatalProviderError(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  const candidate = error as {
+    status?: unknown;
+    message?: unknown;
+    code?: unknown;
+    type?: unknown;
+    error?: { message?: unknown; code?: unknown; type?: unknown };
+  };
+  const status = typeof candidate.status === 'number' ? candidate.status : null;
+  if (status !== null && [401, 402, 403].includes(status)) return true;
+
+  const details = [
+    candidate.message,
+    candidate.code,
+    candidate.type,
+    candidate.error?.message,
+    candidate.error?.code,
+    candidate.error?.type,
+  ]
+    .filter((value): value is string => typeof value === 'string')
+    .join(' ')
+    .toLowerCase();
+
+  return [
+    'credit balance is too low',
+    'insufficient credit',
+    'insufficient balance',
+    'insufficient_quota',
+    'authentication_error',
+    'invalid x-api-key',
+    'invalid api key',
+    'account is disabled',
+    'account has been disabled',
+    'account is suspended',
+  ].some((fragment) => details.includes(fragment));
 }
 
 // ── Una entrega ─────────────────────────────────────────────────────────────
@@ -362,13 +748,21 @@ async function processOne(
   contextCache: Map<string, ResolveContextInput>,
   provider: AiProvider,
   pagesPerChunk: number,
+  batchRunId: string,
+  signal: AbortSignal,
+  fallbackPublisherId: string | null,
 ): Promise<{ autoPublished: boolean }> {
   const { db } = ctx;
   const withFile = hasStudentFile(activity.kind);
+  signal.throwIfAborted();
 
   await db
     .update(schema.submissions)
-    .set({ status: withFile ? 'transcribing' : 'grading', updatedAt: new Date() })
+    .set({
+      status: withFile && submission.status !== 'grading' ? 'transcribing' : 'grading',
+      batchRunId,
+      updatedAt: new Date(),
+    })
     .where(eq(schema.submissions.id, submission.id));
 
   // El contexto es idéntico para todas las entregas de una actividad, así que
@@ -427,6 +821,7 @@ async function processOne(
     };
     contextCache.set(activity.id, context);
   }
+  signal.throwIfAborted();
 
   const maxScore = activity.maxScore === null ? null : Number(activity.maxScore);
   if (activity.graded && maxScore === null) {
@@ -462,7 +857,7 @@ async function processOne(
       submissionId: submission.id,
       message: submission.textContent ?? '',
       thread: [],
-    });
+    }, { signal });
     triageUsage = triage.usage;
     await db
       .update(schema.submissions)
@@ -512,6 +907,7 @@ async function processOne(
     lowConfidenceThreshold: settings.ai.lowConfidenceThreshold,
     explanations: settings.ai.explanations,
     forumRoute,
+    signal,
   } as const;
   let graded = await gradeSubmission(gradeInput);
   let discardedUsage: UsageMetrics | null = null;
@@ -527,6 +923,7 @@ async function processOne(
     discardedUsage = graded.usage;
     graded = await gradeSubmission({ ...gradeInput, forumRoute: 'expert', verifyWithAi: settings.ai.verify });
   }
+  signal.throwIfAborted();
 
   // Aplanamos el resultado del motor a la forma que persistimos.
   const result = {
@@ -544,15 +941,22 @@ async function processOne(
 
   const now = new Date();
 
-  await db.transaction(async (tx) => {
+  const publication = autonomyDecision(
+    activity.autonomy,
+    result.confidence,
+    result.transcription?.flags.length ?? 0,
+  );
+
+  signal.throwIfAborted();
+  const persisted = await db.transaction(async (tx) => {
     // Reprocesar debe reemplazar lo anterior, no acumular.
     await tx
       .delete(schema.transcriptions)
       .where(eq(schema.transcriptions.submissionId, submission.id));
     await tx.delete(schema.corrections).where(eq(schema.corrections.submissionId, submission.id));
 
-    if (result.transcription) {
-      await tx.insert(schema.transcriptions).values({
+    const [transcriptionRow] = result.transcription
+      ? await tx.insert(schema.transcriptions).values({
         submissionId: submission.id,
         // El motor devuelve arrays de sólo lectura; Drizzle los quiere mutables.
         pages: [...result.transcription.pages],
@@ -561,8 +965,8 @@ async function processOne(
         passCount: result.transcription.passCount,
         confidence: result.transcription.confidence.toFixed(3),
         model: result.transcription.model,
-      });
-    }
+      }).returning()
+      : [];
 
     const [correction] = await tx
       .insert(schema.corrections)
@@ -592,8 +996,8 @@ async function processOne(
     if (!correction) throw new Error('No se ha podido guardar la corrección.');
 
     // Sin apartados en las actividades no puntuables: no hay puntos que repartir.
-    if (result.items.length > 0) {
-      await tx.insert(schema.correctionItems).values(
+    const itemRows = result.items.length > 0
+      ? await tx.insert(schema.correctionItems).values(
         result.items.map((item) => ({
           correctionId: correction.id,
           label: item.label,
@@ -607,22 +1011,67 @@ async function processOne(
           alternativeMethod: item.alternativeMethod,
           position: item.position,
         })),
-      );
-    }
+      ).returning()
+      : [];
 
     await tx
       .update(schema.submissions)
       .set({
-        status: 'graded',
+        // La vía autónoma no finge una validación. Conserva el estado de
+        // trabajo hasta que Moodle confirme la publicación real.
+        status: publication === 'publish' ? 'grading' : 'graded',
         errorMessage: null,
         updatedAt: now,
       })
       .where(eq(schema.submissions.id, submission.id));
+
+    return { correction, itemRows, transcriptionRow };
   });
 
   addUsage(usageAccumulator, result.usage);
 
-  return { autoPublished: false };
+  if (publication === 'review') return { autoPublished: false };
+
+  signal.throwIfAborted();
+  if (submission.remoteId === null) {
+    throw new Error('La entrega no tiene referencia remota y no se puede publicar automáticamente.');
+  }
+  const connector = await connectorForUser(
+    ctx,
+    activity.importedBy ?? fallbackPublisherId ?? '',
+  );
+  const originalFile = submission.storagePath === null
+    ? null
+    : await new FileStore(ctx.config.STORAGE_ROOT)
+        .read(submission.storagePath)
+        .then((bytes) => ({
+          bytes,
+          mediaType: submission.mediaType ?? 'application/octet-stream',
+        }))
+        .catch(() => null);
+  const outcome = await publishToLms(
+    connector,
+    {
+      activity: {
+        slug: activity.slug,
+        lmsRef: activity.moodleRef,
+        kind: activity.kind,
+      },
+      studentRef: submission.studentRef,
+      remoteId: submission.remoteId,
+    },
+    {
+      submission: toSubmission(submission),
+      activity: toActivity(activity),
+      correction: toCorrection(persisted.correction, persisted.itemRows),
+      alreadyPublished: { grade: false, file: false },
+      transcription: persisted.transcriptionRow ? toTranscription(persisted.transcriptionRow) : null,
+      originalFile,
+    },
+  );
+  await recordPublication(ctx, persisted.correction, submission.id, outcome, true);
+
+  return { autoPublished: true };
 }
 
 function addUsage(target: UsageMetrics, value: UsageMetrics): void {
