@@ -35,9 +35,6 @@ export { LOW_CONFIDENCE_THRESHOLD } from '@vega/shared';
 /** Peso de la transcripción en la confianza global. */
 const TRANSCRIPTION_WEIGHT = 0.4;
 
-/** Cuánta confianza resta cada marca [ILEGIBLE]/[DUDA]. */
-const FLAG_PENALTY = 0.05;
-
 // ── Tipos ───────────────────────────────────────────────────────────────────
 
 export type ReviewReason =
@@ -90,6 +87,8 @@ export interface NormalizedItem {
 
 export interface GradeSubmissionInput {
   readonly provider: AiProvider;
+  /** Cancela todas las llamadas de esta entrega cuando el lote caduca. */
+  readonly signal?: AbortSignal;
   readonly submissionId: string;
   readonly studentRef: string;
   readonly activityKind: ActivityKind;
@@ -194,8 +193,8 @@ export async function gradeSubmission(input: GradeSubmissionInput): Promise<Grad
     };
   } else if (hasStudentFile(input.activityKind)) {
     const [rawA, rawB] = await Promise.all([
-      input.provider.transcribe({ ...transcriptionInput, reading: 'a' }),
-      input.provider.transcribe({ ...transcriptionInput, reading: 'b' }),
+      input.provider.transcribe({ ...transcriptionInput, reading: 'a' }, { signal: input.signal }),
+      input.provider.transcribe({ ...transcriptionInput, reading: 'b' }, { signal: input.signal }),
     ]);
     transcription = consolidateTranscriptions(
       validatePageAssembly(rawA, input.pages),
@@ -229,7 +228,7 @@ export async function gradeSubmission(input: GradeSubmissionInput): Promise<Grad
     templateKey: input.templateKey ?? null,
     route: input.forumRoute,
     explanations: input.explanations ?? true,
-  });
+  }, { signal: input.signal });
 
   const flags = transcription?.flags ?? [];
 
@@ -267,7 +266,7 @@ export async function gradeSubmission(input: GradeSubmissionInput): Promise<Grad
         })),
         aiSummary: graded.aiSummary,
         aiLatex: graded.aiLatex,
-      });
+      }, { signal: input.signal });
   const verification: CorrectionVerification = {
     coherent: mechanical.review.length === 0 && (aiVerification?.coherent ?? true),
     confidence: aiVerification?.confidence ?? null,
@@ -424,14 +423,25 @@ export function alignItems(
   maxScore: number,
 ): AlignedItems {
   if (allocation.length === 0) {
-    // Actividad sin reparto: la entrega se corrige como un único bloque.
+    // Moodle no siempre trae un reparto. En ese caso usamos el que propone el
+    // modelo, pero lo normalizamos a la nota máxima de la actividad: aceptar
+    // un `maxPoints: 10` por cada apartado produciría el engañoso «2,5 / 10»
+    // repetido en toda la corrección.
+    const maxima = normalizeInferredMaxima(gradedItems, maxScore);
+    const proposedTotal = gradedItems.reduce(
+      (sum, item) => sum + (Number.isFinite(item.maxPoints) && item.maxPoints > 0 ? item.maxPoints : 0),
+      0,
+    );
     const items = gradedItems.map((item, position) => {
-      const max = item.maxPoints > 0 ? item.maxPoints : maxScore;
+      const max = maxima[position] ?? 0;
+      const scaledPoints = proposedTotal > 0 && item.maxPoints > 0
+        ? item.aiPoints * (max / item.maxPoints)
+        : item.aiPoints;
       return {
         label: item.label,
         statement: '',
         maxPoints: max,
-        aiPoints: normalizePoints(item.aiPoints, max),
+        aiPoints: normalizePoints(scaledPoints, max),
         aiFeedback: item.aiFeedback,
         aiQuote: item.aiQuote ?? null,
         aiQuotePage: item.aiQuotePage ?? null,
@@ -479,6 +489,40 @@ export function alignItems(
   });
 
   return { items, missingLabels };
+}
+
+/**
+ * Convierte los máximos inferidos en centésimas cuya suma es exactamente la
+ * nota máxima. El reparto proporcional conserva la intención del modelo y el
+ * ajuste por restos evita errores de coma flotante visibles en la interfaz.
+ */
+function normalizeInferredMaxima(
+  items: readonly GradedItem[],
+  maxScore: number,
+): readonly number[] {
+  if (items.length === 0) return [];
+  const targetUnits = Math.max(0, Math.round(maxScore * 100));
+  if (targetUnits === 0) return items.map(() => 0);
+
+  const proposed = items.map((item) =>
+    Number.isFinite(item.maxPoints) && item.maxPoints > 0 ? item.maxPoints : 0,
+  );
+  const proposedTotal = proposed.reduce((sum, value) => sum + value, 0);
+  const weights = proposedTotal > 0
+    ? proposed.map((value) => value / proposedTotal)
+    : items.map(() => 1 / items.length);
+  const exactUnits = weights.map((weight) => weight * targetUnits);
+  const units = exactUnits.map(Math.floor);
+  let remaining = targetUnits - units.reduce((sum, value) => sum + value, 0);
+  const byRemainder = exactUnits
+    .map((value, index) => ({ index, remainder: value - Math.floor(value) }))
+    .sort((a, b) => b.remainder - a.remainder || a.index - b.index);
+  for (let position = 0; position < remaining; position += 1) {
+    const entry = byRemainder[position % byRemainder.length];
+    if (entry !== undefined) units[entry.index] = (units[entry.index] ?? 0) + 1;
+  }
+
+  return units.map((value) => value / 100);
 }
 
 export interface MechanicalVerification {
@@ -546,8 +590,8 @@ function normalizeLabel(label: string): string {
  * Combina la confianza del OCR con la de la corrección. La transcripción pesa
  * menos (0,4) porque un error de lectura suele afectar a un apartado suelto,
  * mientras que una corrección dudosa compromete la nota entera. Las marcas del
- * OCR restan aparte: ya han bajado la confianza de la transcripción, pero
- * además son trabajo manual seguro para el profesor.
+ * OCR ya se reflejan en la confianza de lectura y siguen generando avisos de
+ * revisión; restarlas otra vez aquí penalizaría dos veces el mismo hallazgo.
  *
  * Sin transcripción (foros) no hay nada que ponderar: manda la corrección. Y
  * sin apartados que promediar (actividad no puntuable) se usa la confianza que
@@ -556,7 +600,7 @@ function normalizeLabel(label: string): string {
 export function overallConfidence(
   transcriptionConfidence: number | null,
   items: readonly { confidence: number }[],
-  flagCount: number,
+  _flagCount: number,
   gradeConfidence = 0,
 ): number {
   const correction =
@@ -567,7 +611,7 @@ export function overallConfidence(
     transcriptionConfidence === null
       ? correction
       : TRANSCRIPTION_WEIGHT * transcriptionConfidence + (1 - TRANSCRIPTION_WEIGHT) * correction;
-  return round2(clamp(combined - flagCount * FLAG_PENALTY, 0, 1));
+  return round2(clamp(combined, 0, 1));
 }
 
 // ── Detección de avisos ─────────────────────────────────────────────────────

@@ -93,6 +93,16 @@ COPY --from=build --chown=vega:vega /prod/api ./
 # el requisito sea evidente aunque el empaquetado del paquete cambie.
 COPY --from=build --chown=vega:vega /repo/apps/api/migrations ./migrations
 
+# Los contextos de corrección por defecto son datos de arranque, igual que las
+# migraciones. Se guardan fuera de /app/contexts porque ese directorio puede
+# estar cubierto por un volumen de una instalación anterior.
+COPY --from=build --chown=vega:vega /repo/contexts ./context-seeds
+RUN test -s /app/context-seeds/installation.md \
+ && test -s /app/context-seeds/global.md \
+ && test -s /app/context-seeds/activity-kinds/assignment.md \
+ && test -s /app/context-seeds/activity-kinds/assignment-tema.md \
+ && test -s /app/context-seeds/activity-kinds/forum.md
+
 # src/db/migrate.ts resuelve las migraciones como '../../migrations' respecto a
 # su propia ubicación: en el árbol de fuentes (apps/api/src/db/) eso da
 # apps/api/migrations, pero en el bundle (/app/dist/) da /migrations, porque

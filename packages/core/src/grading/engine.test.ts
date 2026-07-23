@@ -122,16 +122,55 @@ test('un apartado que la IA no devuelve se puntúa a cero y se reporta', () => {
   assert.deepEqual(missingLabels, ['1a', '1b', '2']);
 });
 
+test('sin reparto configurado los máximos inferidos suman la nota de la actividad', () => {
+  const { items } = alignItems(
+    [
+      {
+        label: '1', maxPoints: 2.5, aiPoints: 2, aiFeedback: 'Bien.',
+        confidence: 0.9, alternativeMethod: false,
+      },
+      {
+        label: '2', maxPoints: 7.5, aiPoints: 6, aiFeedback: 'Bien.',
+        confidence: 0.9, alternativeMethod: false,
+      },
+    ],
+    [],
+    10,
+  );
+
+  assert.deepEqual(items.map((item) => item.maxPoints), [2.5, 7.5]);
+  assert.deepEqual(items.map((item) => item.aiPoints), [2, 6]);
+  assert.equal(items.reduce((sum, item) => sum + item.maxPoints, 0), 10);
+});
+
+test('sin reparto nunca usa la nota completa como máximo de cada apartado', () => {
+  const { items } = alignItems(
+    ['1', '2', '3'].map((label) => ({
+      label, maxPoints: 10, aiPoints: 5, aiFeedback: 'Revisar.',
+      confidence: 0.7, alternativeMethod: false,
+    })),
+    [],
+    10,
+  );
+
+  assert.deepEqual(items.map((item) => item.maxPoints), [3.34, 3.33, 3.33]);
+  assert.equal(items.reduce((sum, item) => sum + item.maxPoints, 0), 10);
+  assert.ok(items.every((item) => item.aiPoints <= item.maxPoints));
+});
+
 // ── Confianza global ────────────────────────────────────────────────────────
 
-test('la confianza global pondera transcripción y corrección, y penaliza marcas', () => {
+test('la confianza global pondera transcripción y corrección', () => {
   const items = [{ confidence: 0.9 }, { confidence: 0.7 }];
-  const clean = overallConfidence(0.8, items, 0);
-  assert.equal(clean, 0.8); // 0,4·0,8 + 0,6·0,8
+  assert.equal(overallConfidence(0.8, items, 0), 0.8); // 0,4·0,8 + 0,6·0,8
+});
 
-  const withFlags = overallConfidence(0.8, items, 2);
-  assert.ok(withFlags < clean);
-  assert.equal(withFlags, 0.7);
+test('no descuenta de nuevo los avisos ya reflejados en lectura y apartados', () => {
+  const items = [0.49, 0.49, 0.49, 0.72, 0.6, 0.58].map((confidence) => ({ confidence }));
+
+  // Caso regresión: antes nueve avisos restaban 0,45 adicionales y lo
+  // convertían artificialmente en 0 pese a conservar evidencia útil.
+  assert.equal(overallConfidence(0.2, items, 9), 0.42);
 });
 
 test('sin transcripción la confianza no se pondera con algo que no existe', () => {

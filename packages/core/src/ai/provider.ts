@@ -279,18 +279,29 @@ export type VerifyConnectionResult = z.infer<typeof VerifyConnectionResult>;
 
 // ── Proveedor ───────────────────────────────────────────────────────────────
 
+/**
+ * Control de una llamada al proveedor.
+ *
+ * La señal viaja fuera de los esquemas de entrada porque no forma parte del
+ * prompt ni debe acabar serializada en el registro de IA. Permite que el lote
+ * cancele de verdad el transporte activo al caducar.
+ */
+export interface AiCallOptions {
+  readonly signal?: AbortSignal;
+}
+
 export interface AiProvider {
   /** Identificador corto del proveedor: `"mock"`, `"anthropic"`… */
   readonly name: string;
-  transcribe(input: TranscribeInput): Promise<TranscribeResult>;
-  grade(input: GradeInput): Promise<GradeResult>;
-  triage(input: TriageInput): Promise<TriageResult>;
-  verify(input: VerifyInput): Promise<VerifyResult>;
+  transcribe(input: TranscribeInput, options?: AiCallOptions): Promise<TranscribeResult>;
+  grade(input: GradeInput, options?: AiCallOptions): Promise<GradeResult>;
+  triage(input: TriageInput, options?: AiCallOptions): Promise<TriageResult>;
+  verify(input: VerifyInput, options?: AiCallOptions): Promise<VerifyResult>;
   /**
    * Comprueba que el proveedor responde con la configuración actual. Pensada
    * para el botón «Probar conexión» de Ajustes; no corrige nada.
    */
-  verifyConnection(): Promise<VerifyConnectionResult>;
+  verifyConnection(options?: AiCallOptions): Promise<VerifyConnectionResult>;
 }
 
 /** Nombres de proveedor admitidos por `createAiProvider`. */

@@ -134,6 +134,71 @@ test('el triaje usa un timeout corto para no bloquear la cola', async () => {
   assert.equal(signal.aborted, false);
 });
 
+test('sin reparto configurado conserva los máximos propuestos y exige que sumen la nota', async () => {
+  let systemText = '';
+  const client = {
+    messages: {
+      stream: (body: { model: string; system: Array<{ text: string }> }) => {
+        systemText = body.system.map((block) => block.text).join('\n');
+        return {
+          finalMessage: async () => ({
+            model: body.model,
+            stop_reason: 'end_turn',
+            usage: { input_tokens: 10, output_tokens: 10 },
+            parsed_output: {
+              items: [
+                {
+                  label: '1',
+                  maxPoints: 2.5,
+                  aiPoints: 2,
+                  aiFeedback: 'Bien.',
+                  aiQuote: 'x=2',
+                  aiQuotePage: 1,
+                  confidence: 0.8,
+                  alternativeMethod: false,
+                },
+                {
+                  label: '2',
+                  maxPoints: 7.5,
+                  aiPoints: 6,
+                  aiFeedback: 'Bien.',
+                  aiQuote: 'y=3',
+                  aiQuotePage: 2,
+                  confidence: 0.8,
+                  alternativeMethod: false,
+                },
+              ],
+              aiLatex: '\\section*{Corrección}',
+              aiSummary: 'Resumen',
+              teacherNotes: 'Reparto inferido.',
+              confidence: 0.8,
+              escalate: true,
+              noEsDuda: false,
+            },
+          }),
+        };
+      },
+    },
+  } as unknown as Anthropic;
+
+  const result = await new AnthropicAiProvider({ apiKey: 'sk-de-prueba', client }).grade({
+    submissionId: SUBMISSION,
+    activityKind: 'assignment',
+    transcription: null,
+    document: [],
+    textContent: 'Entrega de prueba',
+    context: [],
+    material: '',
+    student: null,
+    pointsAllocation: [],
+    graded: true,
+    maxScore: 10,
+  });
+
+  assert.deepEqual(result.items.map((item) => item.maxPoints), [2.5, 7.5]);
+  assert.match(systemText, /suma de todos los maxPoints sea exactamente 10/);
+});
+
 test('un stream que conecta pero no termina se aborta al vencer el deadline', async () => {
   let signal: AbortSignal | undefined;
   const client = {
@@ -160,6 +225,29 @@ test('un stream que conecta pero no termina se aborta al vencer el deadline', as
     /no ha terminado la operación en 1 segundo/,
   );
   assert.equal(signal?.aborted, true);
+});
+
+test('la cancelación del lote aborta el stream activo del proveedor', async () => {
+  let providerSignal: AbortSignal | undefined;
+  const client = {
+    messages: {
+      stream: (_body: unknown, options?: { signal?: AbortSignal }) => {
+        providerSignal = options?.signal;
+        return { finalMessage: () => new Promise<never>(() => undefined) };
+      },
+    },
+  } as unknown as Anthropic;
+  const controller = new AbortController();
+  const pending = new AnthropicAiProvider({ apiKey: 'sk-de-prueba', client }).triage(
+    { submissionId: SUBMISSION, message: '¿Cómo se resuelve?', thread: [] },
+    { signal: controller.signal },
+  );
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  controller.abort(new Error('El lote ha agotado su tiempo.'));
+
+  await assert.rejects(pending, /agotado su tiempo/);
+  assert.equal(providerSignal?.aborted, true);
 });
 
 test('una salida cortada a mitad del JSON se reintenta con más tokens', async () => {

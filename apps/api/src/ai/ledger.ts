@@ -6,6 +6,7 @@ import type {
   UsageMetrics,
 } from '@vega/shared';
 import type {
+  AiCallOptions,
   AiProvider,
   GradeInput,
   PageSource,
@@ -122,16 +123,16 @@ export function withAiLedger(
 
   return {
     name: provider.name,
-    transcribe: (input: TranscribeInput) => execute({
+    transcribe: (input: TranscribeInput, callOptions?: AiCallOptions) => execute({
       operation: input.reading === 'b' ? 'reading_b' : 'reading_a',
       submissionId: input.submissionId,
       promptKey: 'transcription.system',
       request: input,
-      call: () => provider.transcribe(input),
+      call: () => provider.transcribe(input, callOptions),
       usage: (result) => result.usage,
       model: (result) => result.model,
     }),
-    grade: (input: GradeInput) => execute({
+    grade: (input: GradeInput, callOptions?: AiCallOptions) => execute({
       operation: input.activityKind === 'forum' ? 'forum_answer' : 'grade',
       submissionId: input.submissionId,
       // La misma regla que aplica el proveedor: si divergieran, el registro
@@ -139,21 +140,21 @@ export function withAiLedger(
       promptKey: gradePromptKey(input),
       segments: input.context,
       request: input,
-      call: () => provider.grade(input),
+      call: () => provider.grade(input, callOptions),
       usage: (result) => result.usage,
       model: (result) => result.model,
     }),
-    triage: (input: TriageInput) => execute({
+    triage: (input: TriageInput, callOptions?: AiCallOptions) => execute({
       operation: 'triage', submissionId: input.submissionId, promptKey: 'triage.system', request: input,
-      call: () => provider.triage(input), usage: (result) => result.usage, model: (result) => result.model,
+      call: () => provider.triage(input, callOptions), usage: (result) => result.usage, model: (result) => result.model,
     }),
-    verify: (input: VerifyInput) => execute({
+    verify: (input: VerifyInput, callOptions?: AiCallOptions) => execute({
       operation: 'verify', submissionId: input.submissionId, promptKey: 'verify.system', request: input,
-      call: () => provider.verify(input), usage: (result) => result.usage, model: (result) => result.model,
+      call: () => provider.verify(input, callOptions), usage: (result) => result.usage, model: (result) => result.model,
     }),
-    verifyConnection: () => execute({
+    verifyConnection: (callOptions?: AiCallOptions) => execute({
       operation: 'connection_test', submissionId: null, promptKey: null, request: {},
-      call: () => provider.verifyConnection(), usage: (result) => result.usage, model: (result) => result.model,
+      call: () => provider.verifyConnection(callOptions), usage: (result) => result.usage, model: (result) => result.model,
     }),
   };
 }

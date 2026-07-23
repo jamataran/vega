@@ -77,6 +77,7 @@ interface FormState {
   lowConfidenceThreshold: string;
   pagesPerChunk: string;
   logRetentionDays: string;
+  ingestMaxAgeDays: string;
 
   moodleBaseUrl: string;
   moodleConnector: Connector;
@@ -108,6 +109,7 @@ function fromSettings(settings: AppSettings): FormState {
     lowConfidenceThreshold: String(settings.ai.lowConfidenceThreshold),
     pagesPerChunk: String(settings.ai.pagesPerChunk),
     logRetentionDays: String(settings.ai.logRetentionDays),
+    ingestMaxAgeDays: String(settings.ingest.maxAgeDays),
 
     moodleBaseUrl: settings.moodle.baseUrl,
     moodleConnector: settings.moodle.connector,
@@ -421,6 +423,8 @@ export function SettingsPage() {
   const forumEveryMinutes = parseInteger(form.forumEveryMinutes, 1);
   const pagesPerChunk = parseInteger(form.pagesPerChunk, 1);
   const logRetentionDays = parseInteger(form.logRetentionDays, 1);
+  // Cero es válido y significa «sin límite»: por eso el mínimo es 0 y no 1.
+  const ingestMaxAgeDays = parseInteger(form.ingestMaxAgeDays, 0);
   const lowConfidenceThreshold = Number(form.lowConfidenceThreshold);
   const validLowConfidenceThreshold = form.lowConfidenceThreshold.trim() !== '' && Number.isFinite(lowConfidenceThreshold) && lowConfidenceThreshold >= 0 && lowConfidenceThreshold <= 1;
 
@@ -599,14 +603,28 @@ export function SettingsPage() {
               <Field label="Días de registro" error={logRetentionDays === null ? 'Escribe un entero positivo.' : undefined}>
                 {(field) => <Input {...field} type="number" min={1} value={form.logRetentionDays} onChange={(event) => update('logRetentionDays', event.target.value)} />}
               </Field>
+              <Field
+                label="Antigüedad máxima"
+                hint={
+                  ingestMaxAgeDays === 0
+                    ? 'En días. Con 0 se corrige todo lo que haya en Moodle, por antiguo que sea.'
+                    : `En días. No se corrigen entregas de hace más de ${form.ingestMaxAgeDays}; las que ya estén en la cola se aparcan.`
+                }
+                error={ingestMaxAgeDays === null ? 'Escribe 0 o un número de días.' : undefined}
+              >
+                {(field) => <Input {...field} type="number" min={0} value={form.ingestMaxAgeDays} onChange={(event) => update('ingestMaxAgeDays', event.target.value)} />}
+              </Field>
             </div>
             {form.transcriptionModel === 'claude-fable-5' || form.gradingModel === 'claude-fable-5' ? (
               <p role="status" className="text-ui text-muted-foreground">Has seleccionado Claude Fable 5 para el piloto. Revisa su política de retención de datos antes de usar entregas reales.</p>
             ) : null}
             <div className="flex justify-end">
-              <Button size="lg" disabled={pagesPerChunk === null || logRetentionDays === null || !validLowConfidenceThreshold} loading={saving === 'ai'} onClick={() => {
-                if (pagesPerChunk === null || logRetentionDays === null || !validLowConfidenceThreshold) return;
-                save('ai', { ai: { transport: form.aiTransport, verify: form.aiVerify, explanations: form.aiExplanations, lowConfidenceThreshold, pagesPerChunk, logRetentionDays } });
+              <Button size="lg" disabled={pagesPerChunk === null || logRetentionDays === null || ingestMaxAgeDays === null || !validLowConfidenceThreshold} loading={saving === 'ai'} onClick={() => {
+                if (pagesPerChunk === null || logRetentionDays === null || ingestMaxAgeDays === null || !validLowConfidenceThreshold) return;
+                save('ai', {
+                  ai: { transport: form.aiTransport, verify: form.aiVerify, explanations: form.aiExplanations, lowConfidenceThreshold, pagesPerChunk, logRetentionDays },
+                  ingest: { maxAgeDays: ingestMaxAgeDays },
+                });
               }}>Guardar motor de IA</Button>
             </div>
           </div>

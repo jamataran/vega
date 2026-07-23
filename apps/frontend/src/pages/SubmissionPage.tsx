@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ChevronLeft, Info, Lock, RefreshCw, SkipForward } from 'lucide-react';
+import { ChevronLeft, Info, Lock, RefreshCw, SkipForward, Trash2 } from 'lucide-react';
 import { ACTIVITY_KIND_LABEL, hasStudentFile, studentLabel as labelOf } from '@vega/shared';
 import { api } from '@/lib/api';
 import { queryKeys } from '@/lib/queryKeys';
@@ -124,6 +124,7 @@ export function SubmissionPage() {
   const [parkOpen, setParkOpen] = useState(false);
   const [parkReason, setParkReason] = useState('');
   const [reprocessOpen, setReprocessOpen] = useState(false);
+  const [discardOpen, setDiscardOpen] = useState(false);
 
   const detailQuery = useQuery({
     queryKey: queryKeys.submission(id),
@@ -172,12 +173,31 @@ export function SubmissionPage() {
         queryClient.invalidateQueries({ queryKey: queryKeys.submission(id) }),
       ]);
       notify.success(
-        'Reproceso en cola',
-        scope === 'grade_only' ? 'Se conservarán las dos lecturas existentes.' : 'Se repetirán lectura y corrección.',
+        'Reproceso iniciado',
+        scope === 'grade_only' || detail?.activity.kind === 'forum'
+          ? 'La nueva corrección ya está en marcha.'
+          : 'La nueva lectura y corrección ya están en marcha.',
+      );
+      navigate('/procesos');
+    },
+    onError: (error) => notify.error('No se ha podido iniciar el reproceso', error),
+  });
+
+  const discard = useMutation({
+    mutationFn: () => api.discardCorrection(id),
+    onSuccess: async () => {
+      setDiscardOpen(false);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.queueRoot }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.submission(id) }),
+      ]);
+      notify.success(
+        'Propuesta descartada',
+        'La entrega vuelve a Pendientes y la corregirá el siguiente proceso.',
       );
       navigate('/');
     },
-    onError: (error) => notify.error('No se ha podido iniciar el reproceso', error),
+    onError: (error) => notify.error('No se ha podido descartar la propuesta', error),
   });
 
   const views = detail && !hasStudentFile(detail.activity.kind) ? TEXT_VIEWS : FILE_VIEWS;
@@ -209,8 +229,25 @@ export function SubmissionPage() {
   }, [view, views]);
 
   const studentLabel = detail ? labelOf(detail.submission, detail.student) : '';
-  const readOnly = detail?.submission.status === 'published';
-  const working = save.isPending || validate.isPending || publish.isPending || park.isPending || reprocess.isPending;
+  const status = detail?.submission.status;
+  const validated = status === 'validated';
+  const published = status === 'published';
+  const publicationRetry = status === 'error' && detail?.correction?.validatedAt != null;
+  const readOnly = status !== 'graded';
+  const canReprocess = !publicationRetry && (status === 'graded' || status === 'parked' || status === 'error');
+  // Mismo alcance que reprocesar, y por la misma razón: lo que no se puede
+  // volver a corregir tampoco se puede tirar. La diferencia está en el momento
+  // en que se gasta —reprocesar llama al modelo ya; descartar espera al
+  // siguiente proceso—, no en qué entregas lo admiten.
+  const canDiscard = canReprocess;
+  const canPark = !publicationRetry && (status === 'graded' || status === 'error');
+  const working =
+    save.isPending ||
+    validate.isPending ||
+    publish.isPending ||
+    park.isPending ||
+    reprocess.isPending ||
+    discard.isPending;
 
   const panels = useMemo(() => {
     if (!detail) return [];
@@ -235,9 +272,11 @@ export function SubmissionPage() {
           correction={detail.correction}
           submissionId={detail.submission.id}
           feedbackName={`${detail.activity.slug}-${detail.submission.studentRef}.pdf`}
+          activityKind={detail.activity.kind}
           graded={detail.activity.graded}
           draft={draft}
           readOnly={readOnly ?? false}
+          published={published}
           onQuoteOpen={(page) => {
             setOriginalPage(Math.max(0, page - 1));
             setView('original');
@@ -362,25 +401,37 @@ export function SubmissionPage() {
           </TabsList>
         </Tabs>
 
-        {!readOnly ? (
+        {canPark || canReprocess || canDiscard ? (
           <div className="flex flex-wrap items-center justify-center gap-2 border-t border-border px-3 py-2">
-            {detail.submission.status !== 'parked' ? (
+            {canPark ? (
               <Button size="sm" variant="ghost" onClick={() => setParkOpen(true)}>
                 <SkipForward aria-hidden="true" />
                 Omitir
               </Button>
             ) : null}
-            <Button size="sm" variant="ghost" onClick={() => setReprocessOpen(true)}>
-              <RefreshCw aria-hidden="true" />
-              Forzar reproceso
-            </Button>
+            {canDiscard ? (
+              <Button size="sm" variant="ghost" onClick={() => setDiscardOpen(true)}>
+                <Trash2 aria-hidden="true" />
+                Descartar propuesta
+              </Button>
+            ) : null}
+            {canReprocess ? (
+              <Button size="sm" variant="ghost" onClick={() => setReprocessOpen(true)}>
+                <RefreshCw aria-hidden="true" />
+                Volver a procesar
+              </Button>
+            ) : null}
           </div>
         ) : null}
 
-        {readOnly ? (
+        {validated || published || publicationRetry ? (
           <p className="flex items-center justify-center gap-2 border-t border-border bg-muted px-4 py-2 text-ui text-muted-foreground">
             <Lock className="size-4 shrink-0" aria-hidden="true" />
-            Publicada en Moodle: esta corrección ya no se puede modificar.
+            {published
+              ? 'Publicada en Moodle: esta corrección ya no se puede modificar.'
+              : publicationRetry
+                ? 'La corrección sigue validada. La publicación falló; puedes volver a intentarla.'
+                : 'Validada por el profesorado: la corrección queda fijada hasta publicarla.'}
           </p>
         ) : null}
 
@@ -409,6 +460,7 @@ export function SubmissionPage() {
         total={draft.total}
         maxScore={maxScore}
         status={detail.submission.status}
+        canPublish={validated || publicationRetry}
         dirty={draft.dirty}
         saving={save.isPending}
         working={working}
@@ -446,23 +498,60 @@ export function SubmissionPage() {
       <Sheet open={reprocessOpen} onOpenChange={(open) => !open && setReprocessOpen(false)}>
         <SheetContent>
           <SheetHeader>
-            <SheetTitle>Forzar reproceso</SheetTitle>
+            <SheetTitle>Volver a procesar</SheetTitle>
             <SheetDescription>
-              El borrador actual se sustituirá cuando termine el nuevo proceso. Elige cuánto repetir.
+              El nuevo proceso empieza ahora y sustituirá el borrador actual cuando termine.
             </SheetDescription>
           </SheetHeader>
           <SheetBody className="flex flex-col gap-2">
-            {detail.transcription ? (
+            {!hasStudentFile(detail.activity.kind) ? (
+              <Button variant="outline" size="lg" disabled={reprocess.isPending} onClick={() => reprocess.mutate('grade_only')}>
+                Volver a corregir
+              </Button>
+            ) : detail.transcription ? (
               <Button variant="outline" size="lg" disabled={reprocess.isPending} onClick={() => reprocess.mutate('grade_only')}>
                 Sólo corrección
               </Button>
             ) : null}
-            <Button variant="outline" size="lg" disabled={reprocess.isPending} onClick={() => reprocess.mutate('full')}>
-              Lectura y corrección
-            </Button>
+            {hasStudentFile(detail.activity.kind) ? (
+              <Button variant="outline" size="lg" disabled={reprocess.isPending} onClick={() => reprocess.mutate('full')}>
+                Lectura y corrección
+              </Button>
+            ) : null}
           </SheetBody>
           <SheetFooter>
             <Button variant="ghost" size="lg" disabled={reprocess.isPending} onClick={() => setReprocessOpen(false)}>Cancelar</Button>
+          </SheetFooter>
+        </SheetContent>
+      </Sheet>
+
+      <Sheet open={discardOpen} onOpenChange={(open) => !open && setDiscardOpen(false)}>
+        <SheetContent>
+          <SheetHeader>
+            <SheetTitle>¿Descartar lo que propuso la IA?</SheetTitle>
+            <SheetDescription>
+              Se borran la corrección propuesta{detail.transcription ? ', la transcripción' : ''} y
+              tus cambios sin validar sobre esta entrega. Vuelve a Pendientes y la corregirá de cero
+              el siguiente proceso.
+            </SheetDescription>
+          </SheetHeader>
+          <SheetFooter>
+            <Button
+              variant="ghost"
+              size="lg"
+              disabled={discard.isPending}
+              onClick={() => setDiscardOpen(false)}
+            >
+              Cancelar
+            </Button>
+            <Button
+              variant="destructive"
+              size="lg"
+              loading={discard.isPending}
+              onClick={() => discard.mutate()}
+            >
+              Descartar
+            </Button>
           </SheetFooter>
         </SheetContent>
       </Sheet>

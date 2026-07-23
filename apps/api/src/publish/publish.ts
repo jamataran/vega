@@ -11,6 +11,7 @@ import {
 import type { LmsConnector, RemoteGrade, RemoteReply, SubmissionRef } from '@vega/connector-lms';
 import { schema } from '../db/client.js';
 import { buildFeedbackPdf, feedbackFilename } from '../feedback/pdf.js';
+import type { FeedbackOriginalFile } from '../feedback/pdf.js';
 import type { AppContext } from '../context.js';
 
 /**
@@ -54,8 +55,10 @@ export interface PublishInput {
     readonly grade: boolean;
     readonly file: boolean;
   };
-  /** Hace falta para reconstruir el original del alumno en el PDF de feedback. */
+  /** Respaldo textual si no se puede incorporar el fichero original al PDF. */
   readonly transcription: Transcription | null;
+  /** Fichero real que se antepone al PDF de corrección, si está disponible. */
+  readonly originalFile?: FeedbackOriginalFile | null;
 }
 
 /**
@@ -134,6 +137,7 @@ export async function publishToLms(
       activity: input.activity,
       correction: input.correction,
       transcription: input.transcription,
+      originalFile: input.originalFile,
     });
 
     await connector.publishFeedbackFile(ref, {
@@ -218,13 +222,16 @@ function hasFeedbackFile(input: PublishInput): boolean {
  *
  * Las marcas previas **no se pisan**: si la nota se publicó anoche y hoy sólo se
  * ha reintentado el fichero, la fecha de la nota tiene que seguir siendo la de
- * anoche. Es el rastro que permite explicar qué vio el alumno y cuándo.
+ * anoche. Es el rastro que permite explicar qué vio el alumno y cuándo. La
+ * bandera automática se activa únicamente desde el lote; la ruta manual conserva
+ * el valor por defecto `false`.
  */
 export async function recordPublication(
   ctx: AppContext,
   correction: { id: string; gradePublishedAt: Date | null; feedbackFilePublishedAt: Date | null },
   submissionId: string,
   outcome: PublishOutcome,
+  publishedAutomatically = false,
 ): Promise<void> {
   const now = new Date();
   const gradeAt = outcome.gradePublished ? (correction.gradePublishedAt ?? now) : null;
@@ -237,7 +244,7 @@ export async function recordPublication(
         gradePublishedAt: gradeAt,
         feedbackFilePublishedAt: fileAt,
         publishedAt: outcome.complete ? now : null,
-        publishedAutomatically: false,
+        publishedAutomatically,
         publishNotice: outcome.notice,
       })
       .where(eq(schema.corrections.id, correction.id));

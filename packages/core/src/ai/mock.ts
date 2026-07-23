@@ -7,6 +7,7 @@ import type {
 } from '@vega/shared';
 import { estimateCostCents } from '../cost/pricing.js';
 import type {
+  AiCallOptions,
   AiProvider,
   GradedItem,
   GradeInput,
@@ -458,8 +459,20 @@ export interface MockAiProviderOptions {
 
 const DEFAULT_MODEL = 'mock-claude-opus-4-8';
 
-function sleep(ms: number): Promise<void> {
-  return ms > 0 ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve();
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
+  if (ms <= 0) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal?.reason instanceof Error ? signal.reason : new Error('Operación cancelada.'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 /**
@@ -538,8 +551,8 @@ export class MockAiProvider implements AiProvider {
     this.#promptSalt = options.promptSalt ?? '';
   }
 
-  async transcribe(input: TranscribeInput): Promise<TranscribeResult> {
-    await sleep(this.#delayMs);
+  async transcribe(input: TranscribeInput, options?: AiCallOptions): Promise<TranscribeResult> {
+    await sleep(this.#delayMs, options?.signal);
 
     const rng = makeRng(`${input.submissionId}:transcripcion:${input.reading ?? 'single'}:${this.#promptSalt}`);
     const pageManifest = input.pages.flatMap((source) =>
@@ -617,8 +630,8 @@ export class MockAiProvider implements AiProvider {
     };
   }
 
-  async grade(input: GradeInput): Promise<GradeResult> {
-    await sleep(this.#delayMs);
+  async grade(input: GradeInput, options?: AiCallOptions): Promise<GradeResult> {
+    await sleep(this.#delayMs, options?.signal);
 
     const rng = makeRng(`${input.submissionId}:correccion:${this.#promptSalt}`);
 
@@ -788,8 +801,8 @@ export class MockAiProvider implements AiProvider {
     });
   }
 
-  async triage(input: TriageInput): Promise<TriageResult> {
-    await sleep(this.#delayMs);
+  async triage(input: TriageInput, options?: AiCallOptions): Promise<TriageResult> {
+    await sleep(this.#delayMs, options?.signal);
     const normalized = input.message.toLowerCase();
     const rng = makeRng(`${input.submissionId}:triage:${this.#promptSalt}`);
     const label = /errata|typo|corregid/.test(normalized)
@@ -816,8 +829,8 @@ export class MockAiProvider implements AiProvider {
     };
   }
 
-  async verify(input: VerifyInput): Promise<VerifyResult> {
-    await sleep(this.#delayMs);
+  async verify(input: VerifyInput, options?: AiCallOptions): Promise<VerifyResult> {
+    await sleep(this.#delayMs, options?.signal);
     const rng = makeRng(`${input.submissionId}:verify:${this.#promptSalt}`);
     const severe = rng.chance(0.25);
     return {
@@ -842,8 +855,8 @@ export class MockAiProvider implements AiProvider {
     };
   }
 
-  async verifyConnection(): Promise<VerifyConnectionResult> {
-    await sleep(this.#delayMs);
+  async verifyConnection(options?: AiCallOptions): Promise<VerifyConnectionResult> {
+    await sleep(this.#delayMs, options?.signal);
     return {
       ok: true,
       message:

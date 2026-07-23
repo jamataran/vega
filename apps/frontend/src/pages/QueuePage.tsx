@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { Search } from 'lucide-react';
-import { REVIEWABLE_STATUSES, SUBMISSION_STATUS_LABEL } from '@vega/shared';
+import { SUBMISSION_STATUS_LABEL } from '@vega/shared';
 import type { SubmissionStatus } from '@vega/shared';
 import { api } from '@/lib/api';
 import type { QueueParams } from '@/lib/api';
@@ -22,16 +22,20 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { EmptyState, ErrorState } from '@/components/common/Feedback';
 import { QueueRow, QueueRowSkeleton } from '@/components/queue/QueueRow';
 
-/** Lo que reclama al profesor va primero; el resto sigue el orden del ciclo de vida. */
+/**
+ * Lo que reclama al profesor va primero; el resto sigue el orden del ciclo de
+ * vida. `pending` está porque es el destino de descartar una propuesta de la
+ * IA: sin pestaña, la entrega desaparecería justo cuando alguien acaba de
+ * pedir a mano que se vuelva a corregir. Los estados de trabajo en curso
+ * —transcribiendo, corrigiendo— no salen aquí: viven en Procesos, y como tabs
+ * sólo serían casillas que parpadean.
+ */
 const TAB_ORDER: readonly SubmissionStatus[] = [
   'graded',
+  'pending',
   'parked',
   'error',
   'validated',
-  'pending',
-  'transcribing',
-  'transcribed',
-  'grading',
   'published',
 ];
 
@@ -58,7 +62,7 @@ const EMPTY_COPY: Record<SubmissionStatus, { title: string; description: string 
   },
   pending: {
     title: 'Sin entregas pendientes',
-    description: 'No hay entregas descargadas de Moodle sin procesar.',
+    description: 'Aquí esperan las entregas descargadas de Moodle que aún no se han corregido.',
   },
   transcribing: { title: 'Nada transcribiéndose', description: 'No hay OCR en curso ahora mismo.' },
   transcribed: {
@@ -107,13 +111,6 @@ export function QueuePage() {
   const total = queue.data?.pages[0]?.meta.total ?? 0;
   const isFiltered = activityId !== '' || debouncedSearch.trim() !== '';
 
-  const tabs = useMemo(() => {
-    const always = new Set<SubmissionStatus>(REVIEWABLE_STATUSES);
-    return TAB_ORDER.filter(
-      (value) => always.has(value) || value === status || countOf(countsQuery.data, value) > 0,
-    );
-  }, [countsQuery.data, status]);
-
   const empty = EMPTY_COPY[status];
 
   return (
@@ -126,7 +123,7 @@ export function QueuePage() {
 
       <div className="sticky top-14 z-10 -mx-4 border-b border-border bg-background px-4 pb-3 pt-1">
         <TabsList aria-label="Filtrar la cola por estado">
-          {tabs.map((value) => (
+          {TAB_ORDER.map((value) => (
             <TabsTrigger key={value} value={value}>
               <span>{SUBMISSION_STATUS_LABEL[value]}</span>
               <span className="rounded-sm px-1 text-micro font-semibold text-muted-foreground">

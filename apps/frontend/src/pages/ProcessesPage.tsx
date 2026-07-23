@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Clock, Play, User as UserIcon } from 'lucide-react';
+import { Clock, Play, Square, User as UserIcon } from 'lucide-react';
 import type { BatchRun } from '@vega/shared';
 import { api } from '@/lib/api';
 import { queryKeys } from '@/lib/queryKeys';
@@ -16,12 +16,22 @@ const RUN_STATUS_LABEL: Record<BatchRun['status'], string> = {
   running: 'En curso',
   done: 'Terminado',
   failed: 'Fallido',
+  cancelled: 'Parado',
 };
 
-const RUN_STATUS_VARIANT: Record<BatchRun['status'], 'info' | 'success' | 'destructive'> = {
+/**
+ * Parar no es fallar: un proceso que alguien detuvo hizo exactamente lo que se
+ * le pidió. Pintarlo en rojo junto a los que se rompieron solos obligaría a
+ * leer cada línea para saber cuál exige actuar.
+ */
+const RUN_STATUS_VARIANT: Record<
+  BatchRun['status'],
+  'info' | 'success' | 'destructive' | 'warning'
+> = {
   running: 'info',
   done: 'success',
   failed: 'destructive',
+  cancelled: 'warning',
 };
 
 /** Duración de un proceso ya cerrado, en la unidad que se lee de un vistazo. */
@@ -59,7 +69,12 @@ function kindsLabel(run: BatchRun): string | null {
   return run.kinds[0] === 'forum' ? 'Sólo foros' : 'Sólo entregas';
 }
 
-function RunCard({ run }: { run: BatchRun }) {
+function RunCard({ run, onCancel, cancelling }: {
+  run: BatchRun;
+  /** `null` en quien no puede pararlo: entonces no se ofrece el botón. */
+  onCancel: (() => void) | null;
+  cancelling: boolean;
+}) {
   const scheduled = run.triggeredBy === null;
   const elapsed = duration(run);
   const scope = kindsLabel(run);
@@ -90,7 +105,23 @@ function RunCard({ run }: { run: BatchRun }) {
               </>
             ) : null}
           </span>
+          {run.status === 'running' && onCancel !== null ? (
+            <Button
+              size="sm"
+              variant="outline"
+              className="ml-auto"
+              loading={cancelling}
+              onClick={onCancel}
+            >
+              <Square aria-hidden="true" />
+              Parar
+            </Button>
+          ) : null}
         </div>
+
+        {run.closedReason ? (
+          <p className="mt-2 text-ui text-muted-foreground">{run.closedReason}</p>
+        ) : null}
 
         <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-5">
           <Figure label="Ingeridas" value={formatInteger(run.submissionsIngested)} />
@@ -178,6 +209,19 @@ export function ProcessesPage() {
     onError: (error) => notify.error('No se ha podido lanzar el proceso', error),
   });
 
+  const cancel = useMutation({
+    mutationFn: (runId: string) => api.cancelBatchRun(runId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.batchRuns });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.queueRoot });
+      notify.success(
+        'Proceso parado',
+        'La entrega que estaba a medias vuelve a la cola: no se ha dado por corregida.',
+      );
+    },
+    onError: (error) => notify.error('No se ha podido parar el proceso', error),
+  });
+
   const runs = query.data?.items ?? [];
   const running = runs.some((run) => run.status === 'running');
 
@@ -243,7 +287,12 @@ export function ProcessesPage() {
         // terminado aunque la pantalla ya lo esté enseñando.
         <ul className="flex flex-col gap-2" aria-live="polite">
           {runs.map((run) => (
-            <RunCard key={run.id} run={run} />
+            <RunCard
+              key={run.id}
+              run={run}
+              onCancel={canTrigger ? () => cancel.mutate(run.id) : null}
+              cancelling={cancel.isPending && cancel.variables === run.id}
+            />
           ))}
         </ul>
       )}

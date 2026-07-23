@@ -342,15 +342,36 @@ si el conector devuelve `LMS_AUTH` o `LMS_UNAVAILABLE` al publicar la nota; la e
 
 ### `POST /api/submissions/{id}/reprocess`
 
-`routes.reprocess(id)` · **Profesor** · sin cuerpo
+`routes.reprocess(id)` · **Profesor** · `ReprocessSubmissionRequest`
 
-Devuelve la entrega a `pending` para que el siguiente lote la recoja: para recuperarse de un `error`,
-o para recorregir tras cambiar el contexto, la solución de referencia o el reparto.
+Vuelve a corregir la entrega **ahora**: reserva el ejecutor y lanza un proceso acotado a ella, sin
+volver a consultar Moodle. `scope` decide cuánto se repite: `full` repite lectura y corrección;
+`grade_only` reutiliza la lectura doble ya pagada y sólo vuelve a corregir —y exige que exista, o
+responde 409—.
 
-**Errores**: 401, 403, 404; **409** si la entrega está en `published`.
+Admite `graded`, `parked` y `error`. Una corrección **validada** queda fijada: sólo se puede
+publicar.
 
-> **Hueco del contrato**: `api.ts` no define esquema de petición para el alcance del reproceso
-> (¿desde el OCR o sólo la corrección?). Ver las preguntas abiertas de `HU-11`.
+**Respuesta 202** — `{ queued: true }`. El trabajo corre en segundo plano y se sigue desde Procesos.
+
+**Errores**: 401, 403, 404; **409** si está publicada, validada, o ya dentro de un proceso.
+
+### `POST /api/submissions/{id}/discard`
+
+`routes.discardCorrection(id)` · **Profesor** · sin cuerpo
+
+Tira lo que propuso la IA —corrección, apartados y transcripción— y devuelve la entrega a
+`pending`, donde la recogerá el siguiente proceso.
+
+Es deliberadamente **distinto de reprocesar**: reprocesar llama al modelo en ese momento y cuesta
+dinero ya; descartar sólo limpia y espera. Es la salida del profesor que mira una propuesta, decide
+que no vale nada y no quiere ni validarla ni aparcarla.
+
+Mismo alcance que el reproceso: `graded`, `parked` y `error`.
+
+**Respuesta 200** — `{ queued: true }`.
+
+**Errores**: 401, 403, 404; **409** si está publicada, validada, o ya dentro de un proceso.
 
 ---
 
@@ -686,7 +707,8 @@ lee releyendo la lista. Aquí hubo un `queued` que valía cero por construcción
 traducía a «no había entregas pendientes» — justo lo contrario de lo que ocurría.
 
 El `BatchRun` trae, además de los recuentos de corrección, `submissionsIngested`,
-`activitiesFailed`, `kinds` (los tipos de actividad barridos) y `problems`: el motivo por el que
+`activitiesFailed`, `closedReason` (por qué se cerró, cuando hay algo que contar),
+`kinds` (los tipos de actividad barridos) y `problems`: el motivo por el que
 falló la ingesta de cada actividad, con `kind` `config` (hay que arreglar algo en Ajustes) o
 `transient` (se reintenta solo).
 
@@ -716,6 +738,7 @@ llamadas quedan trazadas por intento en `ai_calls`.
 | `validate` | POST | `/api/submissions/{id}/validate` | Profesor · por curso | `SaveCorrectionRequest` | `CorrectionResponse` |
 | `publish` | POST | `/api/submissions/{id}/publish` | Profesor · por curso | — | `CorrectionResponse` |
 | `reprocess` | POST | `/api/submissions/{id}/reprocess` | Profesor · por curso | `ReprocessSubmissionRequest` | `{ queued }` |
+| `discardCorrection` | POST | `/api/submissions/{id}/discard` | Profesor · por curso | — | `{ queued: true }` |
 | `park` | POST | `/api/submissions/{id}/park` | Profesor · por curso | `ParkSubmissionRequest` | `{ queued: false }` |
 | `original` | GET | `/api/submissions/{id}/original` | Profesor · por curso | — | Fichero original con su MIME real |
 | `activities` | GET | `/api/activities` | Profesor · por curso | — | `ActivityListResponse` |
@@ -745,6 +768,27 @@ llamadas quedan trazadas por intento en `ai_calls`.
 | `costBreakdown` | GET | `/api/stats/cost` | Profesor · por curso | *query* | `CostBreakdownResponse` |
 | `batchRuns` | GET | `/api/batch/runs` | Profesor | — | `BatchRunListResponse` |
 | `triggerBatch` | POST | `/api/batch/run` | **Administrador** | — | `TriggerBatchResponse` |
+| `cancelBatchRun` | POST | `/api/batch/runs/{id}/cancel` | **Administrador** | — | `TriggerBatchResponse` |
+
+### `POST /api/batch/runs/{id}/cancel`
+
+`routes.cancelBatchRun` · **Administrador** · sin cuerpo
+
+Para un proceso en marcha. Cierra la fila como `cancelled` —que no es `failed`: pararlo es una
+decisión, no una avería— y aborta el trabajo en vuelo, incluidas las llamadas abiertas contra
+Anthropic. La entrega que estuviera a medias **vuelve a `pending`**: no ha fallado por su
+contenido y no debe exigir una intervención manual.
+
+Un proceso que ya había terminado responde 409. Uno huérfano —de una instancia que se murió— se
+cierra igual aunque no quede nada que abortar: es lo que desatasca el cerrojo del ejecutor.
+
+Existe además un límite duro de **12 horas** (`BATCH_MAX_RUNTIME_MS`): al alcanzarlo el proceso se
+detiene solo, con el mismo tratamiento para lo que estuviera a medias.
+
+**Respuesta 200** — `TriggerBatchResponse` con el proceso ya cerrado.
+
+**Errores**: 401, 403 (no administrador), 404, 409 (ya había terminado).
+
 | `prompts` | GET | `/api/prompts` | Admin | — | `PromptListResponse` |
 | `prompt` | PUT | `/api/prompts/{key}` | Admin | `UpdatePromptRequest` | `PromptResponse` |
 | `aiCalls` | GET | `/api/ai-calls` | Admin | `AiCallQuery` | `AiCallListResponse` |

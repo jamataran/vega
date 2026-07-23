@@ -90,6 +90,11 @@ export function useCorrectionDraft(correction: Correction | null) {
     setDraft((current) => ({ ...current, teacherSummary: summary }));
   }, []);
 
+  /** Devuelve el comentario global a la propuesta de la IA. */
+  const restoreSummary = useCallback(() => {
+    setDraft((current) => ({ ...current, teacherSummary: null }));
+  }, []);
+
   const setLatex = useCallback((latex: string | null) => {
     setDraft((current) => ({ ...current, teacherLatex: latex }));
   }, []);
@@ -116,21 +121,22 @@ export function useCorrectionDraft(correction: Correction | null) {
 
   const dirty = useMemo(() => {
     if (!correction) return false;
-    if ((draft.teacherSummary ?? '') !== (correction.teacherSummary ?? '')) return true;
-    if ((draft.teacherLatex ?? '') !== (correction.teacherLatex ?? '')) return true;
+    if (draft.teacherSummary !== correction.teacherSummary) return true;
+    if (draft.teacherLatex !== correction.teacherLatex) return true;
     return correction.items.some((item) => {
       const entry = draft.items[item.id];
       if (!entry) return false;
       return (
         entry.teacherPoints !== item.teacherPoints ||
-        (entry.teacherFeedback ?? '') !== (item.teacherFeedback ?? '')
+        entry.teacherFeedback !== item.teacherFeedback
       );
     });
   }, [correction, draft]);
 
   /** Cuántos apartados ha tocado el profesor: el resumen honesto de la sesión. */
   const editedCount = useMemo(
-    () => items.filter((item) => item.teacherPoints !== null).length,
+    () =>
+      items.filter((item) => item.teacherPoints !== null || item.teacherFeedback !== null).length,
     [items],
   );
 
@@ -172,6 +178,7 @@ export function useCorrectionDraft(correction: Correction | null) {
     setFeedback,
     restoreItem,
     setSummary,
+    restoreSummary,
     setLatex,
     restoreLatex,
     buildRequest,

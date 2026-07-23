@@ -12,6 +12,7 @@ import { connectorForUser } from '../lms/factory.js';
 import { schema } from '../db/client.js';
 import { FileStore } from '../storage/files.js';
 import { countPages } from './pages.js';
+import { getSettings } from '../settings/service.js';
 import type { AppContext } from '../context.js';
 
 /**
@@ -36,6 +37,19 @@ import type { AppContext } from '../context.js';
  *     haría invisible: el alumno habría entregado y nadie lo sabría (HU-08, RN-8).
  */
 
+/**
+ * Fecha a partir de la cual una entrega se considera vigente, o `null` si no
+ * hay límite configurado.
+ *
+ * Se calcula **una vez por proceso** y no por actividad: si cada actividad
+ * mirase su propio reloj, dos entregas iguales podrían acabar una dentro y otra
+ * fuera del corte por los segundos que tardó la anterior en descargarse.
+ */
+export function ingestCutoff(maxAgeDays: number, now: Date = new Date()): Date | null {
+  if (!Number.isFinite(maxAgeDays) || maxAgeDays <= 0) return null;
+  return new Date(now.getTime() - maxAgeDays * 86_400_000);
+}
+
 export interface IngestReport {
   /** Entregas nuevas creadas. */
   readonly ingested: number;
@@ -43,6 +57,8 @@ export interface IngestReport {
   readonly activitiesFailed: number;
   /** Actividades consultadas sin incidencias. */
   readonly activitiesVisited: number;
+  /** Entregas que el LMS ofrecía pero superaban la antigüedad máxima. */
+  readonly skippedTooOld: number;
   readonly problems: readonly IngestProblem[];
 }
 
@@ -100,7 +116,10 @@ export async function ingestAll(
   let ingested = 0;
   let activitiesFailed = 0;
   let activitiesVisited = 0;
+  let skippedTooOld = 0;
   const problems: IngestProblem[] = [];
+
+  const cutoff = ingestCutoff((await getSettings(ctx)).ingest.maxAgeDays);
 
   // Un conector por usuario y no por actividad: construirlo lee ajustes y el
   // token de la base de datos, y varias actividades del mismo profesor comparten
@@ -141,8 +160,9 @@ export async function ingestAll(
     }
 
     try {
-      const created = await ingestActivity(ctx, store, connector, activity, log);
-      ingested += created;
+      const outcome = await ingestActivity(ctx, store, connector, activity, log, cutoff);
+      ingested += outcome.created;
+      skippedTooOld += outcome.skippedTooOld;
       activitiesVisited += 1;
     } catch (error) {
       activitiesFailed += 1;
@@ -156,8 +176,11 @@ export async function ingestAll(
     }
   }
 
-  log.info({ ingested, activitiesVisited, activitiesFailed }, 'Ingesta terminada');
-  return { ingested, activitiesFailed, activitiesVisited, problems };
+  log.info(
+    { ingested, activitiesVisited, activitiesFailed, skippedTooOld },
+    'Ingesta terminada',
+  );
+  return { ingested, activitiesFailed, activitiesVisited, skippedTooOld, problems };
 }
 
 type ActivityRow = typeof schema.activities.$inferSelect;
@@ -169,7 +192,8 @@ async function ingestActivity(
   connector: LmsConnector,
   activity: ActivityRow,
   log: Logger,
-): Promise<number> {
+  cutoff: Date | null,
+): Promise<{ created: number; skippedTooOld: number }> {
   const { db } = ctx;
 
   const activityRef = {
@@ -182,8 +206,17 @@ async function ingestActivity(
   const withFile = hasStudentFile(activity.kind);
 
   let created = 0;
+  let skippedTooOld = 0;
 
   for (const item of remote) {
+    // La antigüedad se mira **antes** de tocar nada: ni ficha del alumno, ni
+    // fila, ni descarga. Una entrega de hace meses que no se va a corregir
+    // tampoco tiene por qué ocupar disco ni ensuciar la cola.
+    if (cutoff !== null && new Date(item.submittedAt) < cutoff) {
+      skippedTooOld += 1;
+      continue;
+    }
+
     // Cada entrega va por su cuenta: una mala no puede tirar el resto de la
     // clase. El fallo se guarda en la propia entrega, que es donde el profesor
     // lo va a buscar.
@@ -221,7 +254,14 @@ async function ingestActivity(
     }
   }
 
-  return created;
+  if (skippedTooOld > 0) {
+    log.info(
+      { slug: activity.slug, skippedTooOld },
+      'Entregas omitidas por superar la antigüedad máxima',
+    );
+  }
+
+  return { created, skippedTooOld };
 }
 
 /**

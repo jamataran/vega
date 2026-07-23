@@ -4,6 +4,7 @@ import type { CorrectionItem } from '@vega/shared';
 import { cn } from '@/lib/cn';
 import { formatPoints } from '@/lib/format';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { AutoTextarea } from '@/components/ui/textarea';
 import { ConfidenceBadge } from '@/components/common/status';
@@ -13,6 +14,9 @@ import { ScoreStepper } from './ScoreStepper';
 interface CorrectionItemCardProps {
   item: CorrectionItem;
   readOnly: boolean;
+  published: boolean;
+  /** Si este desglose viaja a Moodle o sólo sirve para la revisión interna. */
+  publishesToMoodle: boolean;
   onQuoteOpen: (page: number) => void;
   onPointsChange: (points: number) => void;
   onFeedbackChange: (feedback: string | null) => void;
@@ -22,13 +26,16 @@ interface CorrectionItemCardProps {
 export function CorrectionItemCard({
   item,
   readOnly,
+  published,
+  publishesToMoodle,
   onQuoteOpen,
   onPointsChange,
   onFeedbackChange,
   onRestore,
 }: CorrectionItemCardProps) {
-  const edited = item.teacherPoints !== null;
+  const edited = item.teacherPoints !== null || item.teacherFeedback !== null;
   const value = effectivePoints(item);
+  const feedback = item.teacherFeedback ?? item.aiFeedback;
 
   return (
     <Card asChild>
@@ -73,37 +80,47 @@ export function CorrectionItemCard({
         </div>
 
         {edited && !readOnly ? (
-          <button
+          <Button
             type="button"
+            size="sm"
+            variant="outline"
             onClick={onRestore}
-            className={cn(
-              'mt-3 flex h-9 w-full items-center justify-center gap-2 rounded-md border border-border',
-              'text-ui text-muted-foreground transition-colors hover:border-border-strong hover:text-foreground',
-            )}
+            aria-label={`Restaurar la puntuación y el feedback del apartado ${item.label} a la propuesta de la IA`}
+            className="mt-3 w-full text-muted-foreground"
           >
             <Undo2 className="size-4" aria-hidden="true" />
-            Restaurar la propuesta de la IA ({formatPoints(item.aiPoints)})
-          </button>
+            Restaurar propuesta de la IA
+          </Button>
         ) : null}
 
         <div className="mt-4">
           <label className="eyebrow mb-1.5 block" htmlFor={`feedback-${item.id}`}>
-            Feedback para el alumno
+            {publishesToMoodle ? 'Feedback del apartado en Moodle' : 'Feedback interno del apartado'}
           </label>
           <AutoTextarea
             id={`feedback-${item.id}`}
-            value={item.teacherFeedback ?? ''}
-            placeholder={item.aiFeedback || 'Escribe el feedback de este apartado…'}
+            value={feedback}
+            placeholder="Escribe el feedback de este apartado…"
             disabled={readOnly}
             aria-describedby={`feedback-${item.id}-hint`}
-            onChange={(event) =>
-              onFeedbackChange(event.target.value === '' ? null : event.target.value)
-            }
+            onChange={(event) => onFeedbackChange(event.target.value)}
           />
           <p id={`feedback-${item.id}-hint`} className="mt-1.5 text-ui text-muted-foreground">
-            {item.teacherFeedback === null
-              ? 'Se enviará el feedback de la IA. Escribe aquí para sustituirlo.'
-              : 'Has reescrito el feedback de este apartado.'}
+            {publishesToMoodle
+              ? published
+                ? item.teacherFeedback === null
+                  ? 'Se publicó la propuesta de la IA.'
+                  : 'Se publicó la versión revisada por el profesor.'
+                : readOnly
+                  ? item.teacherFeedback === null
+                    ? 'Propuesta de la IA validada. Se publicará al confirmar la publicación.'
+                    : 'Versión del profesor validada. Se publicará al confirmar la publicación.'
+                : item.teacherFeedback === null
+                  ? 'Se publicará esta propuesta de la IA. Puedes revisarla antes de validar.'
+                  : 'Has revisado este feedback. Se publicará tu versión.'
+              : item.teacherFeedback === null
+                ? 'Propuesta de la IA para la revisión interna. No se publica en el foro.'
+                : 'Versión revisada para uso interno. No se publica en el foro.'}
           </p>
 
           {item.aiQuote ? (

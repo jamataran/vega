@@ -617,6 +617,21 @@ function httpFailure(status: number, what: string): LmsAuthError | LmsUnavailabl
   );
 }
 
+/**
+ * El `errorcode` que devolvió Moodle, si el fallo viene de una llamada suya.
+ *
+ * Existe para que quien llama pueda **reaccionar** al motivo en vez de leer el
+ * mensaje: distinguir un `accessexception` —esta función no vale aquí, prueba
+ * la otra— de un token caducado es la diferencia entre reintentar con sentido y
+ * rendirse. El `errorcode` viaja como `cause` de la excepción para no ensuciar
+ * las clases de error compartidas con detalles de Moodle.
+ */
+export function moodleErrorcodeOf(error: unknown): string | null {
+  if (!(error instanceof Error)) return null;
+  const parsed = MoodleError.safeParse(error.cause);
+  return parsed.success ? parsed.data.errorcode.toLowerCase() : null;
+}
+
 /** Los errores de Moodle llegan con HTTP 200: manda el `errorcode`, no el estado. */
 function moodleFailure(error: MoodleError, wsfunction: string): LmsAuthError | LmsUnavailableError {
   if (isAuthErrorcode(error.errorcode)) {
@@ -633,10 +648,12 @@ function moodleFailure(error: MoodleError, wsfunction: string): LmsAuthError | L
         : 'Revisa el token y sus permisos en Moodle.';
     return new LmsAuthError(
       `Moodle ha rechazado la llamada a ${wsfunction} (${error.errorcode}): ${error.message}. ${hint}`,
+      { cause: error },
     );
   }
   return new LmsUnavailableError(
     `Moodle ha rechazado la llamada a ${wsfunction} (${error.errorcode}): ${error.message}`,
+    { cause: error },
   );
 }
 

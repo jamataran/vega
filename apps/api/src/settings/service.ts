@@ -111,6 +111,12 @@ export async function getSettings(ctx: AppContext): Promise<AppSettings> {
       pagesPerChunk: int(map, 'ai.pagesPerChunk', 4),
       logRetentionDays: int(map, 'ai.logRetentionDays', 180),
     },
+    ingest: {
+      // Sin límite por defecto: una instalación nueva no debe descartar en
+      // silencio entregas que su profesorado sí quiere corregir. Quien conecta
+      // un curso con historial lo pone a lo que le sirva.
+      maxAgeDays: Math.max(0, int(map, 'ingest.maxAgeDays', 0)),
+    },
     moodle: {
       baseUrl: str(map, 'moodle.baseUrl', config.MOODLE_BASE_URL ?? ''),
       connector: str(map, 'moodle.connector', config.LMS_CONNECTOR) as

@@ -345,6 +345,9 @@ export const api = {
   park: (id: string, body: ParkSubmissionRequest) =>
     request(routes.park(id), { schema: QueuedResponse, method: 'POST', body }),
 
+  discardCorrection: (id: string) =>
+    request(routes.discardCorrection(id), { schema: QueuedResponse, method: 'POST' }),
+
   downloadFeedback: (id: string, fallbackName: string) =>
     downloadFile(routes.feedbackFile(id), fallbackName),
 
@@ -507,4 +510,7 @@ export const api = {
 
   triggerBatch: () =>
     request(routes.triggerBatch, { schema: TriggerBatchResponse, method: 'POST' }),
+
+  cancelBatchRun: (id: string) =>
+    request(routes.cancelBatchRun(id), { schema: TriggerBatchResponse, method: 'POST' }),
 };

@@ -8,6 +8,8 @@ interface ActionBarProps {
   /** `null` en actividades que no se puntúan: entonces no hay nota que enseñar. */
   maxScore: number | null;
   status: SubmissionStatus;
+  /** Incluye el reintento tras un fallo al publicar una corrección validada. */
+  canPublish: boolean;
   dirty: boolean;
   saving: boolean;
   working: boolean;
@@ -24,6 +26,7 @@ export function ActionBar({
   total,
   maxScore,
   status,
+  canPublish,
   dirty,
   saving,
   working,
@@ -32,7 +35,6 @@ export function ActionBar({
   onPublish,
 }: ActionBarProps) {
   const published = status === 'published';
-  const validated = status === 'validated';
 
   return (
     <div className="shrink-0 border-t border-border bg-card pb-safe">
@@ -58,7 +60,11 @@ export function ActionBar({
               <Check className="size-4" aria-hidden="true" />
               Publicada
             </p>
-          ) : (
+          ) : canPublish ? (
+            <Button size="lg" onClick={onPublish} disabled={working}>
+              Publicar
+            </Button>
+          ) : status === 'graded' ? (
             <>
               <Button
                 size="lg"
@@ -69,10 +75,14 @@ export function ActionBar({
               >
                 Guardar
               </Button>
-              <Button size="lg" onClick={validated ? onPublish : onValidate} disabled={working}>
-                {validated ? 'Publicar' : 'Validar'}
+              <Button size="lg" onClick={onValidate} disabled={working}>
+                Validar
               </Button>
             </>
+          ) : (
+            <p className="text-ui text-muted-foreground">
+              {status === 'error' ? 'Reprocesa para volver a corregir' : 'Sin acciones de corrección'}
+            </p>
           )}
         </div>
       </div>
