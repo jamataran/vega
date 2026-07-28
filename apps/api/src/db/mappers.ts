@@ -113,6 +113,7 @@ export function toSubmission(row: Row<typeof schema.submissions>): Submission {
     studentAlias: row.studentAlias,
     status: row.status,
     batchRunId: row.batchRunId,
+    ingestedRunId: row.ingestedRunId,
     parkedReason: row.parkedReason,
     parkedBy: row.parkedBy,
     triageLabel: row.triageLabel,
@@ -123,6 +124,7 @@ export function toSubmission(row: Row<typeof schema.submissions>): Submission {
     submittedAt: iso(row.submittedAt),
     updatedAt: iso(row.updatedAt),
     errorMessage: row.errorMessage,
+    errorSeenAt: isoOrNull(row.errorSeenAt),
   };
 }
 
@@ -200,6 +202,7 @@ export function toCorrection(
     validatedAt: isoOrNull(row.validatedAt),
     publishedAt: isoOrNull(row.publishedAt),
     publishedAutomatically: row.publishedAutomatically,
+    publishedManually: row.publishedManually,
     publishNotice: row.publishNotice,
   };
 }

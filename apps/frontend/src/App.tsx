@@ -15,6 +15,7 @@ import { ActivityDetailPage } from '@/pages/ActivityDetailPage';
 import { ContextPage } from '@/pages/ContextPage';
 import { ProcessesPage } from '@/pages/ProcessesPage';
 import { OverviewPage } from '@/pages/OverviewPage';
+import { PanelPage } from '@/pages/PanelPage';
 import { UsersPage } from '@/pages/UsersPage';
 import { SettingsPage } from '@/pages/SettingsPage';
 import { PromptsPage } from '@/pages/PromptsPage';
@@ -58,7 +59,14 @@ export function App() {
                     <Route path="/actividades/:id" element={<ActivityDetailPage />} />
                     <Route path="/contexto" element={<ContextPage />} />
                     <Route path="/procesos" element={<ProcessesPage />} />
-                    <Route path="/panel" element={<OverviewPage />} />
+                    {/*
+                      El panel es del profesor: qué le toca hacer y qué le dejó
+                      el último proceso. Las métricas de instalación —coste,
+                      fiabilidad, tokens— viven aparte y son de administración:
+                      responden a «cuánto se está gastando la academia», que no
+                      es una pregunta que traiga aquí a quien viene a corregir.
+                    */}
+                    <Route path="/panel" element={<PanelPage />} />
 
                     {/*
                       Ajustes deja de ser sólo de administración: el token de
@@ -73,6 +81,7 @@ export function App() {
                       <Route path="/usuarios" element={<UsersPage />} />
                       <Route path="/prompts" element={<PromptsPage />} />
                       <Route path="/registro-ia" element={<AiCallsPage />} />
+                      <Route path="/metricas" element={<OverviewPage />} />
                     </Route>
 
                     <Route path="*" element={<NotFoundPage />} />

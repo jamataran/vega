@@ -25,6 +25,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ErrorState, PageHeader, Section } from '@/components/common/Feedback';
 import { Field } from '@/components/common/Field';
+import { HelpBlock, HelpDialog, HelpTerms } from '@/components/common/HelpDialog';
 import { PreviewEditor } from '@/components/PreviewEditor';
 import { Markdown } from '@/components/Markdown';
 
@@ -50,6 +51,68 @@ const LEVEL_HINT: Record<EditableLevel, string> = {
   activity_kind:
     'Se suma a las instrucciones globales. Lo que vale para una entrega no vale para un foro.',
 };
+
+/**
+ * Qué es cada nivel y en qué orden se aplican.
+ *
+ * Vive aquí y no dentro del propio contexto porque **lo que se escribe en el
+ * editor viaja al modelo palabra por palabra**: la instalación arrancaba con
+ * una explicación de qué era el nivel `installation` metida en el texto que se
+ * envía en cada llamada, así que se pagaba por contarle a la IA cómo está
+ * montada Vega y el profesor no podía borrarla sin perder la única explicación
+ * que tenía.
+ */
+function ContextHelp() {
+  return (
+    <HelpDialog
+      title="Cómo funciona el contexto"
+      description="Los criterios con los que corrige el motor. Se envían en cada llamada, del nivel más general al más concreto."
+    >
+      <HelpBlock title="Los niveles, en orden">
+        <HelpTerms
+          items={[
+            {
+              term: 'Global',
+              text: 'La política de la academia: estándar de rigor, notación, tono y cuánto se descuenta por cada cosa. Va en todas las correcciones y es lo que menos debe cambiar.',
+            },
+            {
+              term: 'Por tipo de actividad',
+              text: 'Lo que separa una entrega de un foro. Se suma al global; no lo repite.',
+            },
+            {
+              term: 'Plantilla',
+              text: 'Criterios compartidos por las actividades del mismo formato —simulacro de problema, simulacro de tema—, para no reescribirlos en cada una.',
+            },
+            {
+              term: 'Curso',
+              text: 'Lo propio de un curso concreto: nivel del grupo, temario cubierto, acuerdos con ese grupo.',
+            },
+            {
+              term: 'Actividad',
+              text: 'El nivel más concreto y el que más se usa. Se edita en la ficha de cada actividad, junto al reparto de puntos y la solución de referencia.',
+            },
+          ]}
+        />
+      </HelpBlock>
+
+      <HelpBlock title="Cuando dos niveles se contradicen">
+        <p className="text-ui text-muted-foreground">
+          Gana el más específico. Si no se contradicen, se aplican los dos. Por eso conviene que un
+          nivel concreto diga sólo lo que cambia y no vuelva a contar lo que ya dice el global.
+        </p>
+      </HelpBlock>
+
+      <HelpBlock title="Qué escribir aquí">
+        <p className="text-ui text-muted-foreground">
+          Criterios de corrección, en segunda persona y dirigidos al motor: qué exigir, qué aceptar
+          y cuánto descontar. Todo lo que escribas se envía tal cual en cada llamada, así que no
+          uses este campo para documentar cómo funciona Vega ni para dejarte notas: eso se paga en
+          cada corrección. Para comprobar el resultado, usa «Contexto efectivo».
+        </p>
+      </HelpBlock>
+    </HelpDialog>
+  );
+}
 
 export function ContextPage() {
   const queryClient = useQueryClient();
@@ -108,7 +171,7 @@ export function ContextPage() {
 
   return (
     <div>
-      <PageHeader eyebrow="Corrección" title="Contexto">
+      <PageHeader eyebrow="Corrección" title="Contexto" actions={<ContextHelp />}>
         Los criterios que recibe el motor. Se acumulan de lo general a lo concreto; el contexto de
         cada actividad se edita en su ficha.
       </PageHeader>

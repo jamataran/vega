@@ -21,7 +21,7 @@ export const SubmissionStatus = z.enum([
   'transcribed', // hay transcripción, falta corregir
   'grading', // corrección IA en curso
   'graded', // la IA propone corrección — esperando al profesor
-  'parked', // apartada por triaje o por el profesor; sigue visible en la cola
+  'parked', // descartada por triaje, por antigüedad o por el profesor; sigue visible en la cola
   'validated', // el profesor ha validado; pendiente de publicar
   'published', // feedback (y nota, si la hay) ya en Moodle
   'error', // algo falló; requiere intervención
@@ -98,7 +98,12 @@ export const SUBMISSION_STATUS_LABEL: Record<SubmissionStatus, string> = {
   transcribed: 'Transcrita',
   grading: 'Corrigiendo',
   graded: 'Por revisar',
-  parked: 'Aparcada',
+  /**
+   * «Aparcada» describía dónde acaba la entrega; «Descartada» describe la
+   * decisión que la puso ahí, que es lo que el profesor necesita reconocer de
+   * un vistazo. Vuelve a la cola con «Devolver a pendientes».
+   */
+  parked: 'Descartada',
   validated: 'Validada',
   published: 'Publicada',
   error: 'Error',
@@ -148,4 +153,19 @@ export const AUTONOMY_MODE_HELP: Record<AutonomyMode, string> = {
 /** Sólo las actividades con fichero del alumno pasan por transcripción. */
 export function hasStudentFile(kind: ActivityKind): boolean {
   return kind === 'assignment';
+}
+
+/**
+ * Rótulo legible de la referencia de Moodle (`assign-42`, `forum-29`).
+ *
+ * En pantalla estaba saliendo la cadena cruda, y además dos veces: el `slug`
+ * interno se calcula desde esta misma referencia, así que la ficha enseñaba
+ * «forum-29 · Moodle forum-29». Ni identifica nada para quien no conoce el
+ * formato ni se puede buscar en Moodle tal cual. «Foro 29» sí: es el número del
+ * módulo, el que aparece en la URL de la actividad.
+ */
+export function moodleRefLabel(moodleRef: string): string {
+  const match = /^(assign|forum)-(\d+)$/.exec(moodleRef);
+  if (!match) return moodleRef;
+  return `${match[1] === 'forum' ? 'Foro' : 'Tarea'} ${match[2]}`;
 }

@@ -86,8 +86,8 @@ export function AiCallsPage() {
         {query.data?.items.map((call) => (
           <div key={call.id} className="flex flex-col gap-2">
             <Card asChild><button type="button" className="w-full p-3 text-left" aria-expanded={selected?.id === call.id} aria-controls={`ai-call-detail-${call.id}`} onClick={() => setSelectedId((current) => (current === call.id ? null : call.id))}>
-              <div className="flex flex-wrap items-center gap-2"><Badge variant={call.error ? 'destructive' : 'outline'}>{AI_OPERATION_LABEL[call.operation]}</Badge>{isRunning(call) ? <Badge variant="info">En curso</Badge> : null}<span className="min-w-0 font-mono text-ui [overflow-wrap:anywhere]">{call.modelReturned ?? call.modelRequested}</span><span className="ml-auto text-ui text-muted-foreground">{formatDateTime(call.createdAt)}</span></div>
-              <p className="mt-1 truncate text-ui text-muted-foreground" aria-live="polite">{isRunning(call) ? 'Esperando la respuesta del proveedor.' : call.error ?? `${call.inputTokens} entrada · ${call.outputTokens} salida${call.simulated ? ' · simulado' : ''}`}</p>
+              <div className="flex flex-wrap items-center gap-2"><Badge variant={call.error ? 'destructive' : 'outline'}>{AI_OPERATION_LABEL[call.operation]}</Badge>{isRunning(call) ? <Badge variant="info">En curso</Badge> : null}{call.unpriced ? <Badge variant="warning" title="Se pagó, pero el modelo que respondió no tiene tarifa configurada">Sin tarifa</Badge> : null}<span className="min-w-0 font-mono text-ui [overflow-wrap:anywhere]">{call.modelReturned ?? call.modelRequested}</span><span className="ml-auto text-ui text-muted-foreground">{formatDateTime(call.createdAt)}</span></div>
+              <p className="mt-1 truncate text-ui text-muted-foreground" aria-live="polite">{isRunning(call) ? 'Esperando la respuesta del proveedor.' : call.error ?? `${call.inputTokens} entrada · ${call.outputTokens} salida${call.simulated ? ' · simulado' : ''}${call.unpriced ? ' · coste desconocido' : ''}`}</p>
             </button></Card>
             {selected?.id === call.id ? (
               <Card id={`ai-call-detail-${call.id}`} className="p-4">

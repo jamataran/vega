@@ -3,6 +3,7 @@ import {
   BarChart3,
   FileText,
   Layers,
+  LayoutDashboard,
   ListChecks,
   MessageSquareText,
   Settings,
@@ -40,6 +41,7 @@ export const PRIMARY_NAV: readonly NavItem[] = [
  * de instalación se siguen enseñando sólo a quien administra.
  */
 export const ADMIN_NAV: readonly NavItem[] = [
+  { to: '/metricas', label: 'Métricas', Icon: BarChart3 },
   { to: '/usuarios', label: 'Usuarios', Icon: Users },
   { to: '/prompts', label: 'Prompts', Icon: MessageSquareText },
   { to: '/registro-ia', label: 'Registro de IA', Icon: ScrollText },
@@ -47,10 +49,10 @@ export const ADMIN_NAV: readonly NavItem[] = [
 
 /**
  * Pantallas de consulta que no compiten por un sitio en la barra inferior. El
- * panel se mira de vez en cuando, no en cada sesión de corrección; Ajustes, aún
- * menos, pero tiene que estar alcanzable para todos los roles.
+ * panel se mira al empezar el día, no en cada entrega; Ajustes, aún menos, pero
+ * tiene que estar alcanzable para todos los roles.
  */
 export const SECONDARY_NAV: readonly NavItem[] = [
-  { to: '/panel', label: 'Panel', Icon: BarChart3 },
+  { to: '/panel', label: 'Panel', Icon: LayoutDashboard },
   { to: '/ajustes', label: 'Ajustes', Icon: Settings },
 ];

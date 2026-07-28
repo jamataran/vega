@@ -3,7 +3,7 @@ import type { User } from '@vega/shared';
 import { cn } from '@/lib/cn';
 import { BRAND_NAME } from '@/lib/brand';
 import { VegaLogo } from '@/components/VegaLogo';
-import { countOf, useQueueCounts } from '@/hooks/useQueueCounts';
+import { countOf, useQueueSummary } from '@/hooks/useQueueCounts';
 import { ADMIN_NAV, PRIMARY_NAV, SECONDARY_NAV } from './navigation';
 import type { NavItem } from './navigation';
 
@@ -35,7 +35,7 @@ function NavRow({ item, badge }: { item: NavItem; badge?: number }) {
 
 /** A partir de `md` la navegación pasa a un lateral fijo y libera el borde inferior. */
 export function SideNav({ user }: { user: User }) {
-  const { data: counts } = useQueueCounts();
+  const counts = useQueueSummary().data?.counts;
 
   return (
     <aside className="fixed inset-y-0 left-0 z-30 hidden w-60 flex-col border-r border-border bg-card md:flex">

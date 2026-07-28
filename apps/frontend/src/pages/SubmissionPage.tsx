@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AlertTriangle, ChevronLeft, Info, Lock, RefreshCw, SkipForward, Trash2 } from 'lucide-react';
+import { AlertTriangle, ChevronLeft, Eye, Info, Lock, RefreshCw, RotateCcw, Send, SkipForward } from 'lucide-react';
 import { ACTIVITY_KIND_LABEL, hasStudentFile, studentLabel as labelOf } from '@vega/shared';
 import { api } from '@/lib/api';
 import { queryKeys } from '@/lib/queryKeys';
@@ -126,6 +126,7 @@ export function SubmissionPage() {
   const [parkReason, setParkReason] = useState('');
   const [reprocessOpen, setReprocessOpen] = useState(false);
   const [discardOpen, setDiscardOpen] = useState(false);
+  const [markPublishedOpen, setMarkPublishedOpen] = useState(false);
   // El registro de IA es de administración: ofrecer el enlace a un profesor le
   // llevaría a un 403 justo cuando busca ayuda.
   const isAdmin = useAuth().user?.role === 'admin';
@@ -161,10 +162,10 @@ export function SubmissionPage() {
         queryClient.invalidateQueries({ queryKey: queryKeys.queueRoot }),
         queryClient.invalidateQueries({ queryKey: queryKeys.submission(id) }),
       ]);
-      notify.success('Entrega omitida', 'Queda aparcada y fuera de la revisión activa.');
+      notify.success('Entrega descartada', 'Sale de la revisión activa y queda con su motivo.');
       navigate('/');
     },
-    onError: (error) => notify.error('No se ha podido omitir la entrega', error),
+    onError: (error) => notify.error('No se ha podido descartar la entrega', error),
   });
   const reprocess = useMutation({
     mutationFn: (scope: 'full' | 'grade_only') => api.reprocess(id, { scope }),
@@ -185,6 +186,40 @@ export function SubmissionPage() {
     onError: (error) => notify.error('No se ha podido iniciar el reproceso', error),
   });
 
+  const seeError = useMutation({
+    mutationFn: (seen: boolean) => api.seeError(id, seen),
+    onSuccess: async (_, seen) => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.queueRoot }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.submission(id) }),
+      ]);
+      notify.success(
+        seen ? 'Fallo dado por visto' : 'Fallo devuelto a lo pendiente',
+        seen
+          ? 'Sigue aquí, pero deja de contar como trabajo por hacer.'
+          : 'Vuelve a contar en la pestaña de errores.',
+      );
+    },
+    onError: (error) => notify.error('No se ha podido cambiar la marca', error),
+  });
+
+  const markPublished = useMutation({
+    mutationFn: () => api.markPublished(id),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.queueRoot }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.submission(id) }),
+      ]);
+      setValidatedOpen(false);
+      setMarkPublishedOpen(false);
+      notify.success(
+        'Marcada como publicada',
+        'Vega no ha enviado nada a Moodle: queda registrada como entregada por ti.',
+      );
+    },
+    onError: (error) => notify.error('No se ha podido marcar como publicada', error),
+  });
+
   const discard = useMutation({
     mutationFn: () => api.discardCorrection(id),
     onSuccess: async () => {
@@ -194,12 +229,12 @@ export function SubmissionPage() {
         queryClient.invalidateQueries({ queryKey: queryKeys.submission(id) }),
       ]);
       notify.success(
-        'Propuesta descartada',
-        'La entrega vuelve a Pendientes y la corregirá el siguiente proceso.',
+        'Devuelta a pendientes',
+        'Se ha tirado la propuesta: la corregirá de cero el siguiente proceso.',
       );
       navigate('/');
     },
-    onError: (error) => notify.error('No se ha podido descartar la propuesta', error),
+    onError: (error) => notify.error('No se ha podido devolver a la cola', error),
   });
 
   const views = detail && !hasStudentFile(detail.activity.kind) ? TEXT_VIEWS : FILE_VIEWS;
@@ -241,14 +276,22 @@ export function SubmissionPage() {
   // volver a corregir tampoco se puede tirar. La diferencia está en el momento
   // en que se gasta —reprocesar llama al modelo ya; descartar espera al
   // siguiente proceso—, no en qué entregas lo admiten.
-  const canDiscard = canReprocess;
+  //
+  // Con una excepción: sacar de la vía muerta lo que el sistema descartó o lo
+  // que se rompió es de administración (cuesta otra pasada del motor), mientras
+  // que tirar la propuesta que uno acaba de leer es del profesor que la revisa.
+  const canDiscard =
+    canReprocess && (status === 'graded' || isAdmin);
   const canPark = !publicationRetry && (status === 'graded' || status === 'error');
+  const canSeeError = status === 'error' && !publicationRetry;
   const working =
     save.isPending ||
     validate.isPending ||
     publish.isPending ||
     park.isPending ||
     reprocess.isPending ||
+    seeError.isPending ||
+    markPublished.isPending ||
     discard.isPending;
 
   const panels = useMemo(() => {
@@ -403,22 +446,60 @@ export function SubmissionPage() {
           </TabsList>
         </Tabs>
 
-        {canPark || canReprocess || canDiscard ? (
+        {canPark || canReprocess || canDiscard || canSeeError || validated ? (
           <div className="flex flex-wrap items-center justify-center gap-2 border-t border-border px-3 py-2">
             {canPark ? (
-              <Button size="sm" variant="ghost" onClick={() => setParkOpen(true)}>
+              <Button size="sm" variant="ghost" disabled={working} onClick={() => setParkOpen(true)}>
                 <SkipForward aria-hidden="true" />
-                Omitir
+                Descartar
+              </Button>
+            ) : null}
+            {canSeeError ? (
+              <Button
+                size="sm"
+                variant="ghost"
+                loading={seeError.isPending}
+                disabled={working}
+                onClick={() => seeError.mutate(detail.submission.errorSeenAt === null)}
+              >
+                <Eye aria-hidden="true" />
+                {detail.submission.errorSeenAt === null ? 'Marcar como visto' : 'Deshacer «visto»'}
+              </Button>
+            ) : null}
+            {/*
+              La corrección validada que el profesor entrega por su cuenta —la
+              imprime, la manda por correo— no tenía salida: se quedaba en
+              «Validadas» pidiendo una publicación que ya había ocurrido.
+            */}
+            {validated ? (
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={working}
+                onClick={() => setMarkPublishedOpen(true)}
+              >
+                <Send aria-hidden="true" />
+                Dar por entregada
               </Button>
             ) : null}
             {canDiscard ? (
-              <Button size="sm" variant="ghost" onClick={() => setDiscardOpen(true)}>
-                <Trash2 aria-hidden="true" />
-                Descartar propuesta
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={working}
+                onClick={() => setDiscardOpen(true)}
+              >
+                <RotateCcw aria-hidden="true" />
+                Devolver a pendientes
               </Button>
             ) : null}
             {canReprocess ? (
-              <Button size="sm" variant="ghost" onClick={() => setReprocessOpen(true)}>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={working}
+                onClick={() => setReprocessOpen(true)}
+              >
                 <RefreshCw aria-hidden="true" />
                 Volver a procesar
               </Button>
@@ -467,7 +548,9 @@ export function SubmissionPage() {
           <p className="flex items-center justify-center gap-2 border-t border-border bg-muted px-4 py-2 text-ui text-muted-foreground">
             <Lock className="size-4 shrink-0" aria-hidden="true" />
             {published
-              ? 'Publicada en Moodle: esta corrección ya no se puede modificar.'
+              ? detail.correction?.publishedManually
+                ? 'Dada por entregada fuera de Vega: esta corrección ya no se puede modificar.'
+                : 'Publicada en Moodle: esta corrección ya no se puede modificar.'
               : publicationRetry
                 ? 'La corrección sigue validada. La publicación falló; puedes volver a intentarla.'
                 : 'Validada por el profesorado: la corrección queda fijada hasta publicarla.'}
@@ -511,9 +594,10 @@ export function SubmissionPage() {
       <Sheet open={parkOpen} onOpenChange={(open) => !open && setParkOpen(false)}>
         <SheetContent>
           <SheetHeader>
-            <SheetTitle>¿Omitir esta entrega?</SheetTitle>
+            <SheetTitle>¿Descartar esta entrega?</SheetTitle>
             <SheetDescription>
-              Saldrá de la revisión activa, pero quedará aparcada con el motivo y podrás localizarla después.
+              Saldrá de la revisión activa y quedará en «Descartadas» con el motivo. No se pierde:
+              administración puede devolverla a pendientes.
             </SheetDescription>
           </SheetHeader>
           <SheetBody>
@@ -529,7 +613,7 @@ export function SubmissionPage() {
           </SheetBody>
           <SheetFooter>
             <Button variant="ghost" size="lg" disabled={park.isPending} onClick={() => setParkOpen(false)}>Cancelar</Button>
-            <Button size="lg" disabled={parkReason.trim() === ''} loading={park.isPending} onClick={() => park.mutate(parkReason.trim())}>Omitir entrega</Button>
+            <Button size="lg" disabled={parkReason.trim() === ''} loading={park.isPending} onClick={() => park.mutate(parkReason.trim())}>Descartar entrega</Button>
           </SheetFooter>
         </SheetContent>
       </Sheet>
@@ -567,11 +651,11 @@ export function SubmissionPage() {
       <Sheet open={discardOpen} onOpenChange={(open) => !open && setDiscardOpen(false)}>
         <SheetContent>
           <SheetHeader>
-            <SheetTitle>¿Descartar lo que propuso la IA?</SheetTitle>
+            <SheetTitle>¿Devolver esta entrega a pendientes?</SheetTitle>
             <SheetDescription>
               Se borran la corrección propuesta{detail.transcription ? ', la transcripción' : ''} y
-              tus cambios sin validar sobre esta entrega. Vuelve a Pendientes y la corregirá de cero
-              el siguiente proceso.
+              tus cambios sin validar. La entrega vuelve a Pendientes y la corregirá de cero el
+              siguiente proceso, no ahora.
             </SheetDescription>
           </SheetHeader>
           <SheetFooter>
@@ -589,7 +673,40 @@ export function SubmissionPage() {
               loading={discard.isPending}
               onClick={() => discard.mutate()}
             >
-              Descartar
+              Devolver a pendientes
+            </Button>
+          </SheetFooter>
+        </SheetContent>
+      </Sheet>
+
+      <Sheet
+        open={markPublishedOpen}
+        onOpenChange={(open) => !open && setMarkPublishedOpen(false)}
+      >
+        <SheetContent>
+          <SheetHeader>
+            <SheetTitle>¿Darla por entregada?</SheetTitle>
+            <SheetDescription>
+              Vega no enviará nada a Moodle: sólo dejará de pedir una publicación que ya has hecho
+              por tu cuenta. La corrección queda cerrada y no se podrá modificar.
+            </SheetDescription>
+          </SheetHeader>
+          <SheetFooter>
+            <Button
+              variant="ghost"
+              size="lg"
+              disabled={markPublished.isPending}
+              onClick={() => setMarkPublishedOpen(false)}
+            >
+              Cancelar
+            </Button>
+            <Button
+              variant="default"
+              size="lg"
+              loading={markPublished.isPending}
+              onClick={() => markPublished.mutate()}
+            >
+              Darla por entregada
             </Button>
           </SheetFooter>
         </SheetContent>
@@ -669,6 +786,20 @@ export function SubmissionPage() {
               onClick={() => void runPublish()}
             >
               Publicar ahora en Moodle
+            </Button>
+            {/*
+              La otra salida real: quien entrega la corrección por su cuenta
+              necesita poder cerrarla aquí, o se queda en «Validadas» para
+              siempre. No llama a Moodle y queda anotado como tal.
+            */}
+            <Button
+              size="lg"
+              variant="ghost"
+              className="mt-2 w-full"
+              loading={markPublished.isPending}
+              onClick={() => markPublished.mutate()}
+            >
+              Darla por entregada por mi cuenta
             </Button>
             {next ? (
               <p className="mt-3 text-ui text-muted-foreground">

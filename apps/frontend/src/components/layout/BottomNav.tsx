@@ -1,6 +1,6 @@
 import { NavLink } from 'react-router-dom';
 import { cn } from '@/lib/cn';
-import { countOf, useQueueCounts } from '@/hooks/useQueueCounts';
+import { countOf, useQueueSummary } from '@/hooks/useQueueCounts';
 import { PRIMARY_NAV } from './navigation';
 
 /**
@@ -8,7 +8,7 @@ import { PRIMARY_NAV } from './navigation';
  * profesor corrige de noche, con una mano, y el pulgar no llega arriba.
  */
 export function BottomNav() {
-  const { data: counts } = useQueueCounts();
+  const counts = useQueueSummary().data?.counts;
   const pending = countOf(counts, 'graded');
 
   return (

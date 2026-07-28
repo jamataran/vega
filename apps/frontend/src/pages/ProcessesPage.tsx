@@ -1,7 +1,10 @@
+import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Clock, Play, Square, User as UserIcon } from 'lucide-react';
-import type { BatchRun } from '@vega/shared';
+import type { BatchRun, BatchRunRole } from '@vega/shared';
 import { api } from '@/lib/api';
+import { cn } from '@/lib/cn';
 import { queryKeys } from '@/lib/queryKeys';
 import { notify } from '@/lib/notify';
 import { useAuth } from '@/lib/auth';
@@ -11,6 +14,8 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { EmptyState, ErrorState, PageHeader } from '@/components/common/Feedback';
+import { HelpBlock, HelpDialog, HelpTerms } from '@/components/common/HelpDialog';
+import { RunSubmissionsSheet } from '@/components/queue/RunSubmissionsSheet';
 
 const RUN_STATUS_LABEL: Record<BatchRun['status'], string> = {
   running: 'En curso',
@@ -43,19 +48,49 @@ function duration(run: BatchRun): string | null {
   return `${Math.round(ms / 60_000)} min`;
 }
 
-function Figure({ label, value, emphasis }: { label: string; value: string; emphasis?: boolean }) {
+/**
+ * Una cifra del proceso.
+ *
+ * Cuando hay algo detrás, es un botón: «5 ingeridas» sin forma de llegar a esas
+ * cinco obligaba a irse a la cola, filtrar por estado y deducirlo por la hora.
+ * Cuando el número es cero no hay nada que abrir y se queda como texto, para
+ * que no haya botones que no llevan a ninguna parte.
+ */
+function Figure({
+  label,
+  value,
+  emphasis,
+  onOpen,
+}: {
+  label: string;
+  value: string;
+  emphasis?: boolean;
+  onOpen?: () => void;
+}) {
+  const valueClass = emphasis
+    ? 'mt-1 font-display text-base font-semibold text-warning-ink'
+    : 'mt-1 font-display text-base font-semibold';
+
   return (
     <div className="min-w-0">
       <p className="eyebrow">{label}</p>
-      <p
-        className={
-          emphasis
-            ? 'mt-1 font-display text-base font-semibold text-warning-ink'
-            : 'mt-1 font-display text-base font-semibold'
-        }
-      >
-        {value}
-      </p>
+      {onOpen ? (
+        <button
+          type="button"
+          onClick={onOpen}
+          className={cn(
+            valueClass,
+            'rounded-sm text-primary-ink underline decoration-border-strong underline-offset-4',
+            'hover:decoration-current focus-visible:outline-none focus-visible:ring-2',
+            'focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-card',
+          )}
+        >
+          {value}
+          <span className="sr-only"> — ver cuáles</span>
+        </button>
+      ) : (
+        <p className={valueClass}>{value}</p>
+      )}
     </div>
   );
 }
@@ -78,6 +113,7 @@ function RunCard({ run, onCancel, cancelling }: {
   const scheduled = run.triggeredBy === null;
   const elapsed = duration(run);
   const scope = kindsLabel(run);
+  const [role, setRole] = useState<BatchRunRole | null>(null);
 
   return (
     <Card asChild>
@@ -124,16 +160,30 @@ function RunCard({ run, onCancel, cancelling }: {
         ) : null}
 
         <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-5">
-          <Figure label="Ingeridas" value={formatInteger(run.submissionsIngested)} />
-          <Figure label="Procesadas" value={formatInteger(run.submissionsProcessed)} />
+          <Figure
+            label="Ingeridas"
+            value={formatInteger(run.submissionsIngested)}
+            onOpen={run.submissionsIngested > 0 ? () => setRole('ingested') : undefined}
+          />
+          <Figure
+            label="Procesadas"
+            value={formatInteger(run.submissionsProcessed)}
+            onOpen={run.submissionsProcessed > 0 ? () => setRole('processed') : undefined}
+          />
           <Figure
             label="Autopublicadas"
             value={formatInteger(run.submissionsAutoPublished)}
             emphasis={run.submissionsAutoPublished > 0}
           />
-          <Figure label="Fallidas" value={formatInteger(run.submissionsFailed)} />
+          <Figure
+            label="Fallidas"
+            value={formatInteger(run.submissionsFailed)}
+            onOpen={run.submissionsFailed > 0 ? () => setRole('failed') : undefined}
+          />
           <Figure label="Coste" value={formatEurosFromCents(run.usage.costCents)} />
         </div>
+
+        <RunSubmissionsSheet runId={run.id} role={role} onClose={() => setRole(null)} />
 
         {run.activitiesFailed > 0 ? (
           <div className="mt-3">
@@ -152,7 +202,14 @@ function RunCard({ run, onCancel, cancelling }: {
               <ul className="mt-2 flex flex-col gap-1.5">
                 {run.problems.map((problem) => (
                   <li key={`${problem.activityId}-${problem.message}`} className="text-ui">
-                    <span className="font-mono text-muted-foreground">{problem.slug}</span>
+                    {/* El nombre de la actividad, no su `slug`: «forum-29» no le
+                        dice nada a nadie, y desde aquí se llega a su ficha. */}
+                    <Link
+                      to={`/actividades/${problem.activityId}`}
+                      className="font-medium text-primary-ink underline-offset-4 hover:underline"
+                    >
+                      {problem.name || problem.slug}
+                    </Link>
                     <span className="px-1.5 text-border-strong">·</span>
                     <span className="text-muted-foreground">{problem.message}</span>
                   </li>
@@ -171,6 +228,80 @@ function RunCard({ run, onCancel, cancelling }: {
         ) : null}
       </li>
     </Card>
+  );
+}
+
+/**
+ * Qué es un proceso, en los términos del profesor y no en los del sistema.
+ *
+ * La pantalla enseñaba cinco cifras y un botón sin decir en ningún sitio qué
+ * hace un proceso, cuándo corre ni qué le pasa a una entrega mientras tanto.
+ * Quien no ha construido esto no tiene forma de deducirlo de «Ingeridas 5».
+ */
+function ProcessHelp() {
+  return (
+    <HelpDialog
+      title="Qué hace un proceso"
+      description="Una pasada completa: trae lo nuevo de Moodle y corrige lo que estaba esperando."
+    >
+      <HelpBlock title="Qué hace, por orden">
+        <ol className="flex flex-col gap-2 text-ui text-muted-foreground">
+          <li>
+            <span className="font-medium text-foreground">1. Ingerir.</span> Pregunta a Moodle por
+            las entregas nuevas de tus actividades activas y se las descarga. Aparecen en
+            «Pendiente».
+          </li>
+          <li>
+            <span className="font-medium text-foreground">2. Leer.</span> Transcribe el manuscrito
+            de cada entrega. Los foros se saltan este paso: ya son texto.
+          </li>
+          <li>
+            <span className="font-medium text-foreground">3. Corregir.</span> Propone nota y
+            feedback apartado por apartado, y los verifica. Al terminar, la entrega pasa a «Por
+            revisar» y te toca a ti.
+          </li>
+        </ol>
+      </HelpBlock>
+
+      <HelpBlock title="Cuándo corre">
+        <p className="text-ui text-muted-foreground">
+          Solo, cada cierto tiempo, y con una cadencia distinta para entregas y foros: una duda de
+          foro no puede esperar a la noche, y un lote de exámenes en PDF no tiene por qué correr
+          cada pocos minutos. La próxima pasada se anuncia en la pestaña «Pendiente» de Revisión.
+          Administración puede además forzar uno.
+        </p>
+      </HelpBlock>
+
+      <HelpBlock title="Las cifras">
+        <HelpTerms
+          items={[
+            {
+              term: 'Ingeridas',
+              text: 'Entregas que este proceso trajo de Moodle por primera vez. Pulsa el número para ver cuáles.',
+            },
+            {
+              term: 'Procesadas',
+              text: 'Las que llegó a leer y corregir en esta misma pasada.',
+            },
+            {
+              term: 'Fallidas',
+              text: 'Las que se rompieron: un fichero ilegible, Moodle sin responder, el modelo sin crédito. Están en la pestaña «Error» de Revisión.',
+            },
+            {
+              term: 'Coste',
+              text: 'Lo que han costado sus llamadas al modelo. En modo simulado es lo que habrían costado, no un gasto real. Si alguna llamada usó un modelo sin tarifa configurada, la cifra es un mínimo: el aviso sale en Métricas.',
+            },
+          ]}
+        />
+      </HelpBlock>
+
+      <HelpBlock title="Si se para a medias">
+        <p className="text-ui text-muted-foreground">
+          La entrega que estuviera a medias vuelve a «Pendiente»: nadie ha dictaminado nada sobre
+          ella y la recogerá el siguiente proceso. No se da por corregida ni se marca como fallida.
+        </p>
+      </HelpBlock>
+    </HelpDialog>
   );
 }
 
@@ -231,7 +362,9 @@ export function ProcessesPage() {
         eyebrow="Corrección"
         title="Procesos"
         actions={
-          canTrigger ? (
+          <>
+            <ProcessHelp />
+            {canTrigger ? (
             <Button
               variant="default"
               // También mientras corre en el servidor, no sólo mientras viaja la
@@ -246,7 +379,8 @@ export function ProcessesPage() {
               <Play aria-hidden="true" />
               {running ? 'Proceso en marcha' : 'Forzar proceso'}
             </Button>
-          ) : null
+            ) : null}
+          </>
         }
       >
         Cada pasada de corrección sobre las entregas pendientes de las actividades activas.

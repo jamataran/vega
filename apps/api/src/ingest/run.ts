@@ -65,6 +65,8 @@ export interface IngestReport {
 export interface IngestProblem {
   readonly activityId: string;
   readonly slug: string;
+  /** El nombre con el que el profesor conoce la actividad. */
+  readonly name: string;
   /**
    * `config` no se reintenta: exige que alguien entre en Ajustes. `transient` sí,
    * y por eso se distinguen (ADR 0009). Sin esta separación, un token caducado y
@@ -104,6 +106,12 @@ export async function ingestAll(
    * corte tarda como mucho lo que dure la llamada a Moodle que esté en vuelo.
    */
   signal?: AbortSignal,
+  /**
+   * Proceso al que se apunta lo que entre. Sin esto, «5 ingeridas» no tenía
+   * forma de convertirse en «estas cinco»: `batch_run_id` es el proceso que
+   * corrige, se asigna después y se limpia en cada reproceso.
+   */
+  runId: string | null = null,
 ): Promise<IngestReport> {
   const { db } = ctx;
   const store = new FileStore(ctx.config.STORAGE_ROOT);
@@ -145,9 +153,10 @@ export async function ingestAll(
       problems.push({
         activityId: activity.id,
         slug: activity.slug,
+        name: activity.name,
         kind: 'config',
         message:
-          `La actividad "${activity.slug}" no tiene ningún profesor asociado, así que Vega no ` +
+          `La actividad "${activity.name}" no tiene ningún profesor asociado, así que Vega no ` +
           'sabe con qué credencial de Moodle leer sus entregas. Vuelve a importarla desde tus cursos.',
       });
       continue;
@@ -163,6 +172,7 @@ export async function ingestAll(
         problems.push({
           activityId: activity.id,
           slug: activity.slug,
+          name: activity.name,
           kind: 'config',
           message: (error as Error).message,
         });
@@ -171,7 +181,7 @@ export async function ingestAll(
     }
 
     try {
-      const outcome = await ingestActivity(ctx, store, connector, activity, log, cutoff, signal);
+      const outcome = await ingestActivity(ctx, store, connector, activity, log, cutoff, signal, runId);
       ingested += outcome.created;
       skippedTooOld += outcome.skippedTooOld;
       activitiesVisited += 1;
@@ -192,6 +202,7 @@ export async function ingestAll(
       problems.push({
         activityId: activity.id,
         slug: activity.slug,
+        name: activity.name,
         kind: classify(error),
         message: (error as Error).message,
       });
@@ -217,6 +228,7 @@ async function ingestActivity(
   log: Logger,
   cutoff: Date | null,
   signal: AbortSignal | undefined,
+  runId: string | null,
 ): Promise<{ created: number; skippedTooOld: number }> {
   const { db } = ctx;
 
@@ -258,6 +270,7 @@ async function ingestActivity(
         withFile,
         student?.id ?? null,
         student?.fullName ?? null,
+        runId,
       );
       if (row === null) continue;
       if (row.created) created += 1;
@@ -401,6 +414,7 @@ async function insertOrFind(
   withFile: boolean,
   studentId: string | null,
   studentAlias: string | null,
+  runId: string | null,
 ): Promise<IngestedRow | null> {
   const [row] = await ctx.db
     .insert(schema.submissions)
@@ -410,6 +424,7 @@ async function insertOrFind(
       studentId,
       studentAlias,
       remoteId: item.ref.remoteId,
+      ingestedRunId: runId,
       status: 'pending',
       originalFilename: withFile ? item.filename : null,
       // En un foro el texto llega en el propio listado y no hay nada que

@@ -26,8 +26,9 @@ import {
   OverviewResponse,
   PromptListResponse,
   PromptResponse,
-  QueueCounts,
   QueueResponse,
+  QueueSummaryResponse,
+  TeacherPanelResponse,
   ResolvedContextResponse,
   SettingsResponse,
   SubmissionDetail,
@@ -55,6 +56,8 @@ import type {
   UpdateSettingsRequest,
   UpdateUserRequest,
   AiCallQuery,
+  BatchRunRole,
+  MarkPublishedRequest,
   ParkSubmissionRequest,
   ReprocessSubmissionRequest,
 } from '@vega/shared';
@@ -321,8 +324,9 @@ export const api = {
   queue: (params: QueueParams, signal?: AbortSignal) =>
     request(routes.queue, { schema: QueueResponse, query: { ...params }, signal }),
 
-  queueCounts: (signal?: AbortSignal) =>
-    request(routes.queueCounts, { schema: QueueCounts, signal }),
+  /** Recuentos, errores sin ver y planificación: lo que rotula las pestañas. */
+  queueSummary: (signal?: AbortSignal) =>
+    request(routes.queueCounts, { schema: QueueSummaryResponse, signal }),
 
   submission: (id: string, signal?: AbortSignal) =>
     request(routes.submission(id), { schema: SubmissionDetail, signal }),
@@ -345,8 +349,21 @@ export const api = {
   park: (id: string, body: ParkSubmissionRequest) =>
     request(routes.park(id), { schema: QueuedResponse, method: 'POST', body }),
 
+  /** Tira la propuesta y devuelve la entrega a Pendientes. */
   discardCorrection: (id: string) =>
     request(routes.discardCorrection(id), { schema: QueuedResponse, method: 'POST' }),
+
+  /** Da por visto un fallo, o retira la marca. No cambia el estado. */
+  seeError: (id: string, seen: boolean) =>
+    request(routes.seeError(id), {
+      schema: z.object({ seen: z.boolean() }),
+      method: 'POST',
+      body: { seen },
+    }),
+
+  /** Cierra a mano una corrección validada que se ha entregado fuera de Vega. */
+  markPublished: (id: string, body: MarkPublishedRequest = {}) =>
+    request(routes.markPublished(id), { schema: CorrectionResponse, method: 'POST', body }),
 
   downloadFeedback: (id: string, fallbackName: string) =>
     downloadFile(routes.feedbackFile(id), fallbackName),
@@ -496,6 +513,10 @@ export const api = {
 
   // ── Panel y procesos ──────────────────────────────────────────────────────
 
+  /** Panel del profesor: su trabajo y qué le dejó el último proceso. */
+  teacherPanel: (signal?: AbortSignal) =>
+    request(routes.teacherPanel, { schema: TeacherPanelResponse, signal }),
+
   overview: (signal?: AbortSignal) => request(routes.overview, { schema: OverviewResponse, signal }),
 
   costBreakdown: (params: CostBreakdownParams, signal?: AbortSignal) =>
@@ -507,6 +528,18 @@ export const api = {
 
   batchRuns: (signal?: AbortSignal) =>
     request(routes.batchRuns, { schema: BatchRunListResponse, signal }),
+
+  /** Qué entregas ingirió, corrigió o rompió un proceso concreto. */
+  batchRunSubmissions: (
+    id: string,
+    params: { role: BatchRunRole; page?: number; pageSize?: number },
+    signal?: AbortSignal,
+  ) =>
+    request(routes.batchRunSubmissions(id), {
+      schema: QueueResponse,
+      query: { ...params },
+      signal,
+    }),
 
   triggerBatch: () =>
     request(routes.triggerBatch, { schema: TriggerBatchResponse, method: 'POST' }),

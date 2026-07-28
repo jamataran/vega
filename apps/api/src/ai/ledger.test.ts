@@ -82,6 +82,45 @@ test('el ledger inserta la llamada antes de esperar al proveedor y actualiza la 
   assert.equal(typeof updates[0]?.['latencyMs'], 'number');
 });
 
+test('una llamada tarifada guarda su importe y no queda marcada', async () => {
+  const { wrapped, updates } = harness(async () => ({
+    ok: true,
+    message: 'Conexión correcta.',
+    model: 'claude-opus-4-8',
+    usage,
+  }));
+
+  await wrapped.verifyConnection();
+
+  assert.equal(updates[0]?.['costCents'], String(usage.costCents));
+  assert.equal(updates[0]?.['unpriced'], false);
+});
+
+/**
+ * El desenlace correcto del incidente del 27/07/2026: la respuesta se entrega,
+ * los tokens se guardan y el coste se declara desconocido en vez de fingirse
+ * cero. Con los tokens en la fila, la llamada se puede volver a tarifar el día
+ * que exista la tarifa.
+ */
+test('una llamada sin tarifa se guarda entera, con coste desconocido', async () => {
+  const { wrapped, updates } = harness(async () => ({
+    ok: true,
+    message: 'Conexión correcta.',
+    model: 'claude-zeta-9-20260101',
+    usage: { ...usage, costCents: 0, unpriced: true },
+  }));
+
+  await wrapped.verifyConnection();
+
+  assert.equal(updates.length, 1);
+  assert.equal(updates[0]?.['parsedOk'], true, 'la respuesta es válida: sólo falta el precio');
+  assert.equal(updates[0]?.['costCents'], null, 'sin tarifa se guarda NULL, nunca 0');
+  assert.equal(updates[0]?.['unpriced'], true);
+  assert.equal(updates[0]?.['inputTokens'], usage.inputTokens, 'los tokens permiten retarificar');
+  assert.equal(updates[0]?.['outputTokens'], usage.outputTokens);
+  assert.notEqual(updates[0]?.['responseRaw'], undefined, 'el trabajo pagado no se pierde');
+});
+
 test('el ledger conserva en la fila iniciada el error del proveedor', async () => {
   const failure = new Error('fallo controlado');
   const { wrapped, inserts, updates } = harness(async () => Promise.reject(failure));

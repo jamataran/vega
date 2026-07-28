@@ -35,6 +35,28 @@ const dateTimeFormatter = new Intl.DateTimeFormat(LOCALE, {
 
 const relativeFormatter = new Intl.RelativeTimeFormat(LOCALE, { numeric: 'auto' });
 
+const clockFormatter = new Intl.DateTimeFormat(LOCALE, { hour: '2-digit', minute: '2-digit' });
+
+/**
+ * Sólo la hora. Es lo que hace falta para decir cuándo pasará el próximo
+ * proceso: la fecha sobra cuando la respuesta cabe en el mismo día, y cuando no
+ * cabe se dice aparte con `formatDateTime`.
+ */
+export function formatClock(iso: string): string {
+  return clockFormatter.format(new Date(iso));
+}
+
+/** «cada 6 h», «cada 15 min». Cadencia legible de un planificador. */
+export function formatEvery(minutes: number): string {
+  if (minutes < 60) return `cada ${minutes} min`;
+  const hours = minutes / 60;
+  if (hours === 1) return 'cada hora';
+  if (Number.isInteger(hours) && hours < 24) return `cada ${hours} h`;
+  const days = minutes / 1440;
+  if (Number.isInteger(days)) return days === 1 ? 'una vez al día' : `cada ${days} días`;
+  return `cada ${Math.round(hours)} h`;
+}
+
 /** Nota total: siempre dos decimales, para que la columna no baile. */
 export function formatScore(value: number): string {
   return scoreFormatter.format(value);

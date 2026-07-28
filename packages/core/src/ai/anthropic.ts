@@ -3,7 +3,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
 import { z } from 'zod/v4';
 import type { TranscriptionFlag, TranscriptionPage } from '@vega/shared';
-import { estimateCostCents } from '../cost/pricing.js';
+import { priceUsage } from '../cost/pricing.js';
 import { gradePromptKey } from './provider.js';
 import type {
   AiCallOptions,
@@ -567,7 +567,11 @@ export class AnthropicAiProvider implements AiProvider {
         ok: true,
         message: `Conexión correcta con Anthropic. Modelo «${this.#gradingModel}» disponible.`,
         model: this.#gradingModel,
-        usage: toUsage(this.#gradingModel, response.usage),
+        // Con el modelo que ha respondido, igual que las cuatro llamadas de
+        // pago: valorar aquí con el alias configurado era la última asimetría
+        // del archivo, y hacía que la prueba de conexión fuera la única que no
+        // podía reproducir lo que iba a pasar en la primera corrección real.
+        usage: toUsage(response.model, response.usage),
       };
     } catch (error) {
       return {
@@ -753,7 +757,11 @@ function toUsage(model: string, usage: Anthropic.Usage) {
     cachedInputTokens: usage.cache_read_input_tokens ?? 0,
     cacheCreationTokens: usage.cache_creation_input_tokens ?? 0,
   };
-  return { ...tokens, costCents: estimateCostCents(model, tokens) };
+  // Se valora con el modelo que **ha respondido**, que es el que factura la
+  // cuenta. Si no tuviera tarifa la llamada ya está pagada igual, así que la
+  // respuesta se entrega y el coste viaja marcado como desconocido: el coste es
+  // metadato, la corrección es el producto.
+  return { ...tokens, ...priceUsage(model, tokens) };
 }
 
 /**

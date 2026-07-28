@@ -134,6 +134,52 @@ test('el triaje usa un timeout corto para no bloquear la cola', async () => {
   assert.equal(signal.aborted, false);
 });
 
+/** Un cliente que contesta con el id que le digas, no con el que se le pide. */
+function clienteQueResponde(model: string): Anthropic {
+  return {
+    messages: {
+      stream: () => ({
+        finalMessage: async () => ({
+          model,
+          stop_reason: 'end_turn',
+          usage: { input_tokens: 4_000, output_tokens: 200 },
+          parsed_output: { label: 'sencilla', confidence: 0.9, reason: 'Clasificación de prueba' },
+        }),
+      }),
+    },
+  } as unknown as Anthropic;
+}
+
+/**
+ * El incidente del 27/07/2026: se pide `claude-haiku-4-5` y la API contesta con
+ * `claude-haiku-4-5-20251001`. Hasta este arreglo, valorar esa respuesta
+ * lanzaba y se perdían el triaje y la entrega, ya pagados. Ningún doble del
+ * repositorio devolvía otro id que el pedido, y por eso pasó verde.
+ */
+test('una respuesta con el id fechado se valora, no se pierde', async () => {
+  const result = await new AnthropicAiProvider({
+    apiKey: 'sk-de-prueba',
+    client: clienteQueResponde('claude-haiku-4-5-20251001'),
+    triageModel: 'claude-haiku-4-5',
+  }).triage({ submissionId: SUBMISSION, message: '¿Cómo se resuelve?', thread: [] });
+
+  assert.equal(result.model, 'claude-haiku-4-5-20251001');
+  assert.ok(result.usage.costCents > 0, 'la foto fechada resuelve a la tarifa de su alias');
+  assert.notEqual(result.usage.unpriced, true);
+});
+
+test('un modelo sin tarifa entrega la respuesta y declara el coste desconocido', async () => {
+  const result = await new AnthropicAiProvider({
+    apiKey: 'sk-de-prueba',
+    client: clienteQueResponde('claude-zeta-9-20260101'),
+  }).triage({ submissionId: SUBMISSION, message: '¿Cómo se resuelve?', thread: [] });
+
+  assert.equal(result.label, 'sencilla', 'la corrección es el producto; el coste es metadato');
+  assert.equal(result.usage.unpriced, true);
+  assert.equal(result.usage.costCents, 0, 'relleno del tipo: el ledger lo guarda como NULL');
+  assert.equal(result.usage.inputTokens, 4_000, 'los tokens permiten retarificar después');
+});
+
 test('sin reparto configurado conserva los máximos propuestos y exige que sumen la nota', async () => {
   let systemText = '';
   const client = {

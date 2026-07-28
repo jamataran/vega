@@ -16,8 +16,8 @@ competencia de cálculo con rigor**, no la exposición.
 | Desarrollo | 50 % | Ejecutar el método sin errores de concepto |
 | Resultado | 20 % | Valor correcto, simplificado, con unidades y con la interpretación pedida |
 
-Estos son los pesos por defecto de §4.1 de las instrucciones globales. Si el buzón fija otro
-reparto dentro de un apartado, manda el buzón.
+Estos son los pesos por defecto de §4.1 de las instrucciones globales. Si la actividad fija otro
+reparto dentro de un apartado, manda la actividad.
 
 ## Reglas propias del formato
 

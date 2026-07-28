@@ -5,7 +5,7 @@ import type {
   TranscriptionFlagKind,
   TranscriptionPage,
 } from '@vega/shared';
-import { estimateCostCents } from '../cost/pricing.js';
+import { priceUsage } from '../cost/pricing.js';
 import type {
   AiCallOptions,
   AiProvider,
@@ -625,7 +625,7 @@ export class MockAiProvider implements AiProvider {
         inputTokens,
         outputTokens,
         cachedInputTokens,
-        costCents: estimateCostCents(this.#model, { inputTokens, outputTokens, cachedInputTokens }),
+        ...priceUsage(this.#model, { inputTokens, outputTokens, cachedInputTokens }),
       },
     };
   }
@@ -702,7 +702,7 @@ export class MockAiProvider implements AiProvider {
       model: this.#model,
       usage: {
         ...usageTokens,
-        costCents: estimateCostCents(this.#model, usageTokens),
+        ...priceUsage(this.#model, usageTokens),
       },
       escalate: input.route === 'standard' && rng.chance(0.12),
       noEsDuda: forumTopic !== undefined && /gracias|entendido|de acuerdo/i.test(studentText ?? ''),

@@ -25,15 +25,73 @@ export async function seedPrompts(
   log: (line: string) => void = () => {},
 ): Promise<void> {
   let inserted = 0;
+  let refreshed = 0;
   for (const key of PROMPT_KEYS) {
     const rows = await db
       .insert(schema.prompts)
       .values({ key, version: 1, content: readPromptSeed(key), active: true })
       .onConflictDoNothing()
       .returning({ key: schema.prompts.key });
-    inserted += rows.length;
+    if (rows.length > 0) inserted += 1;
+    else if (await refreshSeededPrompt(db, key)) refreshed += 1;
   }
   if (inserted > 0) log(`→ prompts del sistema sembrados: ${inserted}`);
+  if (refreshed > 0) log(`→ prompts sin editar puestos al día: ${refreshed}`);
+}
+
+/**
+ * Pone al día un prompt **que nadie haya editado desde la aplicación**.
+ *
+ * Sin esto, un arreglo del prompt sólo llegaba a las instalaciones nuevas: la
+ * siembra es `ON CONFLICT DO NOTHING` y la versión 1 se quedaba ahí para
+ * siempre. Quien administra tenía que acordarse de pulsar «Restaurar valor
+ * predeterminado» prompt a prompt, sabiendo antes que había algo que restaurar.
+ *
+ * `updated_by IS NULL` es la marca de que la versión activa es la sembrada y no
+ * la de una persona. En cuanto alguien guarda una versión propia, este camino no
+ * vuelve a tocar ese prompt.
+ */
+async function refreshSeededPrompt(db: Database, key: string): Promise<boolean> {
+  const seed = readPromptSeed(key);
+
+  return db.transaction(async (tx) => {
+    const [current] = await tx
+      .select({
+        version: schema.prompts.version,
+        content: schema.prompts.content,
+        updatedBy: schema.prompts.updatedBy,
+      })
+      .from(schema.prompts)
+      .where(and(eq(schema.prompts.key, key), eq(schema.prompts.active, true)))
+      .orderBy(desc(schema.prompts.version))
+      .limit(1);
+
+    if (!current) return false;
+    if (current.updatedBy !== null) return false;
+    if (current.content === seed) return false;
+
+    const [deactivated] = await tx
+      .update(schema.prompts)
+      .set({ active: false })
+      .where(
+        and(
+          eq(schema.prompts.key, key),
+          eq(schema.prompts.version, current.version),
+          eq(schema.prompts.active, true),
+        ),
+      )
+      .returning({ version: schema.prompts.version });
+    if (!deactivated) return false;
+
+    await tx.insert(schema.prompts).values({
+      key,
+      version: current.version + 1,
+      content: seed,
+      active: true,
+      updatedBy: null,
+    });
+    return true;
+  });
 }
 
 async function withPrevious(ctx: AppContext, prompt: Prompt): Promise<PromptWithPrevious> {

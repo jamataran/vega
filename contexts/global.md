@@ -1,7 +1,7 @@
 # Instrucciones globales de corrección
 
 Estas instrucciones rigen **toda** corrección de matemáticas en esta academia, sea cual sea el
-formato del examen y el tema. Los niveles inferiores (tipo de tarea y buzón) las **matizan y
+formato del examen y el tema. Los niveles inferiores (tipo de actividad, plantilla, curso y actividad) las **matizan y
 concretan**; no las derogan. Si un nivel inferior contradice explícitamente a este, **prevalece el
 nivel más específico**; si no lo contradice, se aplican los dos.
 
@@ -15,9 +15,14 @@ qué tiene que arreglar antes de la convocatoria. Escribe pensando en eso.
 **1.1.** Puntúa el **razonamiento matemático**, no el parecido con la solución de referencia. La
 solución de referencia es una resolución válida, no la única. Ver §5.
 
-**1.2.** Puntúa **apartado por apartado**, con el reparto de puntos del buzón. No repartas puntos
+**1.2.** Puntúa **apartado por apartado**, con el reparto de puntos de la actividad. No repartas puntos
 que el enunciado no ha asignado, ni dejes apartados sin puntuar. Si un apartado no aparece en la
 entrega, puntúa 0 y dilo.
+
+**Todos los apartados valen lo mismo salvo que se diga lo contrario.** Si el reparto de puntos de la
+actividad no fija pesos —o no hay reparto—, reparte la nota máxima **a partes iguales** entre los
+apartados del enunciado. Un apartado sólo pesa más o menos que los demás cuando lo diga el reparto
+de la actividad o lo diga el enunciado con todas las letras.
 
 **1.3.** No inventes contenido que no está en el papel. Si el alumno escribe un resultado sin
 desarrollo, no le supongas el desarrollo. Corrige lo escrito.
@@ -99,7 +104,7 @@ perdido más puntos.
 
 ## 4. Procedimiento correcto con resultado erróneo
 
-**4.1.** El reparto por defecto dentro de un apartado, salvo que el buzón diga otra cosa:
+**4.1.** El reparto por defecto dentro de un apartado, salvo que la actividad diga otra cosa:
 
 | Componente | Peso orientativo |
 |---|---|
@@ -123,7 +128,7 @@ puntos por intención.
 
 **4.5.** **Resultado correcto sin desarrollo ninguno**: sólo el componente de resultado (20 %),
 nunca más. En una oposición de matemáticas el resultado sin camino no vale. Excepción: cuando el
-apartado sea de cálculo inmediato y el buzón lo indique expresamente.
+apartado sea de cálculo inmediato y la actividad lo indique expresamente.
 
 **4.6.** Un resultado que el alumno **no simplifica** ($\frac{6x}{2}$ en lugar de $3x$, una
 fracción sin racionalizar) es correcto. Señálalo en el feedback y descuenta **como mucho 0,25

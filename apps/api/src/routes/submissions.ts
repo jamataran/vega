@@ -7,11 +7,14 @@ import {
   type ActivityKind,
   type CorrectionResponse,
   QueueQuery,
+  MarkPublishedRequest,
   ParkSubmissionRequest,
   ReprocessSubmissionRequest,
+  SeeErrorRequest,
   type QueueCounts,
   type QueueItem,
   type QueueResponse,
+  type QueueSummaryResponse,
   SaveCorrectionRequest,
   type SubmissionDetail,
   type SubmissionStatus,
@@ -20,7 +23,7 @@ import { currentUser } from '../auth/plugin.js';
 import { schema } from '../db/client.js';
 import { toCorrection, toIso, toStudent, toSubmission, toTranscription } from '../db/mappers.js';
 import { buildFeedbackPdf, feedbackFilename } from '../feedback/pdf.js';
-import { badRequest, conflict, notFound, parseOrThrow, unprocessable } from '../http/errors.js';
+import { badRequest, conflict, forbidden, notFound, parseOrThrow, unprocessable } from '../http/errors.js';
 import { asHttpError, connectorForUser } from '../lms/factory.js';
 import { publishToLms, recordPublication } from '../publish/publish.js';
 import { requireActivity } from './activities.js';
@@ -30,42 +33,12 @@ import type { TokenPayload } from '../auth/plugin.js';
 import type { AppContext } from '../context.js';
 import { getSettings } from '../settings/service.js';
 import { prepareBatchRun, runBatch } from './batch.js';
+import { queuePage } from '../queue/page.js';
 
 const REPROCESSABLE_STATUSES = ['graded', 'parked', 'error'] as const;
 
 export function isReprocessableStatus(status: SubmissionStatus): boolean {
   return (REPROCESSABLE_STATUSES as readonly SubmissionStatus[]).includes(status);
-}
-
-interface QueueRow {
-  id: string;
-  activity_id: string;
-  student_ref: string;
-  student_alias: string | null;
-  status: SubmissionStatus;
-  batch_run_id: string | null;
-  parked_reason: string | null;
-  parked_by: string | null;
-  triage_label: QueueItem['submission']['triageLabel'];
-  triage_confidence: string | null;
-  original_filename: string | null;
-  page_count: number;
-  text_content: string | null;
-  error_message: string | null;
-  submitted_at: Date | string;
-  updated_at: Date | string;
-  a_slug: string;
-  a_name: string;
-  a_kind: ActivityKind;
-  a_course_name: string;
-  a_graded: boolean;
-  a_max_score: string | null;
-  c_confidence: string | null;
-  score: string | null;
-  low_confidence_items: string | null;
-  flag_count: string | null;
-  verification_issue_count: string | null;
-  total_count: string;
 }
 
 export async function submissionRoutes(app: FastifyInstance, ctx: AppContext): Promise<void> {
@@ -77,151 +50,63 @@ export async function submissionRoutes(app: FastifyInstance, ctx: AppContext): P
     { preHandler: app.authenticate },
     async (request): Promise<QueueResponse> => {
       const query = parseOrThrow(QueueQuery, request.query, 'Los filtros de la cola');
-      const offset = (query.page - 1) * query.pageSize;
-      const { ai } = await getSettings(ctx);
-
-      // Un profesor sólo ve las entregas de sus cursos. No es sólo un permiso:
-      // son trabajos de alumnos concretos y enseñárselos a otro docente es un
-      // asunto de protección de datos.
-      const visible = await visibleActivityIds(ctx, currentUser(request));
-
-      // Lista blanca: el orden viene de la query, así que nunca se interpola texto libre.
-      const orderColumn = {
-        submittedAt: sql`s.submitted_at`,
-        confidence: sql`c.confidence`,
-        score: sql`agg.score`,
-      }[query.sort];
-      const direction = query.order === 'asc' ? sql`ASC NULLS LAST` : sql`DESC NULLS LAST`;
-
-      const rows = await sql<QueueRow[]>`
-        SELECT
-          s.*,
-          a.slug          AS a_slug,
-          a.name          AS a_name,
-          a.kind          AS a_kind,
-          a.course_name   AS a_course_name,
-          a.graded        AS a_graded,
-          a.max_score     AS a_max_score,
-          c.confidence    AS c_confidence,
-          agg.score,
-          agg.low_confidence_items,
-          COALESCE(jsonb_array_length(t.flags), 0) AS flag_count,
-          COALESCE(jsonb_array_length(c.verification->'issues'), 0) AS verification_issue_count,
-          COUNT(*) OVER () AS total_count
-        FROM submissions s
-        JOIN activities a ON a.id = s.activity_id
-        LEFT JOIN corrections c ON c.submission_id = s.id
-        LEFT JOIN transcriptions t ON t.submission_id = s.id
-        LEFT JOIN LATERAL (
-          SELECT
-            SUM(COALESCE(ci.teacher_points, ci.ai_points))                       AS score,
-            COUNT(*) FILTER (WHERE ci.confidence < ${ai.lowConfidenceThreshold}) AS low_confidence_items
-          FROM correction_items ci
-          WHERE ci.correction_id = c.id
-        ) agg ON true
-        WHERE TRUE
-          ${visible === null ? sql`` : sql`AND s.activity_id = ANY(${visible}::uuid[])`}
-          ${query.status ? sql`AND s.status = ${query.status}` : sql``}
-          ${query.activityId ? sql`AND s.activity_id = ${query.activityId}` : sql``}
-          ${query.kind ? sql`AND a.kind = ${query.kind}` : sql``}
-          ${
-            query.q
-              ? sql`AND (s.student_alias ILIKE ${`%${query.q}%`} OR s.student_ref ILIKE ${`%${query.q}%`})`
-              : sql``
-          }
-        ORDER BY ${orderColumn} ${direction}, s.id
-        LIMIT ${query.pageSize} OFFSET ${offset}
-      `;
-
-      const total = rows.length > 0 ? Number(rows[0]!.total_count) : 0;
-
-      const items: QueueItem[] = rows.map((row) => {
-        const maxScore = row.a_max_score === null ? null : Number(row.a_max_score);
-        // En una actividad no puntuable no hay nota que enseñar, aunque la
-        // consulta agregue cero apartados.
-        const score =
-          !row.a_graded || row.score === null ? null : Math.round(Number(row.score) * 100) / 100;
-
-        return {
-          submission: {
-            id: row.id,
-            activityId: row.activity_id,
-            studentRef: row.student_ref,
-            studentAlias: row.student_alias,
-            status: row.status,
-            batchRunId: row.batch_run_id,
-            parkedReason: row.parked_reason,
-            parkedBy: row.parked_by,
-            triageLabel: row.triage_label,
-            triageConfidence:
-              row.triage_confidence === null ? null : Number(row.triage_confidence),
-            originalFilename: row.original_filename,
-            pageCount: row.page_count,
-            textContent: row.text_content,
-            submittedAt: toIso(row.submitted_at),
-            updatedAt: toIso(row.updated_at),
-            errorMessage: row.error_message,
-          },
-          activity: {
-            id: row.activity_id,
-            slug: row.a_slug,
-            name: row.a_name,
-            kind: row.a_kind,
-            courseName: row.a_course_name,
-            graded: row.a_graded,
-            maxScore,
-          },
-          score,
-          maxScore,
-          confidence: row.c_confidence === null ? null : Number(row.c_confidence),
-          lowConfidence:
-            row.c_confidence !== null && Number(row.c_confidence) < ai.lowConfidenceThreshold,
-          flagCount: Number(row.flag_count ?? 0),
-          lowConfidenceItems: Number(row.low_confidence_items ?? 0),
-          verificationIssueCount: Number(row.verification_issue_count ?? 0),
-        };
-      });
-
-      return {
-        items,
-        meta: {
-          page: query.page,
-          pageSize: query.pageSize,
-          total,
-          totalPages: Math.max(1, Math.ceil(total / query.pageSize)),
-        },
-      };
+      return queuePage(ctx, currentUser(request), query);
     },
   );
 
-  // ── Recuento por estado, para las pestañas ────────────────────────────────
+  // ── Resumen para las pestañas ─────────────────────────────────────────────
+  //
+  // Además del recuento por estado viajan los errores sin ver y la
+  // planificación. Van juntos porque se pintan juntos: en tres llamadas
+  // separadas, el contador de una pestaña y el rótulo de otra llegan
+  // desacompasados y se ve el salto en cada carga.
   app.get(
     routes.queueCounts,
     { preHandler: app.authenticate },
-    async (request): Promise<QueueCounts> => {
+    async (request): Promise<QueueSummaryResponse> => {
       const visible = await visibleActivityIds(ctx, currentUser(request));
-      const rows = await sql<{ status: SubmissionStatus; count: string }[]>`
-        SELECT status, COUNT(*) AS count
-        FROM submissions
-        WHERE TRUE
-          ${visible === null ? sql`` : sql`AND activity_id = ANY(${visible}::uuid[])`}
-        GROUP BY status
-      `;
-    // Devolvemos siempre todas las claves para que el front no tenga que
-    // distinguir entre "cero" y "no vino".
-    const counts = {
-      pending: 0,
-      transcribing: 0,
-      transcribed: 0,
-      grading: 0,
-      graded: 0,
-      parked: 0,
-      validated: 0,
-      published: 0,
-      error: 0,
-    } satisfies QueueCounts;
+      const mine = visible === null ? sql`` : sql`AND activity_id = ANY(${visible}::uuid[])`;
+
+      const [rows, [unseen], settings, [running]] = await Promise.all([
+        sql<{ status: SubmissionStatus; count: string }[]>`
+          SELECT status, COUNT(*) AS count
+          FROM submissions
+          WHERE TRUE
+            ${mine}
+          GROUP BY status
+        `,
+        sql<{ count: string }[]>`
+          SELECT COUNT(*) AS count
+          FROM submissions
+          WHERE status = 'error'
+            AND error_seen_at IS NULL
+            ${mine}
+        `,
+        getSettings(ctx),
+        sql<{ id: string }[]>`SELECT id FROM batch_runs WHERE status = 'running' LIMIT 1`,
+      ]);
+
+      // Devolvemos siempre todas las claves para que el front no tenga que
+      // distinguir entre "cero" y "no vino".
+      const counts = {
+        pending: 0,
+        transcribing: 0,
+        transcribed: 0,
+        grading: 0,
+        graded: 0,
+        parked: 0,
+        validated: 0,
+        published: 0,
+        error: 0,
+      } satisfies QueueCounts;
       for (const row of rows) counts[row.status] = Number(row.count);
-      return counts;
+
+      return {
+        counts,
+        unseenErrors: Number(unseen?.count ?? 0),
+        schedule: settings.schedule,
+        running: running !== undefined,
+      };
     },
   );
 
@@ -434,7 +319,13 @@ export async function submissionRoutes(app: FastifyInstance, ctx: AppContext): P
         const message = asHttpError(error).message;
         await db
           .update(schema.submissions)
-          .set({ status: 'error', errorMessage: message.slice(0, 500), updatedAt: new Date() })
+          .set({
+            status: 'error',
+            errorMessage: message.slice(0, 500),
+            errorSeenAt: null,
+            errorSeenBy: null,
+            updatedAt: new Date(),
+          })
           .where(eq(schema.submissions.id, submissionId));
         throw asHttpError(error);
       }
@@ -515,6 +406,8 @@ export async function submissionRoutes(app: FastifyInstance, ctx: AppContext): P
             status: body.scope === 'grade_only' ? 'grading' : 'pending',
             batchRunId: null,
             errorMessage: null,
+            errorSeenAt: null,
+            errorSeenBy: null,
             parkedReason: null,
             parkedBy: null,
             triageLabel: null,
@@ -559,7 +452,7 @@ export async function submissionRoutes(app: FastifyInstance, ctx: AppContext): P
     routes.park(':id'),
     { preHandler: app.authenticate },
     async (request) => {
-      const body = parseOrThrow(ParkSubmissionRequest, request.body, 'El aparcado');
+      const body = parseOrThrow(ParkSubmissionRequest, request.body, 'El descarte');
       const [submission] = await db
         .select()
         .from(schema.submissions)
@@ -572,10 +465,10 @@ export async function submissionRoutes(app: FastifyInstance, ctx: AppContext): P
         throw conflict('Una corrección validada queda fijada: sólo se puede publicar.');
       }
       if (submission.status === 'published') {
-        throw conflict('Una entrega publicada no se puede aparcar.');
+        throw conflict('Una entrega publicada no se puede descartar.');
       }
       if (submission.status !== 'graded' && submission.status !== 'error') {
-        throw conflict('Sólo se pueden aparcar entregas pendientes de decisión docente.');
+        throw conflict('Sólo se pueden descartar entregas pendientes de decisión docente.');
       }
       const [parked] = await db
         .update(schema.submissions)
@@ -593,9 +486,126 @@ export async function submissionRoutes(app: FastifyInstance, ctx: AppContext): P
         )
         .returning({ id: schema.submissions.id });
       if (!parked) {
-        throw conflict('El estado de la entrega ha cambiado; actualiza la página antes de aparcar.');
+        throw conflict('El estado de la entrega ha cambiado; actualiza la página antes de descartarla.');
       }
       return { queued: false };
+    },
+  );
+
+  // ── Dar por visto un fallo ────────────────────────────────────────────────
+  //
+  // No arregla nada y no cambia el estado: la entrega sigue en `error` y sigue
+  // en su pestaña. Lo único que cambia es que deja de contar como trabajo
+  // pendiente. Sin esto, un fallo que ya se ha entendido —un PDF corrupto del
+  // alumno, un enunciado que no llegó— seguía pidiendo atención cada día, y una
+  // pestaña que siempre marca lo mismo se deja de mirar.
+  app.post<{ Params: { id: string } }>(
+    routes.seeError(':id'),
+    { preHandler: app.authenticate },
+    async (request) => {
+      const body = parseOrThrow(SeeErrorRequest, request.body ?? {}, 'La marca de visto');
+      const user = currentUser(request);
+      const [submission] = await db
+        .select({ id: schema.submissions.id, activityId: schema.submissions.activityId, status: schema.submissions.status })
+        .from(schema.submissions)
+        .where(eq(schema.submissions.id, request.params.id))
+        .limit(1);
+      if (!submission) throw notFound('No existe esa entrega.');
+      await assertActivityAccess(ctx, user, submission.activityId);
+      if (submission.status !== 'error') {
+        throw conflict('Sólo se pueden dar por vistos los fallos.');
+      }
+
+      await db
+        .update(schema.submissions)
+        .set(
+          body.seen
+            ? { errorSeenAt: new Date(), errorSeenBy: user.sub }
+            : { errorSeenAt: null, errorSeenBy: null },
+        )
+        .where(and(eq(schema.submissions.id, submission.id), eq(schema.submissions.status, 'error')));
+
+      return { seen: body.seen };
+    },
+  );
+
+  // ── Cerrar a mano una corrección validada ─────────────────────────────────
+  //
+  // El circuito real no siempre pasa por Moodle: se imprime, se manda por
+  // correo o la sube el propio profesor. Vega no llama al LMS aquí —no tendría
+  // a qué, y fingirlo sería peor— y deja constancia de que la nota **no** ha
+  // salido de la aplicación, para que las métricas de publicación no cuenten
+  // como enviado algo que nadie envió.
+  app.post<{ Params: { id: string } }>(
+    routes.markPublished(':id'),
+    { preHandler: app.authenticate },
+    async (request): Promise<CorrectionResponse> => {
+      const body = parseOrThrow(MarkPublishedRequest, request.body ?? {}, 'El cierre manual');
+      const submissionId = request.params.id;
+      const user = currentUser(request);
+
+      const [submission] = await db
+        .select()
+        .from(schema.submissions)
+        .where(eq(schema.submissions.id, submissionId))
+        .limit(1);
+      if (!submission) throw notFound('No existe esa entrega.');
+      await assertActivityAccess(ctx, user, submission.activityId);
+      if (submission.status === 'published') {
+        throw conflict('Esta entrega ya estaba dada por publicada.');
+      }
+      if (submission.status !== 'validated') {
+        throw conflict('Sólo se puede cerrar a mano una corrección que ya hayas validado.');
+      }
+
+      const [correction] = await db
+        .select()
+        .from(schema.corrections)
+        .where(eq(schema.corrections.submissionId, submissionId))
+        .limit(1);
+      if (!correction) throw notFound('Esta entrega todavía no tiene corrección.');
+      if (correction.validatedAt === null) {
+        throw conflict('Sólo se puede cerrar a mano una corrección que ya hayas validado.');
+      }
+
+      const [teacher] = await db
+        .select({ name: schema.users.name })
+        .from(schema.users)
+        .where(eq(schema.users.id, user.sub))
+        .limit(1);
+
+      const now = new Date();
+      const notice = body.note?.trim()
+        ? `Entregada fuera de Vega por ${teacher?.name ?? 'el profesorado'}: ${body.note.trim()}`
+        : `Entregada fuera de Vega por ${teacher?.name ?? 'el profesorado'}. Vega no ha enviado la nota al LMS.`;
+
+      await db.transaction(async (tx) => {
+        const [claimed] = await tx
+          .update(schema.submissions)
+          .set({ status: 'published', updatedAt: now })
+          .where(
+            and(
+              eq(schema.submissions.id, submissionId),
+              eq(schema.submissions.status, 'validated'),
+            ),
+          )
+          .returning({ id: schema.submissions.id });
+        if (!claimed) {
+          throw conflict('El estado de la entrega ha cambiado; actualiza la página antes de cerrarla.');
+        }
+
+        await tx
+          .update(schema.corrections)
+          .set({
+            publishedAt: now,
+            publishedManually: true,
+            publishedAutomatically: false,
+            publishNotice: notice.slice(0, 500),
+          })
+          .where(eq(schema.corrections.id, correction.id));
+      });
+
+      return loadCorrectionResponse(ctx, submissionId, user);
     },
   );
 
@@ -611,22 +621,39 @@ export async function submissionRoutes(app: FastifyInstance, ctx: AppContext): P
     { preHandler: app.authenticate },
     async (request) => {
       const submissionId = request.params.id;
+      const user = currentUser(request);
       const [submission] = await db
         .select()
         .from(schema.submissions)
         .where(eq(schema.submissions.id, submissionId))
         .limit(1);
       if (!submission) throw notFound('No existe esa entrega.');
-      await assertActivityAccess(ctx, currentUser(request), submission.activityId);
+      await assertActivityAccess(ctx, user, submission.activityId);
 
       if (submission.status === 'published') {
-        throw conflict('Lo que ya vio el alumno no se puede descartar desde aquí.');
+        throw conflict('Lo que ya vio el alumno no se puede devolver a la cola desde aquí.');
       }
       if (submission.status === 'validated') {
         throw conflict('Una corrección validada queda fijada: sólo se puede publicar.');
       }
       if (!isReprocessableStatus(submission.status)) {
         throw conflict('Esta entrega ya está pendiente o dentro de un proceso de corrección.');
+      }
+
+      // Tirar la propuesta que uno acaba de leer es decisión del profesor que
+      // la revisa. Resucitar lo que el sistema descartó —por antigüedad, por
+      // triaje— o lo que se rompió es otra cosa: cuesta dinero cuando vuelva a
+      // pasar por el motor y suele haber un motivo detrás que hay que conocer.
+      // Esa parte es de administración.
+      if (
+        (submission.status === 'parked' || submission.status === 'error') &&
+        user.role !== 'admin'
+      ) {
+        throw forbidden(
+          submission.status === 'parked'
+            ? 'Devolver a la cola una entrega descartada es cosa de administración.'
+            : 'Devolver a la cola una entrega que ha fallado es cosa de administración.',
+        );
       }
 
       await db.transaction(async (tx) => {
@@ -636,6 +663,8 @@ export async function submissionRoutes(app: FastifyInstance, ctx: AppContext): P
             status: 'pending',
             batchRunId: null,
             errorMessage: null,
+            errorSeenAt: null,
+            errorSeenBy: null,
             parkedReason: null,
             parkedBy: null,
             triageLabel: null,

@@ -29,7 +29,7 @@ export function OverviewPage() {
   if (query.isError) {
     return (
       <>
-        <PageHeader eyebrow="Métricas" title="Panel" />
+        <PageHeader eyebrow="Instalación" title="Métricas" />
         <ErrorState error={query.error} onRetry={() => void query.refetch()} />
       </>
     );
@@ -38,7 +38,7 @@ export function OverviewPage() {
   if (!query.data) {
     return (
       <>
-        <PageHeader eyebrow="Métricas" title="Panel" />
+        <PageHeader eyebrow="Instalación" title="Métricas" />
         <div className="flex flex-col gap-3">
           <Skeleton className="h-32 w-full rounded-lg" />
           <Skeleton className="h-48 w-full rounded-lg" />
@@ -52,8 +52,9 @@ export function OverviewPage() {
 
   return (
     <div>
-      <PageHeader eyebrow="Métricas" title="Panel">
-        Estado de la cola y en qué se va el gasto del periodo.
+      <PageHeader eyebrow="Instalación" title="Métricas">
+        Fiabilidad del motor, gasto del periodo y estado de la cola en toda la academia. El trabajo
+        de cada profesor está en su Panel.
       </PageHeader>
 
       <div className="flex flex-col gap-3">
@@ -106,9 +107,21 @@ export function OverviewPage() {
             <Figure label="Lecturas coincidentes" value={formatPercent(data.reliability.readingsWithoutDiscrepancy)} />
             <Figure label="Sin avisos al verificar" value={formatPercent(data.reliability.verificationsWithoutIssues)} />
           </div>
+          {/*
+            El aviso dice lo que de verdad pasa, no lo que gustaría que pasara.
+            Decía «No se muestran como coste cero» y era falso: los totales
+            suman esas llamadas como 0 €, porque el coste se agrega con un
+            COALESCE. Prometer lo contrario era peor que no avisar — daba por
+            exacto un total que no lo es.
+          */}
           {data.unpricedCalls > 0 ? (
             <p role="alert" className="mt-4 text-ui text-warning-ink">
-              {data.unpricedCalls} {data.unpricedCalls === 1 ? 'llamada no tiene' : 'llamadas no tienen'} una tarifa conocida. No se muestran como coste cero.
+              {data.unpricedCalls === 1
+                ? 'Una llamada se pagó con un modelo sin tarifa configurada'
+                : `${formatInteger(data.unpricedCalls)} llamadas se pagaron con un modelo sin tarifa configurada`}
+              . Los totales de coste las cuentan como 0 €, así que el gasto que ves aquí es un
+              mínimo. Sus tokens quedan en el registro de IA: se pueden valorar cuando se añada la
+              tarifa.
             </p>
           ) : null}
         </Section>

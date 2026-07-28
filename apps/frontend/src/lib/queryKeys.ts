@@ -29,6 +29,7 @@ export const queryKeys = {
   users: ['users'] as const,
   settings: ['settings'] as const,
   overview: ['overview'] as const,
+  teacherPanel: ['panel'] as const,
   costBreakdown: (params: CostBreakdownParams) => ['overview', 'cost', params] as const,
   batchRuns: ['batch', 'runs'] as const,
 };

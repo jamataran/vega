@@ -24,7 +24,7 @@ Este reparto sustituye al de §4.1 de las instrucciones globales, que está pens
 
 ## Reglas propias del formato
 
-**T1. Corrige contra el guion del tema**, que está en el contexto del buzón o en la solución de
+**T1. Corrige contra el guion del tema**, que está en el contexto de la actividad o en la solución de
 referencia. **La ausencia de un epígrafe del guion es una pérdida de puntos de cobertura
 proporcional a su peso.** Dilo explícitamente: «no desarrollas la caracterización por sucesiones,
 que el guion exige».

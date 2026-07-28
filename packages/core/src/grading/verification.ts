@@ -92,6 +92,9 @@ export function sumUsage(a: UsageMetrics, b: UsageMetrics): UsageMetrics {
     cachedInputTokens: a.cachedInputTokens + b.cachedInputTokens,
     cacheCreationTokens: (a.cacheCreationTokens ?? 0) + (b.cacheCreationTokens ?? 0),
     costCents: Math.round((a.costCents + b.costCents) * 10_000) / 10_000,
+    // Un sumando sin tarifa convierte el total en un mínimo, no en el coste
+    // real. La marca viaja con la suma para que nadie lo presente como exacto.
+    ...((a.unpriced ?? false) || (b.unpriced ?? false) ? { unpriced: true } : {}),
   };
 }
 

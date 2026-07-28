@@ -181,8 +181,17 @@ export const submissions = pgTable(
       .notNull()
       .default('pending'),
     batchRunId: uuid('batch_run_id').references(() => batchRuns.id, { onDelete: 'set null' }),
+    /**
+     * Proceso que la trajo de Moodle. A diferencia de `batch_run_id` —que es el
+     * proceso que la está corrigiendo y se limpia en cada reproceso— esto no
+     * cambia: es lo que permite contestar «¿qué entró anoche?».
+     */
+    ingestedRunId: uuid('ingested_run_id').references(() => batchRuns.id, { onDelete: 'set null' }),
     parkedReason: text('parked_reason'),
     parkedBy: uuid('parked_by').references(() => users.id, { onDelete: 'set null' }),
+    /** Un error mirado deja de reclamar, pero sigue siendo un error. */
+    errorSeenAt: timestamp('error_seen_at', { withTimezone: true }),
+    errorSeenBy: uuid('error_seen_by').references(() => users.id, { onDelete: 'set null' }),
     triageLabel: text('triage_label').$type<TriageLabel>(),
     triageConfidence: numeric('triage_confidence', { precision: 4, scale: 3 }),
     /** `null` en actividades sin fichero (foros). */
@@ -264,6 +273,12 @@ export const corrections = pgTable('corrections', {
    * permite reintentar sin volver a mandar la nota al alumno.
    */
   publishedAt: timestamp('published_at', { withTimezone: true }),
+  /**
+   * `true` cuando la entrega la cerró el profesor por su cuenta y Vega no ha
+   * mandado nada al LMS. Sin esta marca, `published_at` mezclaría lo enviado
+   * con lo entregado a mano y no habría manera de auditar la diferencia.
+   */
+  publishedManually: boolean('published_manually').notNull().default(false),
   gradePublishedAt: timestamp('grade_published_at', { withTimezone: true }),
   feedbackFilePublishedAt: timestamp('feedback_file_published_at', { withTimezone: true }),
   /** Por qué la publicación no fue completa, en español y para el profesor. */

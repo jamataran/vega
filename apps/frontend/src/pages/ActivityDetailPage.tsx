@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { moodleRefLabel } from '@vega/shared';
 import type { Activity, PointsAllocation, UpdateActivityRequest } from '@vega/shared';
 import { ApiClientError, api, fieldError } from '@/lib/api';
 import { queryKeys } from '@/lib/queryKeys';
@@ -172,17 +173,19 @@ export function ActivityDetailPage() {
   return (
     <div className="pb-4">
       <PageHeader eyebrow={activity.courseName} title={activity.name}>
+        {/*
+          Un solo identificador y con nombre. Antes salían dos —el `slug`
+          interno y la referencia de Moodle— que son la misma cadena, porque el
+          slug se calcula desde ella: «forum-29 · Moodle forum-29» ocupaba una
+          línea entera para no decir nada.
+        */}
         <span className="flex flex-wrap items-center gap-2">
           <ActivityKindBadge kind={activity.kind} />
-          <span className="font-mono text-ui">{activity.slug}</span>
-          {activity.moodleRef ? (
-            <>
-              <span className="text-border-strong">·</span>
-              <span className="text-ui">
-                Moodle <span className="font-mono">{activity.moodleRef}</span>
-              </span>
-            </>
-          ) : null}
+          <span className="text-ui">
+            {activity.moodleRef
+              ? `${moodleRefLabel(activity.moodleRef)} en Moodle`
+              : `Referencia interna: ${activity.slug}`}
+          </span>
         </span>
       </PageHeader>
 
@@ -264,7 +267,7 @@ export function ActivityDetailPage() {
         {form.graded ? (
           <Section
             title="Reparto de puntos"
-            description="Qué apartados tiene la entrega y cuánto vale cada uno. Los criterios de corrección detallados van en el contexto de la actividad, más abajo."
+            description="Qué apartados tiene la entrega y cuánto vale cada uno. Sin reparto, todos valen lo mismo. Los criterios de corrección detallados van en el contexto de la actividad, más abajo."
           >
             <PointsAllocationEditor
               rows={form.pointsAllocation}

@@ -299,6 +299,13 @@ abajo. Sin contradicción, se aplican los dos.
 la solución de referencia. Devuelve **exactamente** los apartados del reparto de puntos, con sus
 mismos \`label\`, ni uno más ni uno menos, y ningún \`aiPoints\` por encima de su máximo.
 
+**1.3.1. Todos los apartados valen lo mismo salvo que se diga lo contrario.** Cuando el reparto de
+puntos no fije pesos —no llega, llega vacío o todos sus apartados traen el mismo máximo—, la nota se
+reparte **a partes iguales** entre los apartados del enunciado. Que un apartado sea más largo, más
+difícil o esté peor resuelto **no lo hace valer más**. Sólo pesa distinto lo que el reparto de la
+actividad o el enunciado digan explícitamente; si crees que el reparto está desequilibrado, no lo
+corrijas: dilo en \`teacherNotes\`.
+
 **1.4.** La **solución de referencia** es un camino válido para verificar, no una plantilla de
 comparación ni una fuente de puntos (§5 global). Si el alumno no la sigue, verifica su vía.
 
@@ -568,6 +575,12 @@ reglas de rigor (§3) y estructura (§4) sin dejar ninguno sin nota, declara la 
 
 **1.4.** No añadas contenidos que la matriz no recoge. Si el temario oficial exige algo que la matriz
 no pide, **no lo penalices**: dilo en \`aiSummary\` como observación para el profesor.
+
+**1.5. Todos los apartados valen lo mismo salvo que se diga lo contrario.** Cuando el reparto de
+puntos no fije pesos —no llega, llega vacío o todos sus apartados traen el mismo máximo—, la nota se
+reparte **a partes iguales** entre los apartados. Lo mismo dentro de la matriz: sin peso declarado,
+todas sus filas pesan igual. Un apartado o una fila sólo valen más que los demás cuando el reparto
+de la actividad, el enunciado o la matriz lo digan explícitamente.
 
 ---
 

@@ -65,6 +65,7 @@ function correction(overrides: Partial<Correction> = {}): Correction {
     validatedAt: '2026-01-02T00:00:00.000Z',
     publishedAt: null,
     publishedAutomatically: false,
+    publishedManually: false,
     publishNotice: null,
     ...overrides,
   };
@@ -100,6 +101,7 @@ function submission(overrides: Partial<Submission> = {}): Submission {
     studentAlias: null,
     status: 'validated',
     batchRunId: null,
+    ingestedRunId: null,
     parkedReason: null,
     parkedBy: null,
     triageLabel: null,
@@ -110,6 +112,7 @@ function submission(overrides: Partial<Submission> = {}): Submission {
     submittedAt: '2026-01-01T00:00:00.000Z',
     updatedAt: '2026-01-02T00:00:00.000Z',
     errorMessage: null,
+    errorSeenAt: null,
     ...overrides,
   };
 }

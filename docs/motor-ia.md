@@ -517,9 +517,18 @@ coste_llamada = ( input_no_cache × tarifa_input
                 × 0,5 si transport=batch
 ```
 
-- `cost/pricing.ts` pasa a **tarifas fechadas por modelo** (`validFrom`): Opus 4.8 $5/$25,
-  Sonnet 5 $2/$10 → $3/$15 desde 2026-09-01, Haiku 4.5 $1/$5, Fable 5 $10/$50. Conversión €/$
-  fechada. Modelo sin tarifa ⇒ `unpriced` + alerta, **nunca coste 0**.
+- `cost/pricing.ts` pasa a **tarifas fechadas por modelo** (`validFrom`): Opus 5 y Opus 4.8/4.7/4.6
+  $5/$25, Sonnet 5 $2/$10 → $3/$15 desde 2026-09-01, Sonnet 4.6 $3/$15, Haiku 4.5 $1/$5, Fable 5 y
+  Mythos 5 $10/$50. Conversión €/$ fechada. La tabla se indexa por **alias**, que es lo único
+  configurable; la API responde con la foto fechada (`claude-haiku-4-5-20251001`) y `pricingFor`
+  la reduce a su alias exigiendo ocho dígitos con forma de fecha, nunca «los dígitos del final».
+- **Modelo sin tarifa ⇒ `unpriced`, coste NULL en `ai_calls` y aviso en el panel.** Nunca una
+  excepción: valorar ocurre **después** de pagar la llamada, así que un hueco en la tabla no puede
+  destruir una corrección (incidente del 27/07/2026, `docs/qa/20260727_pruebas-reales.md`).
+  `estimateCostCents` sigue lanzando para quien valora antes de gastar; `priceUsage` es la variante
+  que no lanza. Deuda conocida: `corrections.cost_cents` y `batch_runs.cost_cents` siguen absorbiendo
+  un 0 por cada llamada sin tarifa —no llevan columna propia—, así que **el agregado es un suelo** y
+  quien lo dice es el aviso del panel. Los tokens sí se guardan: la llamada es retarificable.
 - El coste se calcula y persiste **en el momento de la llamada**; el histórico no se recalcula.
 - **Profesor**: coste de la corrección abierta (ya se persiste `corrections.cost_cents`, ahora
   pasa a sumar todas las fases desde `ai_calls`) + agregado de su ámbito en el panel.

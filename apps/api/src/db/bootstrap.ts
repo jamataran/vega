@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { ActivityKind } from '@vega/shared';
 import { hashPassword } from '../auth/password.js';
 import { schema } from './client.js';
@@ -111,6 +111,7 @@ async function seedContexts(db: Database, log: (line: string) => void): Promise<
   const rows = await loadContextSeedRows();
 
   let inserted = 0;
+  let refreshed = 0;
   for (const row of rows) {
     const created = await db.transaction(async (tx) => {
       const [context] = await tx
@@ -132,11 +133,80 @@ async function seedContexts(db: Database, log: (line: string) => void): Promise<
       return true;
     });
     if (created) inserted += 1;
+    else if (await refreshSeededContext(db, row)) refreshed += 1;
   }
 
   if (inserted > 0) {
     log(`→ contextos de corrección sembrados desde contexts/: ${inserted}`);
   }
+  if (refreshed > 0) {
+    log(`→ contextos sin editar puestos al día desde contexts/: ${refreshed}`);
+  }
+}
+
+/**
+ * Vuelve a sembrar un contexto **sólo si nadie lo ha tocado**.
+ *
+ * `ON CONFLICT DO NOTHING` protege lo que edita el profesorado, pero también
+ * congela para siempre lo que nadie ha editado: una instalación que arrancó con
+ * un texto defectuoso —una explicación del propio Vega metida en el prompt, por
+ * ejemplo— se lo quedaba aunque el fichero de siembra ya estuviera arreglado, y
+ * la única salida era ir a la base de datos a mano.
+ *
+ * La condición es que la versión activa venga de la siembra (`source = 'seed'`).
+ * En cuanto alguien guarda desde la aplicación, la versión activa pasa a
+ * `'edit'` y este camino deja de tocarla: **la base de datos sigue mandando**
+ * sobre el fichero, que es la regla de HU-06. La versión anterior no se borra,
+ * se archiva como cualquier otra.
+ */
+async function refreshSeededContext(db: Database, row: ContextSeedRow): Promise<boolean> {
+  const contentHash = contextContentHash(row.content);
+
+  return db.transaction(async (tx) => {
+    const [current] = await tx
+      .select({
+        id: schema.gradingContexts.id,
+        activeVersion: schema.gradingContexts.activeVersion,
+        source: schema.gradingContextVersions.source,
+        contentHash: schema.gradingContextVersions.contentHash,
+      })
+      .from(schema.gradingContexts)
+      .innerJoin(
+        schema.gradingContextVersions,
+        and(
+          eq(schema.gradingContextVersions.contextId, schema.gradingContexts.id),
+          eq(schema.gradingContextVersions.version, schema.gradingContexts.activeVersion),
+        ),
+      )
+      .where(
+        and(eq(schema.gradingContexts.level, row.level), eq(schema.gradingContexts.key, row.key)),
+      )
+      .limit(1);
+
+    if (!current) return false;
+    if (current.source !== 'seed') return false;
+    if (current.contentHash === contentHash) return false;
+
+    const nextVersion = current.activeVersion + 1;
+    await tx.insert(schema.gradingContextVersions).values({
+      contextId: current.id,
+      version: nextVersion,
+      content: row.content,
+      contentHash,
+      source: 'seed',
+      createdBy: null,
+    });
+    await tx
+      .update(schema.gradingContexts)
+      .set({ activeVersion: nextVersion })
+      .where(
+        and(
+          eq(schema.gradingContexts.id, current.id),
+          eq(schema.gradingContexts.activeVersion, current.activeVersion),
+        ),
+      );
+    return true;
+  });
 }
 
 /**

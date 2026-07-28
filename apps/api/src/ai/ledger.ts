@@ -115,7 +115,12 @@ export function withAiLedger(
         outputTokens: usage?.outputTokens ?? 0,
         cacheReadTokens: usage?.cachedInputTokens ?? 0,
         cacheCreationTokens: usage?.cacheCreationTokens ?? 0,
-        costCents: usage === null ? null : String(usage.costCents),
+        // Sin tarifa se guarda NULL, nunca 0: `unpriced` es lo que distingue
+        // «no sabemos cuánto costó» de «fue gratis». Los tokens sí se guardan,
+        // así que la llamada se puede volver a tarifar el día que exista la
+        // tarifa; el importe no se pierde, sólo se queda pendiente.
+        costCents: usage === null || usage.unpriced === true ? null : String(usage.costCents),
+        unpriced: usage?.unpriced ?? false,
       })
       .where(eq(schema.aiCalls.id, pending.id));
     return result;

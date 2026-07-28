@@ -7,6 +7,7 @@ import type {
   OverviewResponse,
   QueueCounts,
   SubmissionStatus,
+  TeacherPanelResponse,
 } from '@vega/shared';
 import { z } from 'zod';
 import { ACTIVITY_KIND_LABEL, AI_OPERATION_LABEL, CostDimension, CostPeriod, routes } from '@vega/shared';
@@ -15,6 +16,7 @@ import { seesEverything, visibleActivityIds } from '../auth/scope.js';
 import { schema } from '../db/client.js';
 import { toBatchRun, toIso } from '../db/mappers.js';
 import { parseOrThrow } from '../http/errors.js';
+import { getSettings } from '../settings/service.js';
 import type { AppContext } from '../context.js';
 
 export async function statsRoutes(app: FastifyInstance, ctx: AppContext): Promise<void> {
@@ -163,8 +165,22 @@ export async function statsRoutes(app: FastifyInstance, ctx: AppContext): Promis
           (SELECT COUNT(*) FROM corrections c JOIN submissions s ON s.id = c.submission_id WHERE c.verification IS NOT NULL AND jsonb_array_length(COALESCE(c.verification->'issues', '[]'::jsonb)) = 0 ${mine}) AS verifications_clean,
           (SELECT COUNT(*) FROM ai_calls ac JOIN submissions s ON s.id = ac.submission_id WHERE ac.simulated ${mine}) AS simulated_calls,
           (SELECT COUNT(*) FROM ai_calls ac JOIN submissions s ON s.id = ac.submission_id WHERE NOT ac.simulated ${mine}) AS real_calls,
-          (SELECT COUNT(*) FROM ai_calls ac JOIN submissions s ON s.id = ac.submission_id WHERE ac.cost_cents IS NULL AND ac.error IS NULL ${mine}) AS unpriced_calls
+          (SELECT COUNT(*) FROM ai_calls ac JOIN submissions s ON s.id = ac.submission_id WHERE ac.unpriced ${mine}) AS unpriced_calls
       `;
+      /*
+        `unpriced` y no «coste NULL sin error», que es lo que había.
+        El registro inserta la fila **antes** de llamar al proveedor, con el
+        coste y el error a NULL (`ai/ledger.ts`), así que el predicado viejo
+        contaba las llamadas **en curso** —y las huérfanas de un proceso que se
+        murió— y no podía contar nunca una sin tarifa, porque hasta ahora la
+        falta de tarifa siempre venía acompañada de un error. Al desplegar
+        esto el número puede bajar: no se pierde información, se deja de contar
+        lo que no era.
+
+        Sigue sin ventana temporal, a diferencia de las tarjetas de gasto: son
+        llamadas pagadas cuyo importe no consta, y eso no deja de ser verdad
+        porque pase el mes.
+      */
       const ratio = (part: string | undefined, total: string | undefined): number => {
         const denominator = Number(total ?? 0);
         return denominator === 0 ? 0 : Math.round((Number(part ?? 0) / denominator) * 10_000) / 10_000;
@@ -229,6 +245,108 @@ export async function statsRoutes(app: FastifyInstance, ctx: AppContext): Promis
         aiMode: simulatedCalls > 0 && realCalls > 0 ? 'mixed' : realCalls > 0 ? 'real' : simulatedCalls > 0 ? 'simulated' : 'none',
         unpricedCalls: Number(quality?.unpriced_calls ?? 0),
         lastBatchRun: lastRun ? toBatchRun(lastRun) : null,
+      };
+    },
+  );
+
+  /**
+   * Panel del profesor: qué tiene por delante y qué le dejó el último proceso.
+   *
+   * Existe aparte de `overview` porque contesta otra pregunta. `overview` es
+   * una pantalla de instalación —coste, fiabilidad, cifras del claustro— y en
+   * las pruebas reales quedó claro que un profesor no entra ahí a saber cuánto
+   * se ha gastado la academia, sino a saber qué le toca hacer hoy y si anoche
+   * pasó algo con sus entregas.
+   */
+  app.get(
+    routes.teacherPanel,
+    { preHandler: app.authenticate },
+    async (request): Promise<TeacherPanelResponse> => {
+      const user = currentUser(request);
+      const visible = await visibleActivityIds(ctx, user);
+      const mine = visible === null ? sql`` : sql`AND s.activity_id = ANY(${visible}::uuid[])`;
+
+      const [statusRows, [unseen], settings, [lastRun]] = await Promise.all([
+        sql<{ status: SubmissionStatus; count: string }[]>`
+          SELECT s.status, COUNT(*) AS count
+          FROM submissions s
+          WHERE TRUE
+            ${mine}
+          GROUP BY s.status
+        `,
+        sql<{ count: string }[]>`
+          SELECT COUNT(*) AS count
+          FROM submissions s
+          WHERE s.status = 'error'
+            AND s.error_seen_at IS NULL
+            ${mine}
+        `,
+        getSettings(ctx),
+        sql<{
+          id: string;
+          started_at: Date | string;
+          finished_at: Date | string | null;
+          status: 'running' | 'done' | 'failed' | 'cancelled';
+        }[]>`
+          SELECT id, started_at, finished_at, status
+          FROM batch_runs
+          ORDER BY started_at DESC
+          LIMIT 1
+        `,
+      ]);
+
+      const counts = {
+        pending: 0,
+        transcribing: 0,
+        transcribed: 0,
+        grading: 0,
+        graded: 0,
+        parked: 0,
+        validated: 0,
+        published: 0,
+        error: 0,
+      } satisfies QueueCounts;
+      for (const row of statusRows) counts[row.status] = Number(row.count);
+
+      /**
+       * Las cifras del proceso, recortadas a lo que este profesor puede ver.
+       *
+       * No son las de `batch_runs`: aquélla es la suma del claustro. Aquí se
+       * cuentan sus entregas una a una, que es lo que permite enseñárselas sin
+       * revelar de paso el volumen de trabajo de sus compañeros.
+       */
+      const [runCounts] = lastRun
+        ? await sql<{ ingested: string; processed: string; failed: string }[]>`
+            SELECT
+              COUNT(*) FILTER (WHERE s.ingested_run_id = ${lastRun.id})                            AS ingested,
+              COUNT(*) FILTER (WHERE s.batch_run_id = ${lastRun.id} AND s.status <> 'error')       AS processed,
+              COUNT(*) FILTER (WHERE s.batch_run_id = ${lastRun.id} AND s.status = 'error')        AS failed
+            FROM submissions s
+            WHERE (s.ingested_run_id = ${lastRun.id} OR s.batch_run_id = ${lastRun.id})
+              ${mine}
+          `
+        : [];
+
+      const [running] = await sql<{ id: string }[]>`
+        SELECT id FROM batch_runs WHERE status = 'running' LIMIT 1
+      `;
+
+      return {
+        counts,
+        unseenErrors: Number(unseen?.count ?? 0),
+        schedule: settings.schedule,
+        running: running !== undefined,
+        lastRun: lastRun
+          ? {
+              id: lastRun.id,
+              startedAt: toIso(lastRun.started_at),
+              finishedAt: lastRun.finished_at === null ? null : toIso(lastRun.finished_at),
+              status: lastRun.status,
+              ingested: Number(runCounts?.ingested ?? 0),
+              processed: Number(runCounts?.processed ?? 0),
+              failed: Number(runCounts?.failed ?? 0),
+            }
+          : null,
       };
     },
   );

@@ -13,6 +13,7 @@ import {
   IsoDate,
   PointsAllocation,
   Prompt,
+  ScheduleSlot,
   Student,
   Submission,
   Transcription,
@@ -169,6 +170,29 @@ export type QueueResponse = z.infer<typeof QueueResponse>;
 export const QueueCounts = z.record(SubmissionStatus, z.number().int().min(0));
 export type QueueCounts = z.infer<typeof QueueCounts>;
 
+/**
+ * Lo que necesita la cola para rotularse: cuántas entregas hay en cada estado,
+ * cuántos errores nadie ha mirado todavía y cuándo va a pasar Vega por lo
+ * pendiente.
+ *
+ * Las tres cosas van juntas y no en tres llamadas porque se pintan en la misma
+ * franja de pestañas y llegar desacompasadas se ve: el contador diría siete y
+ * la lista enseñaría ocho durante medio segundo en cada carga.
+ */
+export const QueueSummaryResponse = z.object({
+  counts: QueueCounts,
+  /**
+   * Errores que nadie ha dado por vistos. Es el número que se pinta en la
+   * pestaña: un fallo ya revisado sigue en la lista, pero deja de reclamar.
+   */
+  unseenErrors: z.number().int().min(0),
+  /** Cuándo correrá el proceso de cada tipo, para poder decirlo en Pendientes. */
+  schedule: z.object({ assignment: ScheduleSlot, forum: ScheduleSlot }),
+  /** `true` mientras hay un proceso en marcha: lo pendiente ya se está moviendo. */
+  running: z.boolean(),
+});
+export type QueueSummaryResponse = z.infer<typeof QueueSummaryResponse>;
+
 // ── Detalle de una entrega ──────────────────────────────────────────────────
 
 export const SubmissionDetail = z.object({
@@ -216,9 +240,27 @@ export const ReprocessSubmissionRequest = z.object({
 export type ReprocessSubmissionRequest = z.infer<typeof ReprocessSubmissionRequest>;
 
 export const ParkSubmissionRequest = z.object({
-  reason: z.string().trim().min(1, 'Explica brevemente por qué se omite esta entrega'),
+  reason: z.string().trim().min(1, 'Explica brevemente por qué se descarta esta entrega'),
 });
 export type ParkSubmissionRequest = z.infer<typeof ParkSubmissionRequest>;
+
+/** Dar por visto un fallo, o retirar esa marca. No cambia el estado. */
+export const SeeErrorRequest = z.object({ seen: z.boolean() });
+export type SeeErrorRequest = z.infer<typeof SeeErrorRequest>;
+
+/**
+ * Cerrar a mano una corrección validada.
+ *
+ * Existe porque el circuito real no siempre pasa por Moodle: hay quien imprime
+ * la corrección, quien la manda por correo y quien la sube él mismo. Sin esto,
+ * esas entregas se quedaban en «Validadas» pidiendo para siempre una
+ * publicación que ya había ocurrido fuera de Vega.
+ */
+export const MarkPublishedRequest = z.object({
+  /** Cómo llegó al alumno, para que quede dicho y no haya que suponerlo. */
+  note: z.string().trim().max(200).optional(),
+});
+export type MarkPublishedRequest = z.infer<typeof MarkPublishedRequest>;
 
 // ── Actividades ─────────────────────────────────────────────────────────────
 
@@ -637,6 +679,42 @@ export const OverviewResponse = z.object({
 });
 export type OverviewResponse = z.infer<typeof OverviewResponse>;
 
+// ── Panel del profesor ──────────────────────────────────────────────────────
+
+/**
+ * El último proceso **medido en entregas propias**.
+ *
+ * `OverviewResponse.lastBatchRun` no vale para esto: sus cifras son las de la
+ * instalación entera —el gasto de la academia, las entregas de todo el
+ * claustro— y por eso sólo se sirven a administración. Un profesor necesita
+ * otra pregunta: de lo que corrió anoche, ¿qué me toca a mí?
+ */
+export const TeacherRunSummary = z.object({
+  id: Id,
+  startedAt: IsoDate,
+  finishedAt: IsoDate.nullable(),
+  status: z.enum(['running', 'done', 'failed', 'cancelled']),
+  /** Entregas tuyas que este proceso trajo de Moodle. */
+  ingested: z.number().int().min(0),
+  /** Entregas tuyas que llegó a corregir. */
+  processed: z.number().int().min(0),
+  /** Entregas tuyas que se le rompieron y siguen en error. */
+  failed: z.number().int().min(0),
+});
+export type TeacherRunSummary = z.infer<typeof TeacherRunSummary>;
+
+/**
+ * Todo lo que el panel del profesor necesita, en una llamada.
+ *
+ * Extiende el resumen de la cola en lugar de repetirlo: son exactamente los
+ * mismos números y tenerlos calculados en dos sitios es la forma más segura de
+ * que un día dejen de coincidir.
+ */
+export const TeacherPanelResponse = QueueSummaryResponse.extend({
+  lastRun: TeacherRunSummary.nullable(),
+});
+export type TeacherPanelResponse = z.infer<typeof TeacherPanelResponse>;
+
 // ── Panel: desglose de coste ────────────────────────────────────────────────
 
 /**
@@ -710,6 +788,23 @@ export const TriggerBatchRequest = z.object({
 });
 export type TriggerBatchRequest = z.infer<typeof TriggerBatchRequest>;
 
+/**
+ * Qué papel tuvo la entrega en el proceso que se está mirando.
+ *
+ * `ingested` es lo que ese proceso trajo del LMS; `processed`, lo que llegó a
+ * corregir; `failed`, lo que se le rompió. Son conjuntos distintos y se
+ * solapan: una entrega puede haber entrado y haber fallado en la misma pasada.
+ */
+export const BatchRunRole = z.enum(['ingested', 'processed', 'failed']);
+export type BatchRunRole = z.infer<typeof BatchRunRole>;
+
+export const BatchRunSubmissionsQuery = z.object({
+  role: BatchRunRole,
+  page: z.coerce.number().int().positive().default(1),
+  pageSize: z.coerce.number().int().positive().max(100).default(20),
+});
+export type BatchRunSubmissionsQuery = z.infer<typeof BatchRunSubmissionsQuery>;
+
 // ── Ledger de IA (sólo administrador) ─────────────────────────────────────
 
 export const AiCallQuery = z.object({
@@ -752,6 +847,13 @@ export const routes = {
    */
   discardCorrection: (id: string) => `/api/submissions/${id}/discard`,
   park: (id: string) => `/api/submissions/${id}/park`,
+  /** Da por visto —o retira la marca de— un fallo, sin cambiar su estado. */
+  seeError: (id: string) => `/api/submissions/${id}/error-seen`,
+  /**
+   * Cierra una corrección validada que se ha entregado fuera de Vega. No llama
+   * al LMS: sólo deja de pedir una publicación que ya ha ocurrido.
+   */
+  markPublished: (id: string) => `/api/submissions/${id}/mark-published`,
   original: (id: string) => `/api/submissions/${id}/original`,
   /** Descarga del PDF de feedback (original + páginas de corrección). */
   feedbackFile: (id: string) => `/api/submissions/${id}/feedback.pdf`,
@@ -805,8 +907,12 @@ export const routes = {
   testMyMoodleConnection: '/api/auth/me/moodle-token/test',
 
   overview: '/api/stats/overview',
+  /** Panel del profesor: su trabajo pendiente y qué le dejó el último proceso. */
+  teacherPanel: '/api/stats/panel',
   costBreakdown: '/api/stats/cost',
   batchRuns: '/api/batch/runs',
+  /** Qué entregas ingirió, corrigió o rompió un proceso concreto. */
+  batchRunSubmissions: (id: string) => `/api/batch/runs/${id}/submissions`,
   triggerBatch: '/api/batch/run',
   /** Para un proceso en marcha. Sólo admin, igual que lanzarlo. */
   cancelBatchRun: (id: string) => `/api/batch/runs/${id}/cancel`,

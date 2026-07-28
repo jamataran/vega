@@ -1,6 +1,7 @@
 import { and, asc, desc, eq, inArray, isNull, lt, sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import {
+  BatchRunSubmissionsQuery,
   TriggerBatchRequest,
   hasStudentFile,
   routes,
@@ -10,6 +11,7 @@ import {
   type BatchRun,
   type BatchRunListResponse,
   type BatchRunProblem,
+  type QueueResponse,
   type TriggerBatchResponse,
   type UsageMetrics,
 } from '@vega/shared';
@@ -24,6 +26,7 @@ import { conflict, notFound, parseOrThrow } from '../http/errors.js';
 import { ingestAll, ingestCutoff, type IngestReport } from '../ingest/run.js';
 import { connectorForUser } from '../lms/factory.js';
 import { publishToLms, recordPublication } from '../publish/publish.js';
+import { queuePage } from '../queue/page.js';
 import { FileStore } from '../storage/files.js';
 import { getSettings } from '../settings/service.js';
 import { readActiveContext } from '../contexts/service.js';
@@ -76,6 +79,54 @@ export async function batchRoutes(app: FastifyInstance, ctx: AppContext): Promis
         .orderBy(desc(schema.batchRuns.startedAt))
         .limit(20);
       return { items: rows.map(toBatchRun) };
+    },
+  );
+
+  /**
+   * Qué entregas hay detrás de cada cifra del proceso.
+   *
+   * Un proceso decía «5 ingeridas, 1 procesada, 1 fallida» y ahí se acababa:
+   * para saber **cuáles** había que ir a la cola, filtrar por estado y adivinar
+   * por la hora. Los tres papeles se piden por separado porque son conjuntos
+   * distintos y se solapan —una entrega puede haber entrado y haber fallado en
+   * la misma pasada— y porque cada uno lleva a un sitio distinto.
+   *
+   * El alcance del profesor se aplica dentro de `queuePage`: dos docentes que
+   * miran el mismo proceso ven cada uno sus entregas, aunque las cifras de la
+   * cabecera sean las de la instalación entera.
+   */
+  app.get<{ Params: { id: string } }>(
+    routes.batchRunSubmissions(':id'),
+    { preHandler: app.authenticate },
+    async (request): Promise<QueueResponse> => {
+      const query = parseOrThrow(
+        BatchRunSubmissionsQuery,
+        request.query,
+        'El filtro del proceso',
+      );
+      const runId = request.params.id;
+
+      const [run] = await db
+        .select({ id: schema.batchRuns.id })
+        .from(schema.batchRuns)
+        .where(eq(schema.batchRuns.id, runId))
+        .limit(1);
+      if (!run) throw notFound('No existe ese proceso.');
+
+      return queuePage(ctx, currentUser(request), {
+        page: query.page,
+        pageSize: query.pageSize,
+        // `ingested_run_id` no cambia nunca; `batch_run_id` es el proceso que
+        // la corrigió y sí puede reasignarse en un reproceso posterior. Por eso
+        // «procesadas» y «fallidas» son lo que este proceso dejó, no un
+        // histórico: si alguien vuelve a lanzar una entrega, deja de contar
+        // aquí, que es exactamente lo que se quiere.
+        ...(query.role === 'ingested'
+          ? { ingestedRunId: runId }
+          : query.role === 'failed'
+            ? { batchRunId: runId, status: 'error' as const }
+            : { batchRunId: runId, notStatus: 'error' as const }),
+      });
     },
   );
 
@@ -249,6 +300,7 @@ function storedProblems(ingest: IngestReport): BatchRunProblem[] {
   return ingest.problems.slice(0, MAX_STORED_PROBLEMS).map((problem) => ({
     activityId: problem.activityId,
     slug: problem.slug,
+    name: problem.name,
     kind: problem.kind,
     message: problem.message.slice(0, 500),
   }));
@@ -321,7 +373,7 @@ export async function runBatch(
     if (options.ingest ?? options.submissionId === undefined) {
       try {
         log.info({ batchRunId: run.id, kinds }, 'Ingesta iniciada');
-        ingest = await ingestAll(ctx, log, kinds, controller.signal);
+        ingest = await ingestAll(ctx, log, kinds, controller.signal, run.id);
         for (const problem of ingest.problems) {
           log.warn({ slug: problem.slug, kind: problem.kind }, problem.message);
         }
@@ -438,6 +490,11 @@ export async function runBatch(
           .set({
             status: 'error',
             errorMessage: message.slice(0, 500),
+            // Un fallo nuevo vuelve a reclamar aunque el anterior se hubiera
+            // dado por visto: si no, un error recurrente se volvería invisible
+            // justo cuando empieza a repetirse.
+            errorSeenAt: null,
+            errorSeenBy: null,
             updatedAt: new Date(),
           })
           .where(eq(schema.submissions.id, submission.id));
@@ -535,6 +592,8 @@ export async function runBatch(
           status: 'error',
           batchRunId: run.id,
           errorMessage: failure.message.slice(0, 500),
+          errorSeenAt: null,
+          errorSeenBy: null,
           updatedAt: new Date(),
         })
         .where(
@@ -1084,6 +1143,9 @@ function addUsage(target: UsageMetrics, value: UsageMetrics): void {
   target.cachedInputTokens += value.cachedInputTokens;
   target.cacheCreationTokens = (target.cacheCreationTokens ?? 0) + (value.cacheCreationTokens ?? 0);
   target.costCents = Math.round((target.costCents + value.costCents) * 10_000) / 10_000;
+  // Una sola llamada sin tarifa basta para que el total del proceso deje de ser
+  // el coste real y pase a ser un suelo.
+  if (value.unpriced === true) target.unpriced = true;
 }
 
 /**

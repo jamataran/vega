@@ -329,6 +329,8 @@ export const Submission = z.object({
   status: SubmissionStatus,
   /** Lote durable que inició el procesamiento actual, si lo hay. */
   batchRunId: Id.nullable(),
+  /** Proceso que la trajo del LMS. No cambia aunque después se reprocese. */
+  ingestedRunId: Id.nullable(),
   parkedReason: z.string().nullable(),
   parkedBy: Id.nullable(),
   triageLabel: TriageLabel.nullable(),
@@ -344,6 +346,12 @@ export const Submission = z.object({
   submittedAt: IsoDate,
   updatedAt: IsoDate,
   errorMessage: z.string().nullable(),
+  /**
+   * Cuándo alguien dio el fallo por visto. No lo arregla ni lo cierra: lo saca
+   * de lo que reclama atención, que es distinto. Vuelve a `null` en cuanto la
+   * entrega falla otra vez.
+   */
+  errorSeenAt: IsoDate.nullable(),
 });
 export type Submission = z.infer<typeof Submission>;
 
@@ -441,6 +449,12 @@ export const UsageMetrics = z.object({
   cacheCreationTokens: z.number().int().min(0).optional(),
   /** Coste en céntimos de euro, para evitar decimales flotantes en BD. */
   costCents: z.number().min(0),
+  /**
+   * La llamada se hizo y se pagó, pero el modelo que respondió no tiene tarifa:
+   * `costCents` es relleno, no un coste real. Opcional porque una llamada
+   * tarifada no tiene nada que declarar, igual que `cacheCreationTokens`.
+   */
+  unpriced: z.boolean().optional(),
 });
 export type UsageMetrics = z.infer<typeof UsageMetrics>;
 
@@ -495,6 +509,11 @@ export const Correction = z.object({
   publishedAt: IsoDate.nullable(),
   /** `true` si se publicó sin pasar por el profesor (modo autónomo). */
   publishedAutomatically: z.boolean(),
+  /**
+   * `true` si la cerró el profesor por su cuenta: la entregó fuera de Vega y
+   * aquí sólo se dio por hecha. Vega no ha mandado nada al LMS.
+   */
+  publishedManually: z.boolean(),
   /**
    * Qué no salió del todo bien al publicar, en español y para el profesor.
    * Publicar son dos operaciones —nota y fichero de feedback— y hay conectores
@@ -702,8 +721,14 @@ export type AppSettings = z.infer<typeof AppSettings>;
 export const BatchRunProblem = z.object({
   /** Identificador de la actividad en Vega, para poder abrirla. */
   activityId: z.string(),
-  /** Su `slug`, que es lo que se reconoce de un vistazo. */
+  /** Su `slug`. Identifica la fila, pero no es lo que se lee. */
   slug: z.string(),
+  /**
+   * El nombre con el que el profesor la conoce. El `slug` es `forum-29`, que no
+   * le dice nada a nadie: la incidencia se leía como un código de error cuando
+   * lo que hacía falta era saber de qué actividad se estaba hablando.
+   */
+  name: z.string().default(''),
   kind: z.enum(['config', 'transient']),
   message: z.string(),
 });
