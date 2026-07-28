@@ -161,3 +161,4 @@ vite.config.ts.timestamp-*
 # Almacén local de ficheros de alumnos (STORAGE_ROOT). Nunca al repositorio.
 var/
 apps/api/var/
+tmp

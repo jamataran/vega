@@ -1,8 +1,8 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { cn } from '@/lib/cn';
 import { Field } from '@/components/common/Field';
-import { Textarea } from '@/components/ui/textarea';
+import { AutoTextarea, Textarea } from '@/components/ui/textarea';
 import { Markdown } from './Markdown';
 import { MathText } from './Latex';
 
@@ -16,6 +16,14 @@ interface PreviewEditorProps {
   placeholder?: string;
   minHeight?: string;
   disabled?: boolean;
+  /**
+   * Arranca en vista previa. En la corrección se lee mucho más de lo que se
+   * escribe, y con el LaTeX en crudo no se ve si la fórmula sale bien.
+   */
+  defaultPreview?: boolean;
+  /** El editor crece con el contenido en lugar de tener scroll propio. */
+  autoGrow?: boolean;
+  minRows?: number;
 }
 
 /**
@@ -29,10 +37,27 @@ export function PreviewEditor({
   onChange,
   mode,
   placeholder,
-  minHeight = '12rem',
+  minHeight,
   disabled = false,
+  defaultPreview = false,
+  autoGrow = false,
+  minRows = 2,
 }: PreviewEditorProps) {
-  const [preview, setPreview] = useState(false);
+  const [preview, setPreview] = useState(defaultPreview);
+  const editorRef = useRef<HTMLTextAreaElement>(null);
+  // Sólo enfocamos cuando el profesor pide escribir; nunca al montar, o la
+  // pantalla saltaría al primer campo editable de la corrección.
+  const focusOnWrite = useRef(false);
+
+  useEffect(() => {
+    if (preview || !focusOnWrite.current) return;
+    focusOnWrite.current = false;
+    editorRef.current?.focus();
+  }, [preview]);
+
+  // El editor que crece con el contenido no reserva una caja vacía; el de
+  // tamaño fijo sí, para que la vista previa no descoloque el resto al alternar.
+  const boxMinHeight = minHeight ?? (autoGrow ? undefined : '12rem');
 
   return (
     <Field
@@ -40,19 +65,22 @@ export function PreviewEditor({
       hint={hint}
       action={
         <div
-          className="flex rounded-md border border-border p-0.5"
+          className="flex shrink-0 rounded-md border border-border p-0.5"
           role="group"
           aria-label={`Modo de ${label}`}
         >
           {[
-            { key: false, text: 'Escribir' },
             { key: true, text: 'Vista previa' },
+            { key: false, text: 'Escribir' },
           ].map((option) => (
             <button
               key={String(option.key)}
               type="button"
               aria-pressed={preview === option.key}
-              onClick={() => setPreview(option.key)}
+              onClick={() => {
+                focusOnWrite.current = !option.key;
+                setPreview(option.key);
+              }}
               className={cn(
                 'h-7 rounded-sm px-2 text-ui transition-colors',
                 preview === option.key
@@ -75,8 +103,12 @@ export function PreviewEditor({
             // La vista previa no es un control etiquetable, así que se nombra
             // ella misma en lugar de depender del `for` de la etiqueta.
             aria-label={`${label}: vista previa`}
-            className="overflow-x-auto rounded-md border border-border bg-card px-3 py-2.5"
-            style={{ minHeight }}
+            aria-describedby={aria['aria-describedby']}
+            className={cn(
+              'overflow-x-auto rounded-md border border-border bg-card px-3 py-2.5',
+              boxMinHeight ? undefined : 'min-h-11',
+            )}
+            style={{ minHeight: boxMinHeight }}
           >
             {value.trim() === '' ? (
               <p className="text-base italic text-muted-foreground">Sin contenido.</p>
@@ -88,8 +120,22 @@ export function PreviewEditor({
               </div>
             )}
           </div>
+        ) : autoGrow ? (
+          <AutoTextarea
+            ref={editorRef}
+            id={id}
+            {...aria}
+            value={value}
+            minRows={minRows}
+            placeholder={placeholder}
+            disabled={disabled}
+            onChange={(event) => onChange(event.target.value)}
+            spellCheck={mode === 'markdown'}
+            style={{ minHeight: boxMinHeight }}
+          />
         ) : (
           <Textarea
+            ref={editorRef}
             id={id}
             {...aria}
             value={value}
@@ -97,7 +143,7 @@ export function PreviewEditor({
             disabled={disabled}
             onChange={(event) => onChange(event.target.value)}
             spellCheck={mode === 'markdown'}
-            style={{ minHeight }}
+            style={{ minHeight: boxMinHeight }}
             className="font-mono text-ui"
           />
         )

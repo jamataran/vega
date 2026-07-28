@@ -6,9 +6,9 @@ import { formatPoints } from '@/lib/format';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
-import { AutoTextarea } from '@/components/ui/textarea';
 import { ConfidenceBadge } from '@/components/common/status';
 import { MathText } from '@/components/Latex';
+import { PreviewEditor } from '@/components/PreviewEditor';
 import { ScoreStepper } from './ScoreStepper';
 
 interface CorrectionItemCardProps {
@@ -94,34 +94,35 @@ export function CorrectionItemCard({
         ) : null}
 
         <div className="mt-4">
-          <label className="eyebrow mb-1.5 block" htmlFor={`feedback-${item.id}`}>
-            {publishesToMoodle ? 'Feedback del apartado en Moodle' : 'Feedback interno del apartado'}
-          </label>
-          <AutoTextarea
-            id={`feedback-${item.id}`}
+          <PreviewEditor
+            label={
+              publishesToMoodle ? 'Feedback del apartado en Moodle' : 'Feedback interno del apartado'
+            }
+            mode="latex"
             value={feedback}
+            autoGrow
+            defaultPreview
             placeholder="Escribe el feedback de este apartado…"
             disabled={readOnly}
-            aria-describedby={`feedback-${item.id}-hint`}
-            onChange={(event) => onFeedbackChange(event.target.value)}
-          />
-          <p id={`feedback-${item.id}-hint`} className="mt-1.5 text-ui text-muted-foreground">
-            {publishesToMoodle
-              ? published
-                ? item.teacherFeedback === null
-                  ? 'Se publicó la propuesta de la IA.'
-                  : 'Se publicó la versión revisada por el profesor.'
-                : readOnly
+            onChange={onFeedbackChange}
+            hint={
+              publishesToMoodle
+                ? published
                   ? item.teacherFeedback === null
-                    ? 'Propuesta de la IA validada. Se publicará al confirmar la publicación.'
-                    : 'Versión del profesor validada. Se publicará al confirmar la publicación.'
+                    ? 'Se publicó la propuesta de la IA.'
+                    : 'Se publicó la versión revisada por el profesor.'
+                  : readOnly
+                    ? item.teacherFeedback === null
+                      ? 'Propuesta de la IA validada. Se publicará al confirmar la publicación.'
+                      : 'Versión del profesor validada. Se publicará al confirmar la publicación.'
+                  : item.teacherFeedback === null
+                    ? 'Se publicará esta propuesta de la IA. Puedes revisarla antes de validar.'
+                    : 'Has revisado este feedback. Se publicará tu versión.'
                 : item.teacherFeedback === null
-                  ? 'Se publicará esta propuesta de la IA. Puedes revisarla antes de validar.'
-                  : 'Has revisado este feedback. Se publicará tu versión.'
-              : item.teacherFeedback === null
-                ? 'Propuesta de la IA para la revisión interna. No se publica en el foro.'
-                : 'Versión revisada para uso interno. No se publica en el foro.'}
-          </p>
+                  ? 'Propuesta de la IA para la revisión interna. No se publica en el foro.'
+                  : 'Versión revisada para uso interno. No se publica en el foro.'
+            }
+          />
 
           {item.aiQuote ? (
             <blockquote className="mt-3 rounded-md border border-border bg-muted px-3 py-2 text-ui text-muted-foreground">

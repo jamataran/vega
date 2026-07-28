@@ -10,7 +10,6 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
-import { AutoTextarea } from '@/components/ui/textarea';
 import { EmptyState } from '@/components/common/Feedback';
 import { ConfidenceBadge } from '@/components/common/status';
 import { Markdown } from '@/components/Markdown';
@@ -119,43 +118,46 @@ export function CorrectionView({
               <span className="font-mono text-ui text-muted-foreground">{correction.model}</span>
             </div>
 
-            <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
-              <label className="eyebrow block" htmlFor="teacher-summary">
-                {publishesAsForumReply ? 'Resumen interno' : 'Comentario global en Moodle'}
-              </label>
-              {!readOnly && !usingAiSummary ? (
-                <Button size="sm" variant="ghost" onClick={() => draft.restoreSummary()}>
-                  <Undo2 aria-hidden="true" />
-                  Restaurar propuesta de la IA
-                </Button>
-              ) : null}
-            </div>
-            <AutoTextarea
-              id="teacher-summary"
+            <PreviewEditor
+              label={publishesAsForumReply ? 'Resumen interno' : 'Comentario global en Moodle'}
+              mode="latex"
               value={summaryValue}
+              autoGrow
+              minRows={3}
+              defaultPreview
               placeholder="Escribe un comentario global…"
               disabled={readOnly}
-              minRows={3}
-              aria-describedby="teacher-summary-hint"
-              onChange={(event) => draft.setSummary(event.target.value)}
-            />
-            <p id="teacher-summary-hint" className="mt-1.5 text-ui text-muted-foreground">
-              {publishesAsForumReply
-                ? usingAiSummary
-                  ? 'Propuesta de la IA para la revisión interna. No se publica en el foro.'
-                  : 'Resumen revisado para uso interno. No se publica en el foro.'
-                : published
+              onChange={draft.setSummary}
+              hint={
+                publishesAsForumReply
                   ? usingAiSummary
-                    ? 'Se publicó la propuesta de la IA.'
-                    : 'Se publicó la versión revisada por el profesor.'
-                  : readOnly
+                    ? 'Propuesta de la IA para la revisión interna. No se publica en el foro.'
+                    : 'Resumen revisado para uso interno. No se publica en el foro.'
+                  : published
                     ? usingAiSummary
-                      ? 'Propuesta de la IA validada. Se publicará al confirmar la publicación.'
-                      : 'Versión del profesor validada. Se publicará al confirmar la publicación.'
-                  : usingAiSummary
-                    ? 'Se publicará esta propuesta de la IA. Puedes revisarla antes de validar.'
-                    : 'Has revisado el comentario global. Se publicará tu versión.'}
-            </p>
+                      ? 'Se publicó la propuesta de la IA.'
+                      : 'Se publicó la versión revisada por el profesor.'
+                    : readOnly
+                      ? usingAiSummary
+                        ? 'Propuesta de la IA validada. Se publicará al confirmar la publicación.'
+                        : 'Versión del profesor validada. Se publicará al confirmar la publicación.'
+                    : usingAiSummary
+                      ? 'Se publicará esta propuesta de la IA. Puedes revisarla antes de validar.'
+                      : 'Has revisado el comentario global. Se publicará tu versión.'
+              }
+            />
+
+            {!readOnly && !usingAiSummary ? (
+              <Button
+                size="sm"
+                variant="ghost"
+                className="mt-3"
+                onClick={() => draft.restoreSummary()}
+              >
+                <Undo2 aria-hidden="true" />
+                Restaurar propuesta de la IA
+              </Button>
+            ) : null}
           </section>
         </Card>
 
@@ -209,6 +211,7 @@ export function CorrectionView({
               mode="latex"
               value={latexValue}
               minHeight="16rem"
+              defaultPreview
               disabled={readOnly}
               onChange={(value) => draft.setLatex(value)}
               hint={
