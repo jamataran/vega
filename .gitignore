@@ -162,3 +162,8 @@ vite.config.ts.timestamp-*
 var/
 apps/api/var/
 tmp
+
+# Credenciales de scripts/vega-admin.sh. El fichero de ejemplo (sin secretos)
+# sí va a git; el real, nunca. No lo cubre el bloque de dotenv de arriba: su
+# nombre no es `.env` ni `.env.<algo>`.
+scripts/.vega-admin.env

@@ -8,7 +8,8 @@
 #  imagen distinta y la validación de test no valdría nada.
 #
 #  Disparadores:
-#    · workflow_dispatch  → indicas el sha-<short> ya probado en test
+#    · workflow_dispatch  → sin tocar nada promociona lo que corre en test y
+#                           publica la versión que elijas en el desplegable
 #    · push de un tag v*  → promociona el commit etiquetado y publica vX.Y.Z
 #
 #  El job usa `environment: production`, que es lo que permite exigir
@@ -20,11 +21,21 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: 'Tag inmutable ya validado en test (formato sha-1a2b3c4)'
-        required: true
+        description: 'Artefacto a promocionar. Vacío = el que corre ahora en test'
+        required: false
         type: string
+      version_bump:
+        description: 'Versión a publicar'
+        required: true
+        default: patch
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+          - ninguna
       version:
-        description: 'Versión semántica a publicar, opcional (p. ej. v1.4.0)'
+        description: 'Versión exacta, sólo si quieres saltarte el incremento (p. ej. v1.4.0)'
         required: false
         type: string
   push:
@@ -68,6 +79,7 @@ jobs:
         env:
           INPUT_TAG: ${{ inputs.image_tag }}
           INPUT_VERSION: ${{ inputs.version }}
+          INPUT_BUMP: ${{ inputs.version_bump }}
         run: |
           set -euo pipefail
 
@@ -76,14 +88,79 @@ jobs:
             # deploy-test, así que su imagen existe como sha-<short>.
             origen="sha-${GITHUB_SHA::7}"
             version="${GITHUB_REF_NAME}"
+            # El tag de git ya existe: es justo lo que ha disparado esto.
+            etiquetar='no'
           else
-            origen="${INPUT_TAG}"
-            version="${INPUT_VERSION}"
+            etiquetar='si'
+
+            # ── Artefacto ────────────────────────────────────────────────
+            origen="${INPUT_TAG:-}"
+            if [ -z "${origen}" ]; then
+              # Por defecto se promociona lo que está corriendo en test, que es
+              # exactamente lo que se acaba de validar. Ese fichero lo escribe
+              # build-and-deploy-test.yml en cada push a main, así que es la
+              # respuesta correcta salvo que quieras promocionar algo más viejo.
+              origen="$(sed -n 's/^VEGA_IMAGE_TAG=//p' deploy/test/stack.env | tail -n1)"
+              if [ -z "${origen}" ]; then
+                echo "::error title=Sin artefacto::deploy/test/stack.env no trae VEGA_IMAGE_TAG y no has indicado ninguno a mano."
+                exit 1
+              fi
+              echo "Sin tag indicado: se promociona el que corre en test, ${origen}."
+            fi
+
+            # ── Versión ──────────────────────────────────────────────────
+            if [ -n "${INPUT_VERSION}" ]; then
+              version="${INPUT_VERSION}"
+              if [ "${INPUT_BUMP}" != 'ninguna' ]; then
+                echo "::notice title=Versión explícita::Has escrito ${INPUT_VERSION}, así que se ignora el incremento «${INPUT_BUMP}»."
+              fi
+            elif [ "${INPUT_BUMP}" = 'ninguna' ]; then
+              version=''
+            else
+              # La última versión publicada sale de los tags de git, no de
+              # package.json: el fichero se queda atrás en cuanto alguien olvida
+              # subirlo, y los tags son lo que de verdad existe.
+              ultima="$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1)"
+              [ -n "${ultima}" ] || ultima='v0.0.0'
+
+              numeros="${ultima#v}"
+              mayor="${numeros%%.*}"
+              resto="${numeros#*.}"
+              menor="${resto%%.*}"
+              parche="${resto#*.}"
+              parche="${parche%%-*}" # por si algún día hay un v1.2.3-rc1
+
+              case "${INPUT_BUMP}" in
+                major) mayor=$((mayor + 1)); menor=0; parche=0 ;;
+                minor) menor=$((menor + 1)); parche=0 ;;
+                patch) parche=$((parche + 1)) ;;
+                *)
+                  echo "::error title=Incremento inválido::«${INPUT_BUMP}» no es major, minor, patch ni ninguna."
+                  exit 1
+                  ;;
+              esac
+
+              version="v${mayor}.${menor}.${parche}"
+              echo "Última versión publicada: ${ultima} · ${INPUT_BUMP} → ${version}"
+            fi
           fi
 
           # Normalizamos la versión a vX.Y.Z: es habitual teclearla sin la v.
           if [ -n "${version}" ] && [ "${version#v}" = "${version}" ]; then
             version="v${version}"
+          fi
+
+          if [ -n "${version}" ] && ! printf '%s' "${version}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+'; then
+            echo "::error title=Versión inválida::'${version}' no tiene el formato vX.Y.Z."
+            exit 1
+          fi
+
+          # Mejor descubrir aquí que la versión está pillada que después de
+          # haber re-etiquetado las imágenes y commiteado el despliegue.
+          if [ "${etiquetar}" = 'si' ] && [ -n "${version}" ] &&
+             git rev-parse -q --verify "refs/tags/${version}" > /dev/null; then
+            echo "::error title=Versión ya publicada::El tag ${version} ya existe en git. Elige otro incremento o escribe la versión a mano."
+            exit 1
           fi
 
           # Un tag mal escrito re-etiquetaría una imagen que no es la validada.
@@ -95,6 +172,7 @@ jobs:
           {
             echo "source_tag=${origen}"
             echo "version=${version}"
+            echo "etiquetar=${etiquetar}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Preparar Buildx
@@ -195,6 +273,34 @@ jobs:
           git commit -m "chore(deploy): prod -> ${SOURCE_TAG}${VERSION:+ (${VERSION})} [skip ci]"
           git push origin HEAD:main
 
+      # ── Versión ─────────────────────────────────────────────────────────
+      #
+      #  Sin este paso, calcular el incremento a partir de los tags no serviría
+      #  de nada: la siguiente promoción volvería a proponer el mismo número.
+      - name: Etiquetar la versión en git
+        if: steps.vars.outputs.etiquetar == 'si' && steps.vars.outputs.version != ''
+        env:
+          SOURCE_TAG: ${{ steps.vars.outputs.source_tag }}
+          VERSION: ${{ steps.vars.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          # El tag señala al commit del que salió la imagen que va a producción,
+          # no a la punta de main: vX.Y.Z tiene que ser el código que corre.
+          corto="${SOURCE_TAG#sha-}"
+          if ! commit="$(git rev-parse --verify --quiet "${corto}^{commit}")"; then
+            echo "::warning title=Commit no resoluble::No se encuentra ${corto} en este checkout, así que ${VERSION} no se etiqueta en git. Las imágenes sí llevan ya ese tag."
+            exit 0
+          fi
+
+          git tag -a "${VERSION}" "${commit}" \
+            -m "Vega ${VERSION} — promocionada a producción desde ${SOURCE_TAG}"
+
+          # Los pushes hechos con GITHUB_TOKEN no disparan workflows, así que
+          # esto NO reentra por el trigger `push: tags: v*` de este fichero.
+          git push origin "refs/tags/${VERSION}"
+          echo "Etiquetado ${VERSION} sobre ${commit}."
+
       # ── Despliegue ──────────────────────────────────────────────────────
       - name: Disparar el webhook del Portainer de producción
         env:
@@ -228,6 +334,7 @@ jobs:
             echo "| Campo | Valor |"
             echo "|---|---|"
             echo "| Artefacto | \`${SOURCE_TAG}\` (sin reconstruir) |"
+            echo "| Versión | ${VERSION:-sin versión nueva} |"
             echo "| Tags nuevos | \`prod\`${VERSION:+, \`${VERSION}\`} |"
             echo "| Imágenes | \`ghcr.io/${IMAGE_NAMESPACE}/vega-api\`, \`ghcr.io/${IMAGE_NAMESPACE}/vega-frontend\` |"
             echo

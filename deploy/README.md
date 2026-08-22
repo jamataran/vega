@@ -79,14 +79,32 @@ Portainer vuelve a clonar el repo, ve el tag nuevo y redespliega.
 
 ### 2 · Promoción a producción
 
-Cuando lo probado en test convence, se lanza **Promote to prod** desde la pestaña Actions
-con el `sha-<short>` que aparece en el resumen del workflow de test:
+Cuando lo probado en test convence, se lanza **Promote to prod** desde la pestaña
+Actions. En el caso normal no hay que escribir nada:
 
 ```
 Actions → Promote to prod → Run workflow
-  image_tag: sha-abc1234      ← obligatorio
-  version:   v1.4.0           ← opcional
+  image_tag:    (vacío)   ← promociona lo que corre ahora en test
+  version_bump: patch     ← patch · minor · major · ninguna
+  version:      (vacío)   ← sólo para saltarse el incremento
 ```
+
+- **`image_tag` vacío** toma el `VEGA_IMAGE_TAG` de `deploy/test/stack.env`, que es
+  lo que el último push a main desplegó en test. Escribe un `sha-<short>` a mano
+  sólo para promocionar algo distinto de lo que hay corriendo allí.
+- **`version_bump`** calcula la versión siguiente a partir del último tag `v*` de
+  git —no de `package.json`, que se queda atrás en cuanto alguien olvida subirlo—
+  y **crea el tag** apuntando al commit del que salió la imagen promocionada. Sin
+  ese tag, el incremento propondría el mismo número la vez siguiente.
+- **`version`** admite un número exacto (`v1.4.0` o `1.4.0`) y gana sobre el
+  desplegable. Con `ninguna` se promociona sin publicar versión: las imágenes se
+  re-etiquetan como `prod` y no se toca ningún tag de git.
+
+> **La primera promoción es obligatoria.** Hasta que se ejecuta una vez, el tag
+> flotante `prod` **no existe en GHCR**, y como `deploy/prod/.env` arranca con
+> `VEGA_IMAGE_TAG=prod`, el stack falla al desplegar con un error de manifiesto o
+> digest inexistente. No es un problema de Portainer ni de credenciales: es que
+> todavía no se ha promocionado nada.
 
 También se dispara solo al empujar un tag `v*`, en cuyo caso el `sha-<short>` sale del
 commit etiquetado y la versión del propio nombre del tag.
@@ -171,6 +189,34 @@ git push
 > sean aditivas (añadir columna, no renombrarla) durante al menos un ciclo de despliegue.
 
 ---
+
+## Copias de seguridad
+
+El stack de producción lleva un servicio `backup`: la misma imagen de Postgres
+corriendo un bucle que, a la hora que diga `BACKUP_HOUR`, deja un
+`pg_dump -Fc` en el volumen `vega-prod-backups` y borra los de más de
+`BACKUP_KEEP_DAYS` días. Escribe primero a `.tmp` y renombra al terminar, así
+que un contenedor muerto a mitad no deja un volcado a medias con pinta de
+válido.
+
+```bash
+# Qué copias hay
+docker compose -p vega-prod exec backup ls -lh /backups
+
+# Forzar una ahora mismo, sin esperar a la hora
+docker compose -p vega-prod exec backup \
+  sh -c 'pg_dump -Fc -f /backups/vega-manual-$(date +%F-%H%M).dump'
+
+# Restaurar sobre una base vacía
+docker compose -p vega-prod exec -T postgres \
+  pg_restore -U vega -d vega --clean --if-exists < vega-2026-08-22.dump
+```
+
+**Dos cosas que esto no cubre.** El volcado vive en un volumen del mismo Docker,
+así que no protege de perder la máquina: bájatelo fuera del host —Portainer
+permite descargar un volumen, o un `rsync` desde otro sitio— si quieres una copia
+de verdad. Y sólo cubre la base: los PDF de los alumnos están en
+`vega-prod-data`, que hay que copiar aparte.
 
 ## Migraciones: se aplican solas
 
@@ -307,6 +353,8 @@ Los mismos nombres en los dos entornos, con valores **distintos**:
 | `NODE_OPTIONS` | `--max-old-space-size=512` | `--max-old-space-size=768` |
 | `VEGA_API_PORT` | `20701` | `20701` |
 | `VEGA_WEB_PORT` | `20702` | `20702` |
+| `VEGA_BIND_ADDR` | `0.0.0.0` | `127.0.0.1` si el proxy está en la misma máquina |
+| `BACKUP_HOUR` / `BACKUP_KEEP_DAYS` | — | `3` / `14` (sólo prod) |
 | `AI_PROVIDER` | `mock` | `anthropic` |
 | `ANTHROPIC_API_KEY` | vacío | `sk-ant-…` |
 | `AI_MODEL_TRANSCRIPTION` | `claude-opus-4-8` | `claude-opus-4-8` |

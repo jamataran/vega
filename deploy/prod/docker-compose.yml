@@ -110,7 +110,12 @@ services:
       BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-admin@vega.local}
       BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?define BOOTSTRAP_ADMIN_PASSWORD en las variables del stack de Portainer}
     ports:
-      - '${VEGA_API_PORT:-20701}:3000'
+      # Si el proxy inverso corre en esta misma máquina —el caso de Plesk y del
+      # nginx de deploy/nginx—, pon VEGA_BIND_ADDR=127.0.0.1 en las variables
+      # del stack: el API deja de estar publicado en todas las interfaces y la
+      # única puerta de entrada pasa a ser el proxy, con su TLS. Sin esto,
+      # https://…:20701 responde en claro y se salta el proxy entero.
+      - '${VEGA_BIND_ADDR:-0.0.0.0}:${VEGA_API_PORT:-20701}:3000'
     volumes:
       - vega-prod-contexts:/app/contexts
       - vega-prod-data:/app/data
@@ -147,7 +152,7 @@ services:
     depends_on:
       - api
     ports:
-      - '${VEGA_WEB_PORT:-20702}:8080'
+      - '${VEGA_BIND_ADDR:-0.0.0.0}:${VEGA_WEB_PORT:-20702}:8080'
     healthcheck:
       test: ['CMD', 'wget', '-q', '--spider', 'http://127.0.0.1:8080/health.txt']
       interval: 30s
@@ -166,6 +171,69 @@ services:
       options:
         max-size: '20m'
         max-file: '5'
+
+  # ── Copia de seguridad de la base ─────────────────────────────────────────
+  #
+  #  Un volcado diario con `pg_dump -Fc` sobre el volumen vega-prod-backups.
+  #  Misma imagen que la base, así que no añade nada que mantener: sólo un
+  #  bucle de shell que comprueba cada cuarto de hora si toca y si ya existe el
+  #  volcado de hoy.
+  #
+  #  Esto protege de una migración destructiva o de un borrado a mano; NO de
+  #  perder la máquina, porque el volcado se queda en un volumen del mismo
+  #  Docker. Sácalos fuera del host —Portainer permite descargar el volumen, o
+  #  un rsync desde otra máquina— si quieres una copia de verdad. Tampoco cubre
+  #  los PDF de los alumnos, que viven en vega-prod-data.
+  backup:
+    image: postgres:16-alpine
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER:-vega}
+      PGDATABASE: ${POSTGRES_DB:-vega}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?define POSTGRES_PASSWORD en las variables del stack de Portainer}
+      # Hora local del contenedor (UTC salvo que fijes TZ). Por defecto las 3.
+      BACKUP_HOUR: ${BACKUP_HOUR:-3}
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
+    volumes:
+      - vega-prod-backups:/backups
+    networks: [vega-prod]
+    # Los `$$` son obligatorios: un `$` suelto lo interpola Compose al desplegar
+    # y el shell recibiría la variable ya vacía.
+    entrypoint: ['/bin/sh', '-c']
+    command:
+      - |
+        set -eu
+        echo "copias: diarias a las $${BACKUP_HOUR}:00, conservando $${BACKUP_KEEP_DAYS} días"
+        while true; do
+          destino="/backups/vega-$$(date +%F).dump"
+          if [ "$$(date +%H)" = "$$(printf '%02d' "$$BACKUP_HOUR")" ] && [ ! -f "$$destino" ]; then
+            # Al fichero temporal primero: un volcado a medias no debe parecer
+            # una copia válida si el contenedor muere en mitad.
+            if pg_dump -Fc -f "$$destino.tmp"; then
+              mv "$$destino.tmp" "$$destino"
+              echo "copia hecha: $$destino ($$(du -h "$$destino" | cut -f1))"
+              find /backups -name 'vega-*.dump' -mtime "+$$BACKUP_KEEP_DAYS" -delete
+            else
+              echo "ERROR: ha fallado el volcado de $$destino" >&2
+              rm -f "$$destino.tmp"
+            fi
+          fi
+          sleep 900
+        done
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: '5m'
+        max-file: '3'
 
 networks:
   vega-prod:
