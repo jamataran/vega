@@ -1,6 +1,6 @@
-import { useMemo, useState } from 'react';
+import { useId, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Clock, Search } from 'lucide-react';
 import { ACTIVITY_KIND_LABEL, SUBMISSION_STATUS_LABEL, SubmissionStatus } from '@vega/shared';
 import type { QueueSummaryResponse } from '@vega/shared';
@@ -24,6 +24,17 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { EmptyState, ErrorState } from '@/components/common/Feedback';
 import { HelpBlock, HelpDialog, HelpTerms } from '@/components/common/HelpDialog';
 import { QueueRow, QueueRowSkeleton } from '@/components/queue/QueueRow';
+import { AutoTextarea } from '@/components/ui/textarea';
+import { notify } from '@/lib/notify';
+import {
+  Sheet,
+  SheetBody,
+  SheetContent,
+  SheetDescription,
+  SheetFooter,
+  SheetHeader,
+  SheetTitle,
+} from '@/components/ui/sheet';
 
 /**
  * El orden es el del trabajo, no el del ciclo de vida.
@@ -221,6 +232,16 @@ export function QueuePage() {
       <TabsContent value={status} tabIndex={-1}>
         {/* Lo pendiente no pide nada al profesor: pide saber cuándo se moverá. */}
         {status === 'pending' ? <NextRunNotice summary={summaryQuery.data} /> : null}
+        {status === 'pending' && total > 0 ? (
+          <DiscardPending
+            total={total}
+            activityId={activityId || undefined}
+            activityName={
+              activitiesQuery.data?.items.find((activity) => activity.id === activityId)?.name
+            }
+            searching={debouncedSearch.trim() !== ''}
+          />
+        ) : null}
 
         {queue.isError ? (
           <ErrorState
@@ -296,6 +317,114 @@ export function QueuePage() {
  * minutos o esta noche, así que o espera mirando o pide que se fuerce un
  * proceso que quizá iba a correr solo dentro de un rato.
  */
+/**
+ * Descarte en bloque de lo pendiente.
+ *
+ * Existe por un accidente que se repite: se importa una actividad sin fijar la
+ * antigüedad máxima de la ingesta y Moodle devuelve años de histórico de golpe.
+ * Ciento y pico entregas que nadie va a corregir, que el lote de esta noche sí
+ * procesaría, y que hasta ahora sólo se podían quitar por SQL.
+ *
+ * Sólo aparece en «Pendientes» y sólo cuando hay algo. Lo que descarta es
+ * **exactamente lo que se está viendo**, filtro incluido, y lo dice antes de
+ * pedir confirmación: un botón que se lleva más de lo que muestra la pantalla
+ * es la peor forma de perder trabajo.
+ */
+function DiscardPending({
+  total,
+  activityId,
+  activityName,
+  searching,
+}: {
+  total: number;
+  activityId: string | undefined;
+  activityName: string | undefined;
+  searching: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [reason, setReason] = useState('');
+  const reasonId = useId();
+  const queryClient = useQueryClient();
+
+  const bulkPark = useMutation({
+    mutationFn: () =>
+      api.bulkPark({ reason: reason.trim(), activityId, expectedCount: total }),
+    onSuccess: ({ parked }) => {
+      setOpen(false);
+      setReason('');
+      notify.success(
+        parked === 1 ? 'Se ha descartado 1 entrega' : `Se han descartado ${formatInteger(parked)} entregas`,
+      );
+      void queryClient.invalidateQueries({ queryKey: queryKeys.queue({}) , exact: false });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.queueCounts });
+    },
+    onError: (error) => notify.error('No se han podido descartar las entregas', error),
+  });
+
+  // La búsqueda por alumno no viaja al descarte: el servidor filtra por estado,
+  // actividad y fecha, no por texto. Antes que descartar de más, se avisa y se
+  // desactiva.
+  const alcance = activityName ? `de «${activityName}»` : 'de todas las actividades';
+
+  return (
+    <>
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2">
+        <p className="text-ui text-muted-foreground">
+          {formatInteger(total)} {total === 1 ? 'entrega pendiente' : 'entregas pendientes'} {alcance}.
+        </p>
+        <Button variant="outline" size="sm" onClick={() => setOpen(true)} disabled={searching}>
+          Descartar {total === 1 ? 'la pendiente' : 'las pendientes'}
+        </Button>
+      </div>
+
+      <Sheet open={open} onOpenChange={(next) => !next && setOpen(false)}>
+        <SheetContent>
+          <SheetHeader>
+            <SheetTitle>
+              ¿Descartar {formatInteger(total)} {total === 1 ? 'entrega' : 'entregas'}?
+            </SheetTitle>
+            <SheetDescription>
+              Son todas las pendientes {alcance}. Salen de la revisión activa y quedan en
+              «Descartadas» con el motivo. No se pierden: se pueden volver a procesar una a una.
+            </SheetDescription>
+          </SheetHeader>
+          <SheetBody>
+            <label className="eyebrow mb-1.5 block" htmlFor={reasonId}>
+              Motivo
+            </label>
+            <AutoTextarea
+              id={reasonId}
+              value={reason}
+              minRows={3}
+              autoFocus
+              placeholder="Por ejemplo, histórico importado por error al no fijar la antigüedad."
+              onChange={(event) => setReason(event.target.value)}
+            />
+          </SheetBody>
+          <SheetFooter>
+            <Button
+              variant="ghost"
+              size="lg"
+              disabled={bulkPark.isPending}
+              onClick={() => setOpen(false)}
+            >
+              Cancelar
+            </Button>
+            <Button
+              size="lg"
+              disabled={reason.trim() === ''}
+              loading={bulkPark.isPending}
+              onClick={() => bulkPark.mutate()}
+            >
+              Descartar {formatInteger(total)}
+            </Button>
+          </SheetFooter>
+        </SheetContent>
+      </Sheet>
+    </>
+  );
+}
+
 function NextRunNotice({ summary }: { summary: QueueSummaryResponse | undefined }) {
   if (summary === undefined) return null;
 

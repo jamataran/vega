@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, isNull } from 'drizzle-orm';
+import { and, asc, count, eq, inArray, isNull, lt, type SQL } from 'drizzle-orm';
 import { createReadStream } from 'node:fs';
 import type { FastifyInstance } from 'fastify';
 import {
@@ -7,6 +7,8 @@ import {
   type ActivityKind,
   type CorrectionResponse,
   QueueQuery,
+  BulkParkRequest,
+  type BulkParkResponse,
   MarkPublishedRequest,
   ParkSubmissionRequest,
   ReprocessSubmissionRequest,
@@ -27,7 +29,7 @@ import { badRequest, conflict, forbidden, notFound, parseOrThrow, unprocessable 
 import { asHttpError, connectorForUser } from '../lms/factory.js';
 import { publishToLms, recordPublication } from '../publish/publish.js';
 import { requireActivity } from './activities.js';
-import { assertActivityAccess, visibleActivityIds } from '../auth/scope.js';
+import { assertActivityAccess, scopedIn, visibleActivityIds } from '../auth/scope.js';
 import { FileStore } from '../storage/files.js';
 import type { TokenPayload } from '../auth/plugin.js';
 import type { AppContext } from '../context.js';
@@ -445,6 +447,80 @@ export async function submissionRoutes(app: FastifyInstance, ctx: AppContext): P
 
       reply.code(202);
       return { queued: true };
+    },
+  );
+
+  /**
+   * Descarte en bloque de entregas pendientes.
+   *
+   * La ruta estática va **antes** que `/:id/park` a propósito, aunque no
+   * colisionen —tres segmentos frente a dos—: leerlas juntas evita que alguien
+   * añada mañana un `/:id` de dos segmentos y las cruce sin darse cuenta.
+   *
+   * `expectedCount` es el seguro: quien llama ha visto un número en pantalla y
+   * lo manda; si la cola ya no dice lo mismo, no se toca nada. Sin eso, una
+   * entrega que llegara entre el recuento y la confirmación se descartaría sin
+   * que nadie la hubiera visto nunca.
+   */
+  app.post(
+    routes.bulkPark,
+    { preHandler: app.authenticate },
+    async (request): Promise<BulkParkResponse> => {
+      const body = parseOrThrow(BulkParkRequest, request.body, 'El descarte en bloque');
+      const user = currentUser(request);
+
+      if (body.activityId) await assertActivityAccess(ctx, user, body.activityId);
+
+      // Un profesor sólo descarta lo suyo. Sin este filtro, un descarte «de
+      // todas las pendientes» alcanzaría entregas de actividades que ni ve.
+      const visibles = await visibleActivityIds(ctx, user);
+      if (visibles !== null && visibles.length === 0) return { parked: 0 };
+      const soloSuyas = scopedIn(visibles, schema.submissions.activityId);
+
+      const filtros: SQL[] = [
+        eq(schema.submissions.status, 'pending'),
+        ...(body.activityId ? [eq(schema.submissions.activityId, body.activityId)] : []),
+        ...(body.submittedBefore
+          ? [lt(schema.submissions.submittedAt, new Date(body.submittedBefore))]
+          : []),
+        ...(soloSuyas ? [soloSuyas] : []),
+      ];
+
+      // Recuento y descarte en la misma transacción: si entre uno y otro
+      // cambiara la cola, el número que se devuelve dejaría de ser cierto.
+      const parked = await db.transaction(async (tx) => {
+        const [fila] = await tx
+          .select({ value: count() })
+          .from(schema.submissions)
+          .where(and(...filtros));
+        const actuales = fila?.value ?? 0;
+
+        if (actuales !== body.expectedCount) {
+          throw conflict(
+            `La cola ha cambiado: esperabas ${body.expectedCount} entregas y ahora hay ${actuales}. ` +
+              'Actualiza la pantalla y vuelve a intentarlo.',
+          );
+        }
+
+        const filas = await tx
+          .update(schema.submissions)
+          .set({
+            status: 'parked',
+            parkedReason: body.reason,
+            parkedBy: user.sub,
+            updatedAt: new Date(),
+          })
+          .where(and(...filtros))
+          .returning({ id: schema.submissions.id });
+        return filas.length;
+      });
+
+      request.log.warn(
+        { userId: user.sub, activityId: body.activityId ?? null, parked },
+        'Descarte en bloque de entregas pendientes',
+      );
+
+      return { parked };
     },
   );
 

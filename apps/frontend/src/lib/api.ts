@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import {
   ActivityFileContentResponse,
+  BulkParkResponse,
   AiCallListResponse,
   AiCallResponse,
   ActivityFileListResponse,
@@ -58,6 +59,7 @@ import type {
   AiCallQuery,
   BatchRunRole,
   MarkPublishedRequest,
+  BulkParkRequest,
   ParkSubmissionRequest,
   ReprocessSubmissionRequest,
 } from '@vega/shared';
@@ -348,6 +350,16 @@ export const api = {
 
   park: (id: string, body: ParkSubmissionRequest) =>
     request(routes.park(id), { schema: QueuedResponse, method: 'POST', body }),
+
+  /**
+   * Descarta de golpe las entregas pendientes que casen con el filtro.
+   *
+   * `expectedCount` es el número que el profesor tiene delante en la pantalla:
+   * si la cola ha cambiado mientras confirmaba, el servidor rechaza el descarte
+   * en vez de llevarse por delante una entrega que nadie ha visto.
+   */
+  bulkPark: (body: BulkParkRequest) =>
+    request(routes.bulkPark, { schema: BulkParkResponse, method: 'POST', body }),
 
   /** Tira la propuesta y devuelve la entrega a Pendientes. */
   discardCorrection: (id: string) =>
