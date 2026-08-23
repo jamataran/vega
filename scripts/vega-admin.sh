@@ -174,10 +174,12 @@ api() {
 
 # Directorio de trabajo de `pull`/`push`. Fuera del repositorio por defecto:
 # un prompt de producción no debería acabar commiteado sin querer.
+# Sólo el host, sin esquema ni puerto. Con expansión de shell y no con sed
+# porque el sed de macOS no entiende `\?` y dejaba el directorio en «https».
 work_dir() {
-  local slug
-  slug="$(printf '%s' "$VEGA_API_URL" | sed 's|https\?://||; s|[:/].*||')"
-  printf '%s' "${VEGA_PROMPTS_DIR:-$SCRIPT_DIR/../var/prompts/$slug}"
+  local slug="${VEGA_API_URL#*://}"
+  slug="${slug%%[:/]*}"
+  printf '%s' "${VEGA_PROMPTS_DIR:-$SCRIPT_DIR/../var/prompts/${slug:-desconocido}}"
 }
 
 cmd_health() {

@@ -691,10 +691,10 @@ de estructura: es que no puedes verificarlo, y eso baja la \`confidence\` (§9 g
 
 ## 5. Ajuste al tiempo del formato
 
-**5.1.** Evalúa **cómo se ha repartido** el tiempo declarado en , no cuánto se ha
-escrito: un tema largo y hueco vale menos que uno breve y completo. Si  llega
-vacío, **no evalúes el ajuste al tiempo y no supongas ninguna duración**: limítate a §5.2, que no
-depende del dato.
+**5.1.** Evalúa **cómo se ha repartido** el esfuerzo, no cuánto se ha escrito: un tema largo y hueco
+vale menos que uno breve y completo. **No dispones de la duración del examen** —el motor no te la
+envía— así que no la supongas ni juzgues si el alumno «tuvo tiempo»: eso sólo lo sabe el profesor.
+Limítate a lo observable en la transcripción y a §5.2.
 
 **5.2. Corte abrupto.** Si la exposición se interrumpe (últimos contenidos ausentes, cierre sin
 conclusión), marca esos contenidos \`ausente\` con normalidad —no hay puntos por intención, §4.4
