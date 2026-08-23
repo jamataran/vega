@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { BATCH_MAX_RUNTIME_MS, autonomyDecision, isFatalProviderError } from './batch.js';
 import { isReprocessableStatus } from './submissions.js';
 import { ingestCutoff } from '../ingest/run.js';
+import { BulkParkRequest } from '@vega/shared';
 
 test('el proceso tiene un límite global de doce horas', () => {
   assert.equal(BATCH_MAX_RUNTIME_MS, 12 * 60 * 60_000);
@@ -57,4 +58,30 @@ test('la antigüedad máxima sólo corta cuando está configurada', () => {
   // «anterior o igual», y en la frontera es mejor corregir de más.
   assert.ok(new Date('2026-06-23T00:00:00.000Z') >= cutoff);
   assert.ok(new Date('2026-06-22T23:59:59.000Z') < cutoff);
+});
+
+// ── Descarte en bloque ──────────────────────────────────────────────────────
+//
+// El contrato es el guardarraíl: sin `expectedCount` no hay forma de detectar
+// que la cola ha cambiado entre que el profesor lee el número y confirma, y una
+// entrega recién llegada se descartaría sin que nadie la hubiera visto.
+
+test('el descarte en bloque exige el recuento que el profesor tiene delante', () => {
+  assert.equal(BulkParkRequest.safeParse({ reason: 'histórico' }).success, false);
+  assert.equal(
+    BulkParkRequest.safeParse({ reason: 'histórico', expectedCount: 0 }).success,
+    false,
+    'descartar cero no es una operación: o hay algo que descartar o no se llama',
+  );
+  assert.equal(BulkParkRequest.safeParse({ reason: 'histórico', expectedCount: 113 }).success, true);
+});
+
+test('el descarte en bloque exige un motivo con contenido', () => {
+  assert.equal(BulkParkRequest.safeParse({ reason: '   ', expectedCount: 5 }).success, false);
+});
+
+test('el descarte en bloque puede acotarse a una actividad, pero no hace falta', () => {
+  const sinActividad = BulkParkRequest.safeParse({ reason: 'histórico', expectedCount: 5 });
+  assert.equal(sinActividad.success, true);
+  assert.equal(sinActividad.success && sinActividad.data.activityId, undefined);
 });

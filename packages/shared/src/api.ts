@@ -244,6 +244,38 @@ export const ParkSubmissionRequest = z.object({
 });
 export type ParkSubmissionRequest = z.infer<typeof ParkSubmissionRequest>;
 
+/**
+ * Descarte en bloque de entregas **pendientes**.
+ *
+ * Existe porque una ingesta mal configurada mete cientos de entregas de golpe
+ * —basta olvidar la antigüedad máxima y Moodle devuelve años de histórico— y
+ * hasta ahora la única salida era borrarlas por SQL: `park` sólo admitía
+ * entregas ya corregidas o con error, y no había ninguna otra forma de sacar de
+ * la cola algo que aún no se había procesado.
+ *
+ * Deliberadamente **sólo `pending`**: una entrega en vuelo (`transcribing`,
+ * `grading`) no se toca a media llamada, y las que ya tienen corrección se
+ * descartan de una en una, mirándolas, que es como debe ser.
+ */
+export const BulkParkRequest = z.object({
+  reason: z.string().trim().min(1, 'Explica brevemente por qué se descartan estas entregas'),
+  /** Acota a una actividad. Sin esto, alcanza a todas las pendientes. */
+  activityId: Id.optional(),
+  /** Sólo las entregadas antes de esta fecha. Es el caso del histórico. */
+  submittedBefore: IsoDate.optional(),
+  /**
+   * Cuántas espera descartar quien llama, contadas justo antes en la cola. Si
+   * no coincide con lo que hay, no se descarta nada: entre que se ve el número
+   * y se confirma puede haber entrado una entrega nueva, y descartarla sin que
+   * nadie la haya visto es exactamente lo que hay que evitar.
+   */
+  expectedCount: z.number().int().min(1),
+});
+export type BulkParkRequest = z.infer<typeof BulkParkRequest>;
+
+export const BulkParkResponse = z.object({ parked: z.number().int().min(0) });
+export type BulkParkResponse = z.infer<typeof BulkParkResponse>;
+
 /** Dar por visto un fallo, o retirar esa marca. No cambia el estado. */
 export const SeeErrorRequest = z.object({ seen: z.boolean() });
 export type SeeErrorRequest = z.infer<typeof SeeErrorRequest>;
@@ -847,6 +879,7 @@ export const routes = {
    */
   discardCorrection: (id: string) => `/api/submissions/${id}/discard`,
   park: (id: string) => `/api/submissions/${id}/park`,
+  bulkPark: '/api/submissions/park',
   /** Da por visto —o retira la marca de— un fallo, sin cambiar su estado. */
   seeError: (id: string) => `/api/submissions/${id}/error-seen`,
   /**
