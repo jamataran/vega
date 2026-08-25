@@ -60,6 +60,20 @@ export const TranscribeInput = z.object({
   /** Identifica la pasada sin exponer una lectura a la otra. */
   reading: z.enum(['a', 'b']).optional(),
   pages: z.array(PageSource).min(1),
+  /**
+   * De qué examen forman parte los bloques enviados, cuando no son el examen
+   * entero. Sin esto el proveedor pide «transcribe el examen completo» y, si
+   * sólo van las páginas que faltaban en una relectura, el modelo las numera
+   * desde 1 o inventa las que no ve.
+   */
+  manifest: z
+    .object({
+      /** Páginas del original completo. */
+      totalPages: z.number().int().positive(),
+      /** Páginas que se piden de nuevo porque la lectura anterior no las trajo. */
+      retryOf: z.array(z.number().int().positive()).min(1).optional(),
+    })
+    .optional(),
 });
 export type TranscribeInput = z.infer<typeof TranscribeInput>;
 

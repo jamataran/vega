@@ -29,5 +29,6 @@ tomó, **la decisión** y **las consecuencias** — incluidas las malas.
 | [0012](0012-ingesta-almacen-y-publicacion-en-dos-fases.md) | Ingesta idempotente por `remoteId`, almacén en ficheros y publicación en dos fases | Aceptado |
 | [0013](0013-ficha-del-alumno-y-contexto-al-modelo.md) | Vega guarda la ficha del alumno, y el modelo ve sólo una parte | Aceptado |
 | [0014](0014-publicar-en-foro-y-verificar-la-escritura.md) | Responder en el foro es una operación propia, y las de escritura se verifican sin ejecutarse | Aceptado |
-| [0015](0015-original-doble-lectura-y-lotes.md) | El original manda, la lectura es doble y el transporte admite lotes | Aceptado |
+| [0015](0015-original-doble-lectura-y-lotes.md) | El original manda, la lectura es doble y el transporte admite lotes | Aceptado · enmendado por ADR 0017 |
 | [0016](0016-contextos-versionados-y-prompts.md) | Contextos en cinco niveles y prompts versionados en PostgreSQL | Aceptado |
+| [0017](0017-lectura-incompleta-reintento-dirigido.md) | Una lectura incompleta se relee; una sola lectura completa basta para corregir | Aceptado |

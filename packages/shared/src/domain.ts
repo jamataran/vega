@@ -378,6 +378,16 @@ export const TranscriptionPage = z.object({
   latex: z.string(),
   /** URL de la imagen escaneada, para mostrarla junto a la transcripción. */
   imageUrl: z.string(),
+  /**
+   * Legibilidad de ESTA página según el lector, entre 0 y 1. Opcional porque
+   * las transcripciones anteriores a que el esquema lo admitiera no lo traen.
+   */
+  confidence: z.number().min(0).max(1).optional(),
+  /**
+   * Una o dos frases del lector sobre la página (orden del escaneo, página
+   * en blanco, reordenaciones). Nunca sobre matemáticas: eso es del corrector.
+   */
+  notes: z.string().optional(),
 });
 export type TranscriptionPage = z.infer<typeof TranscriptionPage>;
 

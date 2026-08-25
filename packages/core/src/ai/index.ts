@@ -79,3 +79,7 @@ export {
 } from './anthropic.js';
 export * from '../grading/verification.js';
 export * from './provider.js';
+// Los esquemas de respuesta son el contrato con cada prompt: se exportan para
+// que el API compruebe en sus pruebas que los ejemplos JSON de las semillas
+// pasan por ellos (apps/api/src/prompts/seeds.test.ts).
+export { GradingAnswer, TranscriptionAnswer, TriageAnswer, VerificationAnswer } from './anthropic.js';

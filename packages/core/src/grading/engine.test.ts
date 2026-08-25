@@ -11,6 +11,7 @@ import type {
 import {
   LOW_CONFIDENCE_THRESHOLD,
   alignItems,
+  assessPageAssembly,
   detectReviewFlags,
   gradeSubmission,
   normalizePoints,
@@ -578,4 +579,172 @@ test('sin ficha del alumno el motor manda `null`, no un objeto vacío', async ()
   });
 
   assert.equal(provider.calls.grade[0]?.student, null);
+});
+
+// ── Lectura con reintento dirigido ──────────────────────────────────────────
+
+/** Un examen de seis páginas en dos bloques, como lo trocea la ingesta. */
+const DOS_BLOQUES = [
+  { page: 1, pageNumbers: [1, 2, 3, 4], path: 'examen.pdf#1-4' },
+  { page: 5, pageNumbers: [5, 6], path: 'examen.pdf#5-6' },
+];
+
+function pagina(page: number, latex = `Página ${page}`) {
+  return { page, latex, imageUrl: '/o' };
+}
+
+/**
+ * Proveedor con guion: cada lectura (`a`/`b`) devuelve, llamada a llamada, las
+ * páginas que se le indiquen. Apunta cada petición para poder mirar qué se
+ * pidió en la relectura.
+ */
+function lectorConGuion(guion: { a: number[][]; b: number[][] }) {
+  const peticiones: TranscribeInput[] = [];
+  const turno = { a: 0, b: 0 };
+  const base = stubProvider({}, {});
+  const provider: AiProvider = {
+    ...base,
+    async transcribe(input: TranscribeInput): Promise<TranscribeResult> {
+      peticiones.push(input);
+      const reading = input.reading ?? 'a';
+      const respuestas = guion[reading];
+      const numeros = respuestas[Math.min(turno[reading], respuestas.length - 1)] ?? [];
+      turno[reading] += 1;
+      return {
+        pages: numeros.map((page) => pagina(page)),
+        flags: [],
+        confidence: 0.9,
+        model: 'stub-ocr',
+        usage: { inputTokens: 10, outputTokens: 5, cachedInputTokens: 0, costCents: 1 },
+      };
+    },
+  };
+  return { provider, peticiones };
+}
+
+function corregir(provider: AiProvider) {
+  return gradeSubmission({
+    provider,
+    submissionId: SUBMISSION,
+    studentRef: 'alumno-0002',
+    activityKind: 'assignment',
+    pages: DOS_BLOQUES,
+    context: { global: 'Global.', activityKind: '', activity: 'Actividad.' },
+    pointsAllocation: ALLOCATION,
+    graded: true,
+    maxScore: 10,
+  });
+}
+
+test('una lectura completa a la primera lleva el manifiesto del original y no se relee', async () => {
+  const todas = [1, 2, 3, 4, 5, 6];
+  const { provider, peticiones } = lectorConGuion({ a: [todas], b: [todas] });
+
+  const result = await corregir(provider);
+
+  assert.equal(peticiones.length, 2);
+  for (const peticion of peticiones) {
+    assert.deepEqual(peticion.manifest, { totalPages: 6 });
+    assert.equal(peticion.pages.length, 2);
+  }
+  assert.equal(result.transcription?.pages.length, 6);
+  assert.ok(!result.review.some((flag) => flag.reason === 'lectura_parcial'));
+});
+
+test('una lectura incompleta se relee sólo con los bloques que contienen lo que falta', async () => {
+  // El caso real: la lectura B se queda en la página 1; la relectura la trae entera.
+  const { provider, peticiones } = lectorConGuion({
+    a: [[1, 2, 3, 4, 5, 6]],
+    b: [[1, 2, 3, 4], [5, 6]],
+  });
+
+  const result = await corregir(provider);
+
+  assert.equal(peticiones.length, 3, 'dos lecturas y una relectura');
+  const relectura = peticiones[2]!;
+  assert.equal(relectura.reading, 'b');
+  assert.deepEqual(relectura.manifest, { totalPages: 6, retryOf: [5, 6] });
+  // Sólo viaja el bloque que contiene las páginas que faltaban.
+  assert.deepEqual(relectura.pages.map((page) => page.pageNumbers), [[5, 6]]);
+
+  assert.deepEqual(result.transcription?.pages.map((page) => page.page), [1, 2, 3, 4, 5, 6]);
+  assert.ok(!result.transcription?.flags.some((flag) => flag.kind === 'DISCREPANCIA'));
+  assert.ok(!result.review.some((flag) => flag.reason === 'lectura_parcial'));
+  // La relectura se paga y se cuenta.
+  assert.equal(result.usage.inputTokens, 30);
+});
+
+test('si la relectura tampoco trae la página, la otra lectura la cubre con aviso', async () => {
+  const { provider, peticiones } = lectorConGuion({
+    a: [[1, 2, 3, 4, 5, 6]],
+    b: [[1, 2, 3, 4], [1, 2, 3, 4]],
+  });
+
+  const result = await corregir(provider);
+
+  assert.equal(peticiones.length, 3, 'un único reintento, no un bucle');
+  assert.deepEqual(result.transcription?.pages.map((page) => page.page), [1, 2, 3, 4, 5, 6]);
+  assert.equal(result.transcription?.pages[4]?.latex, 'Página 5');
+
+  const parcial = result.review.find((flag) => flag.reason === 'lectura_parcial');
+  assert.ok(parcial, 'el profesor tiene que saber que 5 y 6 no tienen contraste');
+  assert.match(parcial.detail, /páginas 5, 6/);
+  assert.equal(parcial.label, null);
+  // Y llega a la ficha por los avisos de verificación, que es lo que se persiste.
+  assert.equal(result.correction.verification.coherent, false);
+  assert.ok(
+    result.correction.verification.issues.some(
+      (issue) => issue.kind === 'lectura_parcial' && issue.source === 'mechanical',
+    ),
+  );
+  // Una penalización global, no una por página: 0,9 − 0,15.
+  assert.equal(result.transcription?.confidence, 0.75);
+});
+
+test('sin ninguna lectura de una página, la entrega falla diciendo que ya se reintentó', async () => {
+  const { provider } = lectorConGuion({
+    a: [[1, 2, 3, 4], [1, 2, 3, 4]],
+    b: [[1, 2, 3, 4, 5], [1, 2, 3, 4, 5]],
+  });
+
+  await assert.rejects(corregir(provider), (error: Error) => {
+    assert.match(error.message, /tras reintentar la lectura/);
+    assert.match(error.message, /la página 6/);
+    assert.match(error.message, /no se corrige/);
+    return true;
+  });
+});
+
+test('un duplicado vacío se ignora y un duplicado con texto fuerza la relectura', () => {
+  const limpio = assessPageAssembly(
+    {
+      pages: [pagina(1), pagina(1, ''), pagina(2), pagina(3), pagina(4), pagina(5), pagina(6)],
+      flags: [],
+      confidence: 0.9,
+      model: 'stub-ocr',
+      usage: NO_USAGE,
+    },
+    DOS_BLOQUES,
+  );
+  assert.deepEqual(limpio.toReread, []);
+  assert.equal(limpio.reading.pages.length, 6);
+  assert.equal(limpio.reading.pages[0]?.latex, 'Página 1');
+
+  const dudoso = assessPageAssembly(
+    {
+      pages: [pagina(1), pagina(1, 'Otra lectura de la 1'), pagina(2), pagina(3), pagina(4), pagina(7)],
+      flags: [{ kind: 'DUDA', page: 7, excerpt: 'x', note: 'n' }],
+      confidence: 0.9,
+      model: 'stub-ocr',
+      usage: NO_USAGE,
+    },
+    DOS_BLOQUES,
+  );
+  assert.deepEqual(dudoso.duplicated, [1]);
+  assert.deepEqual(dudoso.missing, [5, 6]);
+  assert.deepEqual(dudoso.unexpected, [7]);
+  assert.deepEqual(dudoso.toReread, [1, 5, 6]);
+  // La página inventada se va, y sus marcas con ella.
+  assert.ok(!dudoso.reading.pages.some((page) => page.page === 7));
+  assert.deepEqual(dudoso.reading.flags, []);
 });

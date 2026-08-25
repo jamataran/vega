@@ -34,7 +34,7 @@ interface Llamada {
 function clienteFalso(
   respuestas: Array<{
     error?: Error;
-    pages?: Array<{ page: number; latex: string }>;
+    pages?: Array<{ page: number; latex: string; confidence?: number; notes?: string }>;
     stopReason?: string;
   }>,
 ): { client: Anthropic; llamadas: Llamada[] } {
@@ -64,7 +64,11 @@ function clienteFalso(
         stop_reason: respuesta?.stopReason ?? 'end_turn',
         usage: { input_tokens: 10, output_tokens: 10 },
         parsed_output: {
-          pages: respuesta?.pages ?? [{ page: 1, latex: 'x' }],
+          pages: (respuesta?.pages ?? [{ page: 1, latex: 'x' }]).map((page) => ({
+            confidence: 0.9,
+            notes: '',
+            ...page,
+          })),
           flags: [],
           confidence: 0.9,
         },
@@ -100,6 +104,58 @@ test('la transcripción pide las páginas del original, no los bloques enviados'
   assert.match(texto, /1, 2, 3, 4, 5, 6/);
   assert.ok(llamadas[0]?.signal, 'la lectura debe poder abortar el stream completo');
   assert.equal(llamadas[0]?.signal?.aborted, false);
+});
+
+test('un envío parcial dice de qué examen es y no pide «el examen completo»', async () => {
+  const { client, llamadas } = clienteFalso([{}]);
+
+  await proveedor(client).transcribe({
+    submissionId: SUBMISSION,
+    studentRef: 'alumno-0007',
+    activityKind: 'assignment',
+    pages: [SEIS_PAGINAS[1]!],
+    manifest: { totalPages: 6 },
+  });
+
+  const texto = llamadas[0]?.texto ?? '';
+  assert.match(texto, /páginas 5, 6 de un examen de 6 páginas/);
+  assert.doesNotMatch(texto, /examen completo/);
+  assert.match(texto, /numeradas 5, 6/);
+});
+
+test('una relectura dice qué páginas faltaron y las vuelve a pedir por su número', async () => {
+  const { client, llamadas } = clienteFalso([{}]);
+
+  await proveedor(client).transcribe({
+    submissionId: SUBMISSION,
+    studentRef: 'alumno-0007',
+    activityKind: 'assignment',
+    pages: [SEIS_PAGINAS[1]!],
+    manifest: { totalPages: 6, retryOf: [6] },
+  });
+
+  const texto = llamadas[0]?.texto ?? '';
+  assert.match(texto, /Relectura/);
+  assert.match(texto, /examen de 6 páginas faltaron las páginas 6/);
+  assert.match(texto, /numeradas 5, 6/);
+  assert.doesNotMatch(texto, /examen completo/);
+});
+
+test('la confianza y las notas de cada página llegan a la transcripción', async () => {
+  const { client } = clienteFalso([
+    { pages: [{ page: 1, latex: 'x', confidence: 1.4, notes: 'Página de índice.' }] },
+  ]);
+
+  const result = await proveedor(client).transcribe({
+    submissionId: SUBMISSION,
+    studentRef: 'alumno-0007',
+    activityKind: 'assignment',
+    pages: SEIS_PAGINAS,
+  });
+
+  // Acotada a [0, 1] como el resto de confianzas que devuelve el modelo.
+  assert.equal(result.pages[0]?.confidence, 1);
+  assert.equal(result.pages[0]?.notes, 'Página de índice.');
 });
 
 test('el triaje usa un timeout corto para no bloquear la cola', async () => {
