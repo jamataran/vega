@@ -133,25 +133,47 @@ export interface AnthropicAiProviderOptions {
 
 // ── Respuestas esperadas del modelo ─────────────────────────────────────────
 
-const TranscriptionAnswer = z.object({
-  pages: z.array(
-    z.object({
-      page: z.number(),
-      latex: z.string(),
-    }),
-  ),
-  flags: z.array(
-    z.object({
-      kind: z.enum(['ILEGIBLE', 'DUDA', 'DISCREPANCIA']),
-      page: z.number(),
-      excerpt: z.string(),
-      note: z.string(),
-    }),
-  ),
-  confidence: z.number(),
-});
+/**
+ * Los esquemas de respuesta son el **contrato** con el prompt, y van estrictos
+ * a todos los niveles a propósito. La salida estructurada restringe la
+ * decodificación al JSON Schema que sale de aquí: el modelo no puede escribir
+ * un campo que no esté. Medido en producción (24-08-2026): el prompt de
+ * transcripción exigía `pages[].notes` y `pages[].confidence`, el esquema no
+ * los admitía, y el modelo descarrilaba tras la primera página —cerraba el
+ * array o volcaba las notas dentro de `latex`— con las páginas 2…13 sin
+ * transcribir. `apps/api/src/prompts/seeds.test.ts` comprueba que el ejemplo
+ * JSON de cada prompt pasa por su esquema: quien cambie uno sin el otro rompe
+ * la CI, no una entrega.
+ */
+export const TranscriptionAnswer = z
+  .object({
+    pages: z.array(
+      z
+        .object({
+          page: z.number(),
+          latex: z.string(),
+          confidence: z.number(),
+          notes: z.string(),
+        })
+        .strict(),
+    ),
+    flags: z.array(
+      z
+        .object({
+          // `DISCREPANCIA` la pone el motor al comparar las dos lecturas; el
+          // lector sólo declara lo que no lee o lo que duda.
+          kind: z.enum(['ILEGIBLE', 'DUDA']),
+          page: z.number(),
+          excerpt: z.string(),
+          note: z.string(),
+        })
+        .strict(),
+    ),
+    confidence: z.number(),
+  })
+  .strict();
 
-const GradingAnswer = z.object({
+export const GradingAnswer = z.object({
   /** Vacío cuando la actividad no se puntúa. */
   items: z.array(
     z.object({
@@ -178,13 +200,13 @@ const GradingAnswer = z.object({
   noEsDuda: z.boolean(),
 });
 
-const TriageAnswer = z.object({
+export const TriageAnswer = z.object({
   label: z.enum(['errata', 'administrativa', 'no_es_duda', 'sencilla', 'dificil']),
   confidence: z.number(),
   reason: z.string(),
 });
 
-const VerificationAnswer = z.object({
+export const VerificationAnswer = z.object({
   coherent: z.boolean(),
   issues: z.array(z.object({
     kind: z.string(),
@@ -331,16 +353,7 @@ export class AnthropicAiProvider implements AiProvider {
             role: 'user',
             content: [
               ...attachments.flat(),
-              {
-                type: 'text',
-                text:
-                  `Transcribe el examen completo: ${pageNumbers.length} ` +
-                  `${pageNumbers.length === 1 ? 'página' : 'páginas'} repartidas en ` +
-                  `${input.pages.length} ${input.pages.length === 1 ? 'bloque' : 'bloques'}. ` +
-                  `Devuelve una entrada por página, numeradas ${pageNumbers.join(', ')} ` +
-                  '—los números del original, no la posición dentro de su bloque—. ' +
-                  `Referencia interna del alumno: ${input.studentRef}.`,
-              },
+              { type: 'text', text: transcriptionRequest(input, pageNumbers) },
             ],
           },
         ],
@@ -360,6 +373,8 @@ export class AnthropicAiProvider implements AiProvider {
       page: Math.max(1, Math.trunc(page.page)),
       latex: page.latex,
       imageUrl: `/api/submissions/${input.submissionId}/original`,
+      confidence: clamp01(page.confidence),
+      notes: page.notes,
     }));
     const flags: TranscriptionFlag[] = answer.flags.map((flag) => ({
       ...flag,
@@ -722,6 +737,47 @@ async function withStopRetry<T extends Anthropic.Message>(
 
 function clamp01(value: number): number {
   return Math.max(0, Math.min(1, value));
+}
+
+/**
+ * El encargo al lector. Tiene tres formas según lo que viaje:
+ *
+ *  - el examen entero: «Transcribe el examen completo: 6 páginas en 2 bloques»;
+ *  - una parte: «Transcribe las páginas 5, 6, 7, 8 de un examen de 14»;
+ *  - una relectura: «en la lectura anterior faltaron las páginas 2…13».
+ *
+ * En los tres casos se enumeran los **números del original**, que es lo que
+ * comprueba el ensamblado: anunciar sólo el número de bloques hacía que el
+ * modelo numerase desde 1 (commit f43c2aa). Y sin decirle que un envío parcial
+ * es parcial, pedía «el examen completo» sobre dos páginas y el modelo inventaba
+ * las que no veía.
+ */
+function transcriptionRequest(input: TranscribeInput, pageNumbers: readonly number[]): string {
+  const blocks = `${input.pages.length} ${input.pages.length === 1 ? 'bloque' : 'bloques'}`;
+  const listed = pageNumbers.join(', ');
+  const count = `${pageNumbers.length} ${pageNumbers.length === 1 ? 'página' : 'páginas'}`;
+  const total = input.manifest?.totalPages ?? pageNumbers.length;
+  const retryOf = input.manifest?.retryOf ?? [];
+  const closing =
+    `Devuelve una entrada por página, numeradas ${listed} ` +
+    '—los números del original, no la posición dentro de su bloque—. ' +
+    `Referencia interna del alumno: ${input.studentRef}.`;
+
+  if (retryOf.length > 0) {
+    return (
+      `Relectura: en la lectura anterior de este examen de ${total} páginas faltaron las páginas ` +
+      `${retryOf.join(', ')}. Se adjuntan de nuevo los bloques que las contienen ` +
+      `(${blocks}, páginas ${listed}). Transcribe cada una de esas páginas, sin saltarte ninguna y ` +
+      `sin resumir. ${closing}`
+    );
+  }
+  if (total > pageNumbers.length) {
+    return (
+      `Transcribe las páginas ${listed} de un examen de ${total} páginas: en este envío van ` +
+      `${count} repartidas en ${blocks}. ${closing}`
+    );
+  }
+  return `Transcribe el examen completo: ${count} repartidas en ${blocks}. ${closing}`;
 }
 
 /** Lee la página del disco si hace falta y la envuelve en el bloque adecuado. */

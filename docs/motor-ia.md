@@ -225,6 +225,21 @@ Hechos de la API que condicionan esto (verificados contra la referencia actual d
   parte el PDF (`ai.pagesPerChunk`), y el prompt debe anunciar los **números de página del
   original**. Anunciar el número de bloques hacía que el modelo devolviera una entrada por bloque
   numerada desde 1, y el ensamblado tiraba la entrega ya pagada.
+- **El esquema de salida es el contrato con el prompt, y va estricto.** Con `output_config.format`
+  la decodificación queda restringida al JSON Schema: el modelo no puede escribir un campo que no
+  esté. Medido en producción (24-08-2026): el prompt de transcripción exigía `pages[].notes` y
+  `pages[].confidence`, el esquema no los admitía, y el modelo descarrilaba tras la primera página
+  —cerraba el array, o volcaba las notas dentro de `latex`— con las páginas 2…13 sin transcribir,
+  de forma no determinista (una lectura perfecta y la otra rota en la misma entrega). Se alinearon
+  esquema y prompt, y `apps/api/src/prompts/seeds.test.ts` valida el ejemplo JSON de cada prompt
+  contra su esquema. Los ejemplos de corrección, triaje y verificación **tampoco cuadran** hoy
+  (`citas[]` frente a `aiQuote`, `tipo/confianza/motivo`, `veredicto/problemas`); están marcados
+  como pendientes en esa prueba.
+- **Una lectura incompleta se relee, y una sola lectura completa basta** (ADR 0017): cada lectura
+  se evalúa contra el manifiesto al llegar; lo que falta se vuelve a pedir una vez con sólo los
+  bloques que lo contienen y un `manifest` que dice «relectura, páginas X de un examen de N»; si
+  aun así una página sólo está en una lectura, se consolida con aviso `lectura_parcial` y una única
+  penalización de 0,15. La entrega sólo falla cuando una página no está en ninguna de las dos.
 - **Visión en alta resolución automática (Opus 4.8)**: las imágenes/PDF se procesan hasta 2.576 px
   → hasta ~4.800 tokens por página densa, no los ~1.600 clásicos. Afecta directamente al
   presupuesto (§14): los números de visión son cotas inferiores hasta medir en el piloto.

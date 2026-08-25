@@ -11,3 +11,4 @@ existe; aquí se audita lo que ya está.
 | Documento | Cuándo | Qué revisa |
 |---|---|---|
 | [`h2-preparacion-motor-ia.md`](h2-preparacion-motor-ia.md) | 2026-07-22 | Si H2 deja la casa montada para escribir el motor de IA: persistencia de prompts, importación desde Moodle, llamadas simuladas, registro, depuración y planificador |
+| [`20260824-incidencias-lote-sin-limite.md`](20260824-incidencias-lote-sin-limite.md) | 2026-08-24 | Tres fallos del primer lote grande de producción, con su evidencia en el ledger, el diseño del arreglo y el plan de implementación en tres PR: `request_too_large`, timeout de descarga de Moodle y lecturas incompletas |

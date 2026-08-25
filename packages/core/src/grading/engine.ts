@@ -11,8 +11,20 @@ import type {
 } from '@vega/shared';
 import { resolveContext } from '../context/resolve.js';
 import type { ResolveContextInput } from '../context/resolve.js';
-import type { AiProvider, GradedItem, PageSource, StudentContext } from '../ai/provider.js';
-import { consolidateTranscriptions, normalizeCanonical, sumUsage } from './verification.js';
+import type {
+  AiProvider,
+  GradedItem,
+  PageSource,
+  StudentContext,
+  TranscribeInput,
+  TranscribeResult,
+} from '../ai/provider.js';
+import {
+  consolidateTranscriptions,
+  normalizeCanonical,
+  partialReadingPages,
+  sumUsage,
+} from './verification.js';
 
 /**
  * Motor de corrección: transcribir → resolver contexto → corregir → devolver un
@@ -56,6 +68,11 @@ export type ReviewReason =
   | 'score_feedback_mismatch'
   /** El segundo modelo detecta una incoherencia que debe mirar el profesor. */
   | 'ai_verification'
+  /**
+   * Alguna página sólo la ha transcrito una de las dos lecturas, incluso tras
+   * releerla. La transcripción sirve, pero esas páginas no tienen contraste.
+   */
+  | 'lectura_parcial'
   /**
    * El modo de autonomía dejaría publicar esto sin que lo viera nadie, pero la
    * confianza global no da para tanto. Es el aviso que evita que el modo
@@ -192,14 +209,12 @@ export async function gradeSubmission(input: GradeSubmissionInput): Promise<Grad
       usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, cacheCreationTokens: 0, costCents: 0 },
     };
   } else if (hasStudentFile(input.activityKind)) {
-    const [rawA, rawB] = await Promise.all([
-      input.provider.transcribe({ ...transcriptionInput, reading: 'a' }, { signal: input.signal }),
-      input.provider.transcribe({ ...transcriptionInput, reading: 'b' }, { signal: input.signal }),
+    const [readingA, readingB] = await Promise.all([
+      readWithRetry(input.provider, transcriptionInput, 'a', input.pages, input.signal),
+      readWithRetry(input.provider, transcriptionInput, 'b', input.pages, input.signal),
     ]);
-    transcription = consolidateTranscriptions(
-      validatePageAssembly(rawA, input.pages),
-      validatePageAssembly(rawB, input.pages),
-    );
+    assertReadable(readingA, readingB, input.pages);
+    transcription = consolidateTranscriptions(readingA, readingB);
   }
 
   const resolvedContext = resolveContext(input.context);
@@ -267,12 +282,17 @@ export async function gradeSubmission(input: GradeSubmissionInput): Promise<Grad
         aiSummary: graded.aiSummary,
         aiLatex: graded.aiLatex,
       }, { signal: input.signal });
+  // Una lectura parcial se avisa por aquí y no sólo en `review`: lo que se
+  // persiste y se enseña en la ficha son los avisos de verificación, y una
+  // página sin contraste es una razón para que el profesor abra el original.
+  const readingReview = reviewPartialReading(partialReadingPages(flags));
+  const mechanicalReview = [...mechanical.review, ...readingReview];
   const verification: CorrectionVerification = {
-    coherent: mechanical.review.length === 0 && (aiVerification?.coherent ?? true),
+    coherent: mechanicalReview.length === 0 && (aiVerification?.coherent ?? true),
     confidence: aiVerification?.confidence ?? null,
     aiEnabled: input.verifyWithAi !== false,
     issues: [
-      ...mechanical.review.map((issue) => ({
+      ...mechanicalReview.map((issue) => ({
         kind: issue.reason,
         itemLabel: issue.label,
         detail: issue.detail,
@@ -295,7 +315,7 @@ export async function gradeSubmission(input: GradeSubmissionInput): Promise<Grad
   );
 
   const review = [
-    ...mechanical.review,
+    ...mechanicalReview,
     ...(aiVerification?.issues ?? []).map((issue): ReviewFlag => ({
       label: issue.itemLabel,
       reason: 'ai_verification',
@@ -350,34 +370,225 @@ export async function gradeSubmission(input: GradeSubmissionInput): Promise<Grad
   };
 }
 
-function validatePageAssembly(
-  reading: import('../ai/provider.js').TranscribeResult,
+// ── Lectura con reintento dirigido ──────────────────────────────────────────
+
+/** Qué le falta o le sobra a una lectura respecto al manifiesto del original. */
+export interface PageAssessment {
+  /** La lectura ya limpia: sin duplicados vacíos ni páginas que no existen. */
+  readonly reading: TranscribeResult;
+  /** Páginas del original que no han llegado. */
+  readonly missing: readonly number[];
+  /** Páginas que llegaron más de una vez con contenido distinto: no se sabe cuál vale. */
+  readonly duplicated: readonly number[];
+  /** Páginas que el modelo numeró fuera del original. Se descartan. */
+  readonly unexpected: readonly number[];
+  /** Las que hay que volver a pedir: `missing` ∪ `duplicated`, ordenadas. */
+  readonly toReread: readonly number[];
+}
+
+/** Los números de página del original que cubren estos bloques, en orden. */
+function pagesOf(sources: readonly PageSource[]): number[] {
+  return sources.flatMap((source) => source.pageNumbers ?? [source.page]);
+}
+
+/**
+ * Sólo se comprueba el ensamblado cuando los bloques traen manifiesto
+ * (`pageNumbers`): es la ingesta real. Las páginas sintéticas del mock de demo
+ * no lo llevan y no hay nada contra lo que comparar.
+ */
+function manifested(sources: readonly PageSource[]): boolean {
+  return sources.some((source) => source.pageNumbers !== undefined);
+}
+
+/**
+ * Compara una lectura con el manifiesto del original y la deja limpia.
+ *
+ * No lanza: lo que falta se vuelve a pedir (`readWithRetry`) y sólo se rinde
+ * cuando **las dos** lecturas se quedan sin una página (`assertReadable`).
+ * Antes cualquier hueco tiraba la entrega entera, incluida la otra lectura,
+ * completa y ya pagada.
+ *
+ * Limpieza: una página repetida con `latex` vacío es ruido del modelo (se ha
+ * visto `{page: 1, latex: ""}` detrás de la página 1 buena) y se descarta sin
+ * más; repetida con contenido es una página que no sabemos leer y se relee.
+ * Una página numerada fuera del original se descarta: si de verdad era una de
+ * las que faltan, la relectura la trae con su número.
+ */
+export function assessPageAssembly(
+  reading: TranscribeResult,
   sources: readonly PageSource[],
-): import('../ai/provider.js').TranscribeResult {
-  const manifested = sources.some((source) => source.pageNumbers !== undefined);
-  if (!manifested) return reading;
-  const expected = sources.flatMap((source) => source.pageNumbers ?? [source.page]);
-  const actual = reading.pages.map((page) => page.page);
-  const unique = new Set(actual);
-  const missing = expected.filter((page) => !unique.has(page));
-  const duplicates = actual.filter((page, index) => actual.indexOf(page) !== index);
-  const unexpected = actual.filter((page) => !expected.includes(page));
-  if (missing.length > 0 || duplicates.length > 0 || unexpected.length > 0) {
-    // El detalle técnico va detrás, pero delante va lo que le importa a quien
-    // lo lee en la cola: qué ha pasado con SU entrega y que no se ha corregido
-    // media a ciegas. Se falla en vez de continuar a propósito: corregir una
-    // transcripción a la que le faltan páginas es peor que no corregir.
-    const partes = [
-      missing.length > 0 ? `no ha transcrito las páginas ${missing.join(', ')}` : '',
-      duplicates.length > 0 ? `ha repetido las páginas ${duplicates.join(', ')}` : '',
-      unexpected.length > 0 ? `ha inventado las páginas ${unexpected.join(', ')}` : '',
-    ].filter(Boolean);
-    throw new Error(
-      `La lectura del examen no cuadra con el original: ${partes.join('; ')}. ` +
-        'La entrega no se corrige para no calificar media a ciegas; vuelve a procesarla.',
-    );
+): PageAssessment {
+  if (!manifested(sources)) {
+    return { reading, missing: [], duplicated: [], unexpected: [], toReread: [] };
   }
-  return reading;
+  const expected = pagesOf(sources);
+  const expectedSet = new Set(expected);
+
+  const byPage = new Map<number, TranscriptionPage[]>();
+  const unexpected = new Set<number>();
+  for (const page of reading.pages) {
+    if (!expectedSet.has(page.page)) {
+      unexpected.add(page.page);
+      continue;
+    }
+    byPage.set(page.page, [...(byPage.get(page.page) ?? []), page]);
+  }
+
+  const duplicated: number[] = [];
+  const pages: TranscriptionPage[] = [];
+  for (const pageNumber of expected) {
+    const entries = byPage.get(pageNumber);
+    if (entries === undefined) continue;
+    const withContent = entries.filter((entry) => entry.latex.trim() !== '');
+    // Una página en blanco es legítima (el prompt pide `latex` vacío y no
+    // omitirla): se conserva la primera entrada aunque no tenga texto.
+    const kept = withContent[0] ?? entries[0];
+    if (kept === undefined) continue;
+    if (withContent.length > 1) duplicated.push(pageNumber);
+    pages.push(kept);
+  }
+
+  const missing = expected.filter((pageNumber) => !byPage.has(pageNumber));
+  const toReread = [...new Set([...missing, ...duplicated])].sort((a, b) => a - b);
+
+  return {
+    reading: {
+      ...reading,
+      pages,
+      flags: reading.flags.filter((flag) => expectedSet.has(flag.page)),
+    },
+    missing,
+    duplicated,
+    unexpected: [...unexpected].sort((a, b) => a - b),
+    toReread,
+  };
+}
+
+/** Los bloques del original que contienen alguna de estas páginas. */
+function chunksCovering(sources: readonly PageSource[], pages: readonly number[]): PageSource[] {
+  const wanted = new Set(pages);
+  return sources.filter((source) =>
+    (source.pageNumbers ?? [source.page]).some((pageNumber) => wanted.has(pageNumber)),
+  );
+}
+
+/**
+ * Sustituye en la primera lectura las páginas que se pidieron de nuevo por lo
+ * que trae la relectura. Lo que la relectura devuelva de páginas que no se le
+ * pidieron —un bloque trae cuatro aunque sólo faltara una— se ignora: esas ya
+ * estaban bien. Las marcas siguen a sus páginas y el consumo se suma, que es
+ * lo que se ha pagado.
+ */
+function mergeReadings(
+  first: TranscribeResult,
+  retry: TranscribeResult,
+  reread: readonly number[],
+): TranscribeResult {
+  const wanted = new Set(reread);
+  const replacements = retry.pages.filter((page) => wanted.has(page.page));
+  return {
+    pages: [...first.pages.filter((page) => !wanted.has(page.page)), ...replacements].sort(
+      (a, b) => a.page - b.page,
+    ),
+    flags: [
+      ...first.flags.filter((flag) => !wanted.has(flag.page)),
+      ...retry.flags.filter((flag) => wanted.has(flag.page)),
+    ],
+    confidence: Math.min(first.confidence, retry.confidence),
+    model: first.model,
+    usage: sumUsage(first.usage, retry.usage),
+  };
+}
+
+/**
+ * Una lectura completa, con **un** reintento dirigido si la primera pasada no
+ * trajo todas las páginas.
+ *
+ * El reintento sólo lleva los bloques que contienen las páginas que faltan y
+ * le dice al modelo que es una relectura y de qué examen: pedir «el examen
+ * completo» sobre dos páginas hacía que las numerase desde 1. Cuesta una
+ * petición con el mismo prefijo cacheado; dejar morir la entrega costaba las
+ * dos lecturas enteras. Si tras el reintento sigue faltando algo, se devuelve
+ * lo que hay: es `assertReadable` quien decide, con las dos lecturas delante.
+ */
+export async function readWithRetry(
+  provider: AiProvider,
+  base: Omit<TranscribeInput, 'pages' | 'reading' | 'manifest'>,
+  reading: 'a' | 'b',
+  sources: readonly PageSource[],
+  signal: AbortSignal | undefined,
+): Promise<TranscribeResult> {
+  const withManifest = manifested(sources);
+  const totalPages = pagesOf(sources).length;
+  const first = await provider.transcribe(
+    {
+      ...base,
+      reading,
+      pages: [...sources],
+      ...(withManifest ? { manifest: { totalPages } } : {}),
+    },
+    { signal },
+  );
+  const assessed = assessPageAssembly(first, sources);
+  if (assessed.toReread.length === 0) return assessed.reading;
+
+  signal?.throwIfAborted();
+  const chunks = chunksCovering(sources, assessed.toReread);
+  const retry = await provider.transcribe(
+    {
+      ...base,
+      reading,
+      pages: chunks,
+      manifest: { totalPages, retryOf: [...assessed.toReread] },
+    },
+    { signal },
+  );
+  const merged = mergeReadings(assessed.reading, assessPageAssembly(retry, chunks).reading, assessed.toReread);
+  return assessPageAssembly(merged, sources).reading;
+}
+
+/**
+ * La única situación en la que se rinde: una página que **ninguna** de las
+ * dos lecturas ha traído, después de releer. Con una sola lectura completa la
+ * entrega sigue —con aviso— porque corregir sobre una transcripción buena sin
+ * contraste es mejor que no corregir; sin ninguna, se estaría corrigiendo a
+ * ciegas y eso es peor que fallar.
+ */
+function assertReadable(
+  readingA: TranscribeResult,
+  readingB: TranscribeResult,
+  sources: readonly PageSource[],
+): void {
+  if (!manifested(sources)) return;
+  const inA = new Set(readingA.pages.map((page) => page.page));
+  const inB = new Set(readingB.pages.map((page) => page.page));
+  const missing = pagesOf(sources).filter((pageNumber) => !inA.has(pageNumber) && !inB.has(pageNumber));
+  if (missing.length === 0) return;
+  // Delante va lo que le importa a quien lo lee en la cola: qué ha pasado con
+  // SU entrega y que no se ha corregido media a ciegas.
+  throw new Error(
+    `La lectura del examen no cuadra con el original: tras reintentar la lectura, ninguna de las ` +
+      `dos pasadas ha transcrito ${missing.length === 1 ? 'la página' : 'las páginas'} ${missing.join(', ')}. ` +
+      'La entrega no se corrige para no calificar media a ciegas; vuelve a procesarla.',
+  );
+}
+
+/** El aviso de revisión de una lectura parcial, o nada si no la hubo. */
+function reviewPartialReading(pages: readonly number[]): ReviewFlag[] {
+  if (pages.length === 0) return [];
+  const listed = pages.join(', ');
+  return [
+    {
+      label: null,
+      reason: 'lectura_parcial',
+      detail:
+        pages.length === 1
+          ? `Las dos lecturas no coinciden en la página ${listed}: sólo una la ha transcrito, incluso ` +
+            'tras releerla. Revísala con el original delante.'
+          : `Las dos lecturas no coinciden en las páginas ${listed}: sólo una las ha transcrito, incluso ` +
+            'tras releerlas. Revísalas con el original delante.',
+    },
+  ];
 }
 
 function renderActivityMaterial(context: ResolveContextInput): string {

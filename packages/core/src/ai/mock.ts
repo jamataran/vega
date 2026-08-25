@@ -604,6 +604,10 @@ export class MockAiProvider implements AiProvider {
         page: source.page,
         latex: `**Ejercicio ${index + 1}. ${exercise.statement}**\n\n${body}`,
         imageUrl: mockPageImageUrl(source.page, `Ejercicio ${index + 1}: ${exercise.statement}`),
+        // Mismo contrato que el proveedor real: confianza y nota por página.
+        // Sin tirar del generador, para no mover el resto de la secuencia.
+        confidence: marks.size > 0 ? 0.7 : 0.95,
+        notes: marks.size > 0 ? 'Un fragmento con marca de lectura; el resto, trazo claro.' : '',
       });
     });
 
