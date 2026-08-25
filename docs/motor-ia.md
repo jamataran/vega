@@ -235,6 +235,12 @@ Hechos de la API que condicionan esto (verificados contra la referencia actual d
   contra su esquema. Los ejemplos de corrección, triaje y verificación **tampoco cuadran** hoy
   (`citas[]` frente a `aiQuote`, `tipo/confianza/motivo`, `veredicto/problemas`); están marcados
   como pendientes en esa prueba.
+- **Un campo que el modelo no debe decidir no se le ofrece.** `escalate` y `noEsDuda` son
+  decisiones de foro, pero el esquema de corrección las exigía en todas las correcciones. Medido
+  en producción (25-08-2026): a un simulacro de tema el modelo contestó `noEsDuda: true` —que es
+  literalmente cierto— y el lote lo aparcó como «no es una duda» tirando una corrección de
+  dieciséis apartados. `ForumGradingAnswer` extiende `GradingAnswer` sólo para foros, y el motor
+  y el lote ignoran esas decisiones fuera de un foro aunque el proveedor las traiga.
 - **Una lectura incompleta se relee, y una sola lectura completa basta** (ADR 0017): cada lectura
   se evalúa contra el manifiesto al llegar; lo que falta se vuelve a pedir una vez con sólo los
   bloques que lo contienen y un `manifest` que dice «relectura, páginas X de un examen de N»; si

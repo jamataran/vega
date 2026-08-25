@@ -974,7 +974,11 @@ async function processOne(
   } as const;
   let graded = await gradeSubmission(gradeInput);
   let discardedUsage: UsageMetrics | null = null;
-  if (graded.correction.noEsDuda) {
+  // Sólo un foro puede resultar «no ser una duda». El motor ya lo garantiza;
+  // la guarda se repite aquí porque es este `update` el que aparca y tira la
+  // corrección, y un simulacro aparcado por ese motivo es exactamente lo que
+  // pasó en producción el 25-08-2026.
+  if (activity.kind === 'forum' && graded.correction.noEsDuda) {
     await db
       .update(schema.submissions)
       .set({ status: 'parked', parkedReason: 'La respuesta con contexto confirma que no es una duda.', updatedAt: new Date() })

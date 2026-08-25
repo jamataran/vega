@@ -196,6 +196,18 @@ export const GradingAnswer = z.object({
   aiSummary: z.string(),
   teacherNotes: z.string().nullable(),
   confidence: z.number(),
+});
+
+/**
+ * La respuesta de un foro lleva dos decisiones más: escalar a la ruta experta
+ * y «no es una duda». Sólo un foro las recibe en su esquema. Medido en
+ * producción (25-08-2026): con `noEsDuda` en el esquema de todas las
+ * correcciones, el modelo contestó `true` a un simulacro de tema —que,
+ * literalmente, no es una duda— y el lote aparcó la entrega tirando una
+ * corrección de dieciséis apartados. Un campo que el modelo no debe decidir
+ * no se le ofrece.
+ */
+export const ForumGradingAnswer = GradingAnswer.extend({
   escalate: z.boolean(),
   noEsDuda: z.boolean(),
 });
@@ -458,7 +470,7 @@ export class AnthropicAiProvider implements AiProvider {
         ...(supportsExtendedReasoning(model) ? { thinking: { type: 'adaptive' as const } } : {}),
         output_config: {
           ...(supportsExtendedReasoning(model) ? { effort } : {}),
-          format: zodOutputFormat(GradingAnswer),
+          format: zodOutputFormat(input.activityKind === 'forum' ? ForumGradingAnswer : GradingAnswer),
         },
         system,
         messages: [{ role: 'user', content: [...originals, { type: 'text', text: `${about}AI_TEACHER_NOTES=${input.explanations === false ? 'false' : 'true'}\n\n${work}` }] }],
@@ -492,8 +504,9 @@ export class AnthropicAiProvider implements AiProvider {
       confidence: clamp01(answer.confidence),
       model: response.model,
       usage: toUsage(response.model, response.usage),
-      escalate: answer.escalate,
-      noEsDuda: answer.noEsDuda,
+      // Fuera de un foro estos campos no existen en el esquema y aquí no se
+      // inventan: `false` es «no hay decisión que tomar».
+      ...forumDecisions(input.activityKind, answer),
     };
   }
 
@@ -778,6 +791,21 @@ function transcriptionRequest(input: TranscribeInput, pageNumbers: readonly numb
     );
   }
   return `Transcribe el examen completo: ${count} repartidas en ${blocks}. ${closing}`;
+}
+
+const ForumDecisions = ForumGradingAnswer.pick({ escalate: true, noEsDuda: true });
+
+/**
+ * Las dos decisiones que sólo tiene un foro. A cualquier otra actividad no se
+ * le han pedido, y si el modelo las trajera igualmente no cuentan.
+ */
+function forumDecisions(
+  activityKind: GradeInput['activityKind'],
+  answer: unknown,
+): { escalate: boolean; noEsDuda: boolean } {
+  if (activityKind !== 'forum') return { escalate: false, noEsDuda: false };
+  const parsed = ForumDecisions.safeParse(answer);
+  return parsed.success ? parsed.data : { escalate: false, noEsDuda: false };
 }
 
 /** Lee la página del disco si hace falta y la envuelve en el bloque adecuado. */

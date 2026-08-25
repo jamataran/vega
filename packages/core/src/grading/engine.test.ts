@@ -748,3 +748,49 @@ test('un duplicado vacío se ignora y un duplicado con texto fuerza la relectura
   assert.ok(!dudoso.reading.pages.some((page) => page.page === 7));
   assert.deepEqual(dudoso.reading.flags, []);
 });
+
+// ── Decisiones de foro que no son de una entrega ────────────────────────────
+
+test('una entrega con fichero nunca se aparca por «no es una duda» ni escala', async () => {
+  // Producción, 25-08-2026: el modelo contestó `noEsDuda: true` a un simulacro
+  // de tema —que no es una duda— y el lote lo aparcó tirando la corrección.
+  const provider = stubProvider(
+    { pages: [{ page: 1, latex: 'Tema 8.', imageUrl: '/a.png' }] },
+    { noEsDuda: true, escalate: true, confidence: 0.9 },
+  );
+
+  const result = await gradeSubmission({
+    provider,
+    submissionId: SUBMISSION,
+    studentRef: 'alumno-0003',
+    activityKind: 'assignment',
+    pages: [{ page: 1, path: 'examen.pdf' }],
+    context: { global: '', activityKind: '', activity: '' },
+    pointsAllocation: [],
+    graded: true,
+    maxScore: 10,
+  });
+
+  assert.equal(result.correction.noEsDuda, false);
+  assert.equal(result.correction.escalate, false);
+});
+
+test('en un foro esas decisiones sí se respetan', async () => {
+  const provider = stubProvider({}, { noEsDuda: true, escalate: true, confidence: 0.9 });
+
+  const result = await gradeSubmission({
+    provider,
+    submissionId: SUBMISSION,
+    studentRef: 'alumno-0003',
+    activityKind: 'forum',
+    pages: [],
+    textContent: 'Gracias, ya lo entendí.',
+    context: { global: '', activityKind: '', activity: '' },
+    pointsAllocation: [],
+    graded: false,
+    maxScore: null,
+  });
+
+  assert.equal(result.correction.noEsDuda, true);
+  assert.equal(result.correction.escalate, true);
+});

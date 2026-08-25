@@ -355,8 +355,11 @@ export async function gradeSubmission(input: GradeSubmissionInput): Promise<Grad
       model: graded.model,
       maxScore: input.graded ? input.maxScore : null,
       verification,
-      escalate: graded.escalate ?? false,
-      noEsDuda: graded.noEsDuda ?? false,
+      // Escalar y «no es una duda» son decisiones de foro. Una entrega con
+      // fichero nunca las lleva, diga lo que diga el proveedor: aparcar un
+      // simulacro porque «no es una duda» es tirar una corrección pagada.
+      escalate: input.activityKind === 'forum' && (graded.escalate ?? false),
+      noEsDuda: input.activityKind === 'forum' && (graded.noEsDuda ?? false),
     },
     score,
     resolvedContext,
