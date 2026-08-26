@@ -171,7 +171,12 @@ function hashContext(segments: readonly ContextSegment[]): string | null {
 
 function sanitize(value: unknown): Record<string, unknown> {
   const clean = JSON.parse(JSON.stringify(value, (_key, current) => {
-    if (current && typeof current === 'object' && 'bytes' in current) {
+    // Se reconoce una página por **el tipo** de `bytes`, no por que exista la
+    // clave. Con `'bytes' in current` bastaba que cualquier objeto del registro
+    // tuviera un campo llamado así: `documentOmitted: { bytes: 27282565 }` —el
+    // tamaño del original que no cupo— entraba aquí y `createHash().update()`
+    // reventaba con un número, tirando una corrección ya pagada al persistirla.
+    if (current && typeof current === 'object' && ArrayBuffer.isView((current as PageSource).bytes)) {
       const page = current as PageSource;
       return {
         page: page.page,

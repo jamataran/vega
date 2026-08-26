@@ -1348,6 +1348,11 @@ async function engineBytes(
     // El mismo volumen que el almacén: el `/tmp` de un contenedor no tiene
     // sitio para un original de 94 MB más sus páginas rasterizadas.
     tmpRoot: store.absolutePathOf('tmp'),
+    // El objetivo no es «que pese menos»: es que **quepa en una petición**. Sin
+    // esto, rasterizar bajaba de 94 MB a 27 y la corrección seguía yendo sin el
+    // original, que es justo la degradación que esto viene a evitar. Se deja un
+    // margen para el prompt, el contexto y los materiales adjuntos.
+    targetBytes: Math.floor(REQUEST_RAW_BUDGET * 0.8),
     onWarn: (message, error) => log.warn({ submissionId: submission.id, err: error }, message),
     ...(signal ? { signal } : {}),
   });

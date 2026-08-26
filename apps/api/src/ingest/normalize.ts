@@ -38,11 +38,25 @@ const run = promisify(execFile);
 /** A4 en puntos PDF, que es la unidad de `pdf-lib`. */
 const A4 = { width: 595.28, height: 841.89 } as const;
 
-/** Resolución de rasterizado. Ver la cabecera: 150 ppp ya satura al modelo. */
-const RASTER_DPI = 150;
-
-/** Calidad JPEG. Por encima de 80 el manuscrito no se lee mejor y pesa el doble. */
-const JPEG_QUALITY = 80;
+/**
+ * Escalones de rasterizado, del mejor al que siempre cabe.
+ *
+ * No basta con un solo ajuste. Medido en producción con una entrega real: 14
+ * folios de foto de móvil, 94 MB, a 150 ppp y calidad 80 salen **27,3 MB** —que
+ * en base64 son 36 MB y siguen sin caber en los 32 MB de la API—. Una foto de
+ * manuscrito lleva ruido de sensor que el JPEG no comprime, y eso no se ve
+ * hasta que llega una de verdad.
+ *
+ * Se prueba de mejor a peor y se para en el primero que cabe: bajar la calidad
+ * de golpe para todos empeoraría la lectura de los escaneos que ya cabían. A
+ * 110 ppp un A4 sigue en 909 × 1 286 px, muy por encima de lo que hace falta
+ * para leer una letra a mano.
+ */
+const ESCALONES: readonly { dpi: number; quality: number }[] = [
+  { dpi: 150, quality: 80 },
+  { dpi: 120, quality: 65 },
+  { dpi: 100, quality: 50 },
+];
 
 /**
  * Tope de la conversión entera. Un PDF de 100 páginas a 150 ppp tarda unos
@@ -90,6 +104,12 @@ export interface NormalizeResult {
 
 export interface NormalizeOptions {
   /**
+   * Tamaño al que hay que bajar. Si el primer escalón no llega, se prueba el
+   * siguiente. Sin esto, la normalización «funcionaba» y la corrección seguía
+   * yendo sin el original, que es la degradación que se quería evitar.
+   */
+  readonly targetBytes?: number;
+  /**
    * Dónde crear el directorio temporal. Conviene que sea el mismo volumen del
    * almacén: el `/tmp` de un contenedor suele ser pequeño y un original de
    * 94 MB más sus páginas rasterizadas no cabe.
@@ -136,6 +156,57 @@ export async function normalizeForEngine(
     const entrada = join(temporal, 'original.pdf');
     await writeFile(entrada, pdf);
 
+    let mejor: { bytes: Uint8Array; pages: number } | null = null;
+    for (const escalon of ESCALONES) {
+      const intento = await rasterizar(temporal, entrada, escalon, warn);
+      if (intento === null) break;
+      mejor = intento;
+      // Se para en el primero que cabe. Sin objetivo, el primero vale.
+      if (options.targetBytes === undefined || intento.bytes.byteLength <= options.targetBytes) break;
+      warn(
+        `A ${escalon.dpi} ppp el original queda en ${Math.round(intento.bytes.byteLength / (1024 * 1024))} MB ` +
+          `y el objetivo son ${Math.round(options.targetBytes / (1024 * 1024))} MB: se prueba con menos resolución.`,
+      );
+    }
+    if (mejor === null) return null;
+
+    // Rasterizar no siempre encoge. Un PDF **vectorial** —un examen escrito a
+    // ordenador, o un enunciado exportado de LaTeX— pesa poco y sale mucho más
+    // gordo convertido en fotos: medido, 68 KB se convierten en 2,4 MB. El
+    // llamante sólo pide esto cuando el original es pesado, pero comprobarlo
+    // aquí cierra el caso raro y evita empeorar la petición justo cuando se
+    // intentaba arreglarla.
+    if (mejor.bytes.byteLength >= bytes.byteLength) {
+      warn(
+        `La normalización no reduce el original (${Math.round(bytes.byteLength / 1024)} KB → ` +
+          `${Math.round(mejor.bytes.byteLength / 1024)} KB): se sigue con el fichero tal cual.`,
+      );
+      return null;
+    }
+    return mejor;
+  } catch (error) {
+    warn('No se ha podido normalizar el original; se sigue con el fichero tal cual.', error);
+    return null;
+  } finally {
+    if (temporal !== undefined) {
+      await rm(temporal, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+}
+
+/** Una pasada de rasterizado a una resolución concreta. */
+async function rasterizar(
+  temporal: string,
+  entrada: string,
+  escalon: { dpi: number; quality: number },
+  warn: (message: string, error?: unknown) => void,
+): Promise<{ bytes: Uint8Array; pages: number } | null> {
+  // Cada escalón parte de cero: si no, las páginas del intento anterior
+  // seguirían en el directorio y se colarían en el recuento.
+  for (const previo of await readdir(temporal)) {
+    if (previo.startsWith('pagina-')) await rm(join(temporal, previo), { force: true });
+  }
+
     await run(
       'pdftoppm',
       // `-q` calla los avisos de sintaxis. Sin él, un PDF con objetos rotos
@@ -143,8 +214,8 @@ export async function normalizeForEngine(
       // el `maxBuffer` de 1 MiB que trae `execFile` por defecto eso mata el
       // proceso y tira una rasterización que ya había terminado bien. El
       // margen de 8 MiB cubre lo que se cuele pese a `-q`.
-      ['-q', '-r', String(RASTER_DPI), '-jpeg', '-jpegopt', `quality=${JPEG_QUALITY}`, entrada, join(temporal, 'pagina')],
-      { timeout: NORMALIZE_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024, signal: options.signal },
+      ['-q', '-r', String(escalon.dpi), '-jpeg', '-jpegopt', `quality=${escalon.quality}`, entrada, join(temporal, 'pagina')],
+      { timeout: NORMALIZE_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 },
     );
 
     // `pdftoppm` numera con relleno variable según el total: `pagina-1.jpg` con
@@ -168,7 +239,7 @@ export async function normalizeForEngine(
     // y si el derivado tuviera una página de más o de menos, la corrección
     // hablaría de una página y el profesor estaría mirando otra. Un
     // desalineamiento silencioso es peor que mandar el original pesado.
-    const original = await PDFDocument.load(pdf);
+    const original = await PDFDocument.load(await readFile(entrada));
     if (generadas.length !== original.getPageCount()) {
       warn(
         `La normalización ha producido ${generadas.length} páginas y el original tiene ` +
@@ -195,33 +266,7 @@ export async function normalizeForEngine(
       });
     }
 
-    const normalizado = await salida.save();
-
-    // Rasterizar no siempre encoge. Un PDF **vectorial** —un examen escrito a
-    // ordenador, o un enunciado exportado de LaTeX— pesa poco y sale mucho más
-    // gordo convertido en fotos: medido, 68 KB se convierten en 2,4 MB. El
-    // llamante sólo pide esto cuando el original es pesado, pero comprobarlo
-    // aquí cierra el caso raro y evita empeorar la petición justo cuando se
-    // intentaba arreglarla.
-    if (normalizado.byteLength >= bytes.byteLength) {
-      warn(
-        `La normalización no reduce el original (${Math.round(bytes.byteLength / 1024)} KB → ` +
-          `${Math.round(normalizado.byteLength / 1024)} KB): se sigue con el fichero tal cual.`,
-      );
-      return null;
-    }
-
-    return { bytes: normalizado, pages: generadas.length };
-  } catch (error) {
-    warn('No se ha podido normalizar el original; se sigue con el fichero tal cual.', error);
-    return null;
-  } finally {
-    if (temporal !== undefined) {
-      // El temporal se borra siempre: son decenas de MB por entrega y el
-      // volumen del contenedor es el mismo donde viven las entregas.
-      await rm(temporal, { recursive: true, force: true }).catch(() => {});
-    }
-  }
+    return { bytes: await salida.save(), pages: generadas.length };
 }
 
 /** Envuelve una imagen suelta en un PDF de una página A4. */
