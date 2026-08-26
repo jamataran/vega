@@ -1335,24 +1335,42 @@ async function engineBytes(
   log: Logger,
   signal: AbortSignal | undefined,
 ): Promise<Uint8Array | null> {
+  // El objetivo no es «que pese menos»: es que **quepa en una petición**. Se
+  // calcula una vez y lo comparten la comprobación del caché y la normalización,
+  // para que no puedan discrepar.
+  const objetivo = Math.floor(REQUEST_RAW_BUDGET * 0.8);
+
+  /**
+   * El derivado cacheado sólo vale si **sigue cumpliendo el objetivo de hoy**.
+   *
+   * Un derivado guardado no recuerda con qué ajustes se hizo, y esos ajustes
+   * cambian: la versión que introdujo la escalada de resolución se encontró en
+   * disco el ráster de 27,3 MB que había dejado la versión anterior, lo
+   * reutilizó tal cual y la escalada nunca llegó a ejecutarse —la corrección
+   * siguió yendo sin original, con el arreglo ya desplegado—. Comparar contra el
+   * objetivo actual, en vez de fiarse de que existe, hace que el caché se
+   * repare solo en cuanto los ajustes mejoran.
+   */
   const cacheado = await store.readDerived(submission.id, ENGINE_PDF);
-  if (cacheado !== null) {
+  if (cacheado !== null && cacheado.byteLength <= objetivo) {
     log.info(
       { submissionId: submission.id, bytes: cacheado.byteLength },
       'Se reutiliza el original normalizado de un proceso anterior',
     );
     return cacheado;
   }
+  if (cacheado !== null) {
+    log.info(
+      { submissionId: submission.id, bytes: cacheado.byteLength, objetivo },
+      'El original normalizado que había guardado no cumple el objetivo actual: se rehace',
+    );
+  }
 
   const normalizado = await normalizeForEngine(original, mediaType, {
     // El mismo volumen que el almacén: el `/tmp` de un contenedor no tiene
     // sitio para un original de 94 MB más sus páginas rasterizadas.
     tmpRoot: store.absolutePathOf('tmp'),
-    // El objetivo no es «que pese menos»: es que **quepa en una petición**. Sin
-    // esto, rasterizar bajaba de 94 MB a 27 y la corrección seguía yendo sin el
-    // original, que es justo la degradación que esto viene a evitar. Se deja un
-    // margen para el prompt, el contexto y los materiales adjuntos.
-    targetBytes: Math.floor(REQUEST_RAW_BUDGET * 0.8),
+    targetBytes: objetivo,
     onWarn: (message, error) => log.warn({ submissionId: submission.id, err: error }, message),
     ...(signal ? { signal } : {}),
   });
