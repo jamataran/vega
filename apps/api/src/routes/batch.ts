@@ -1260,7 +1260,11 @@ export async function pagesOf(
     // Se decide con `sizeBytes`, que ya está en la fila, **antes** de leer el
     // fichero: leer 94 MB de disco para descubrir que no hacía falta tocarlos
     // es justo el trabajo que se está intentando quitar.
-    if (!worthNormalizing(submission)) {
+    // Con `size_bytes` a cero no se puede decidir sin mirar: es lo que vale en
+    // las filas anteriores a que la ingesta lo guardara, y dar por hecho que
+    // «no pesa» dejaría esas entregas sin normalizar y con su 413 intacto. Se
+    // lee el fichero y se decide con su tamaño real, que siempre es cierto.
+    if (submission.sizeBytes > 0 && !worthNormalizing(submission)) {
       const path = store.absolutePathOf(submission.storagePath);
       if (mediaType !== 'application/pdf') return [{ page: 1, pageNumbers: [1], mediaType, path }];
       return splitPdfIntoPageSources(await store.read(submission.storagePath), {
@@ -1270,6 +1274,11 @@ export async function pagesOf(
     }
 
     const original = await store.read(submission.storagePath);
+    if (!worthNormalizing(submission, original.byteLength)) {
+      const path = store.absolutePathOf(submission.storagePath);
+      if (mediaType !== 'application/pdf') return [{ page: 1, pageNumbers: [1], mediaType, path }];
+      return splitPdfIntoPageSources(original, { pagesPerChunk, maxChunkBytes: REQUEST_RAW_BUDGET });
+    }
     const paraElMotor = await engineBytes(store, submission, original, mediaType, log, signal);
     const bytes = paraElMotor ?? original;
 
@@ -1321,8 +1330,7 @@ export async function pagesOf(
  * cualquier fichero de más de 1,5 MB entraría a rasterizar sin motivo. Sin
  * recuento fiable sólo manda el tamaño total, que siempre es cierto.
  */
-function worthNormalizing(submission: SubmissionRow): boolean {
-  const bytes = submission.sizeBytes;
+function worthNormalizing(submission: SubmissionRow, bytes = submission.sizeBytes): boolean {
   if (bytes > ENGINE_MAX_ORIGINAL_BYTES) return true;
   return submission.pageCount > 0 && bytes / submission.pageCount > ENGINE_MAX_BYTES_PER_PAGE;
 }
