@@ -1260,7 +1260,11 @@ export async function pagesOf(
     // Se decide con `sizeBytes`, que ya está en la fila, **antes** de leer el
     // fichero: leer 94 MB de disco para descubrir que no hacía falta tocarlos
     // es justo el trabajo que se está intentando quitar.
-    if (!worthNormalizing(submission)) {
+    // Con `size_bytes` a cero no se puede decidir sin mirar: es lo que vale en
+    // las filas anteriores a que la ingesta lo guardara, y dar por hecho que
+    // «no pesa» dejaría esas entregas sin normalizar y con su 413 intacto. Se
+    // lee el fichero y se decide con su tamaño real, que siempre es cierto.
+    if (submission.sizeBytes > 0 && !worthNormalizing(submission)) {
       const path = store.absolutePathOf(submission.storagePath);
       if (mediaType !== 'application/pdf') return [{ page: 1, pageNumbers: [1], mediaType, path }];
       return splitPdfIntoPageSources(await store.read(submission.storagePath), {
@@ -1270,6 +1274,11 @@ export async function pagesOf(
     }
 
     const original = await store.read(submission.storagePath);
+    if (!worthNormalizing(submission, original.byteLength)) {
+      const path = store.absolutePathOf(submission.storagePath);
+      if (mediaType !== 'application/pdf') return [{ page: 1, pageNumbers: [1], mediaType, path }];
+      return splitPdfIntoPageSources(original, { pagesPerChunk, maxChunkBytes: REQUEST_RAW_BUDGET });
+    }
     const paraElMotor = await engineBytes(store, submission, original, mediaType, log, signal);
     const bytes = paraElMotor ?? original;
 
@@ -1321,8 +1330,7 @@ export async function pagesOf(
  * cualquier fichero de más de 1,5 MB entraría a rasterizar sin motivo. Sin
  * recuento fiable sólo manda el tamaño total, que siempre es cierto.
  */
-function worthNormalizing(submission: SubmissionRow): boolean {
-  const bytes = submission.sizeBytes;
+function worthNormalizing(submission: SubmissionRow, bytes = submission.sizeBytes): boolean {
   if (bytes > ENGINE_MAX_ORIGINAL_BYTES) return true;
   return submission.pageCount > 0 && bytes / submission.pageCount > ENGINE_MAX_BYTES_PER_PAGE;
 }
@@ -1335,24 +1343,42 @@ async function engineBytes(
   log: Logger,
   signal: AbortSignal | undefined,
 ): Promise<Uint8Array | null> {
+  // El objetivo no es «que pese menos»: es que **quepa en una petición**. Se
+  // calcula una vez y lo comparten la comprobación del caché y la normalización,
+  // para que no puedan discrepar.
+  const objetivo = Math.floor(REQUEST_RAW_BUDGET * 0.8);
+
+  /**
+   * El derivado cacheado sólo vale si **sigue cumpliendo el objetivo de hoy**.
+   *
+   * Un derivado guardado no recuerda con qué ajustes se hizo, y esos ajustes
+   * cambian: la versión que introdujo la escalada de resolución se encontró en
+   * disco el ráster de 27,3 MB que había dejado la versión anterior, lo
+   * reutilizó tal cual y la escalada nunca llegó a ejecutarse —la corrección
+   * siguió yendo sin original, con el arreglo ya desplegado—. Comparar contra el
+   * objetivo actual, en vez de fiarse de que existe, hace que el caché se
+   * repare solo en cuanto los ajustes mejoran.
+   */
   const cacheado = await store.readDerived(submission.id, ENGINE_PDF);
-  if (cacheado !== null) {
+  if (cacheado !== null && cacheado.byteLength <= objetivo) {
     log.info(
       { submissionId: submission.id, bytes: cacheado.byteLength },
       'Se reutiliza el original normalizado de un proceso anterior',
     );
     return cacheado;
   }
+  if (cacheado !== null) {
+    log.info(
+      { submissionId: submission.id, bytes: cacheado.byteLength, objetivo },
+      'El original normalizado que había guardado no cumple el objetivo actual: se rehace',
+    );
+  }
 
   const normalizado = await normalizeForEngine(original, mediaType, {
     // El mismo volumen que el almacén: el `/tmp` de un contenedor no tiene
     // sitio para un original de 94 MB más sus páginas rasterizadas.
     tmpRoot: store.absolutePathOf('tmp'),
-    // El objetivo no es «que pese menos»: es que **quepa en una petición**. Sin
-    // esto, rasterizar bajaba de 94 MB a 27 y la corrección seguía yendo sin el
-    // original, que es justo la degradación que esto viene a evitar. Se deja un
-    // margen para el prompt, el contexto y los materiales adjuntos.
-    targetBytes: Math.floor(REQUEST_RAW_BUDGET * 0.8),
+    targetBytes: objetivo,
     onWarn: (message, error) => log.warn({ submissionId: submission.id, err: error }, message),
     ...(signal ? { signal } : {}),
   });
