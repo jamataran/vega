@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type Anthropic from '@anthropic-ai/sdk';
 import { AnthropicAiProvider } from './anthropic.js';
-import type { PageSource } from './provider.js';
+import type { GradeInput, PageSource } from './provider.js';
 
 /**
  * Lo que estas pruebas fijan salió de la primera pasada contra la API real, con
@@ -440,4 +440,77 @@ test('si sigue cortada tras ampliar, el error explica qué hacer', async () => {
       }),
     /Páginas por bloque/,
   );
+});
+
+// ── El esquema de corrección no ofrece decisiones de foro a una entrega ─────
+
+/** Un cliente que apunta el formato de salida pedido y contesta una corrección mínima. */
+function clienteDeCorreccion(): { client: Anthropic; formatos: string[] } {
+  const formatos: string[] = [];
+  const client = {
+    messages: {
+      stream: (body: { model: string; output_config?: { format?: unknown } }) => {
+        formatos.push(JSON.stringify(body.output_config?.format ?? null));
+        return {
+          finalMessage: async () => ({
+            model: body.model,
+            stop_reason: 'end_turn',
+            usage: { input_tokens: 10, output_tokens: 10 },
+            parsed_output: {
+              items: [],
+              aiLatex: 'Corrección.',
+              aiSummary: 'Resumen.',
+              teacherNotes: null,
+              confidence: 0.9,
+              // Lo devuelve siempre, como haría un modelo al que se le pide.
+              escalate: true,
+              noEsDuda: true,
+            },
+          }),
+        };
+      },
+    },
+  } as unknown as Anthropic;
+  return { client, formatos };
+}
+
+function correccion(activityKind: 'assignment' | 'forum'): GradeInput {
+  return {
+    submissionId: SUBMISSION,
+    activityKind,
+    student: null,
+    transcription: activityKind === 'forum'
+      ? null
+      : { pages: [], flags: [], discrepancies: [], passCount: 2, confidence: 1 },
+    document: [],
+    textContent: activityKind === 'forum' ? '¿Cómo se deriva?' : null,
+    context: [],
+    material: '',
+    pointsAllocation: [],
+    graded: activityKind !== 'forum',
+    maxScore: activityKind === 'forum' ? null : 10,
+    templateKey: null,
+    explanations: true,
+  };
+}
+
+test('a una entrega con fichero no se le pide «no es una duda» ni escalar, y se ignora si lo dice', async () => {
+  const { client, formatos } = clienteDeCorreccion();
+
+  const result = await proveedor(client).grade(correccion('assignment'));
+
+  assert.doesNotMatch(formatos[0] ?? '', /noEsDuda|escalate/);
+  assert.equal(result.noEsDuda, false);
+  assert.equal(result.escalate, false);
+});
+
+test('a un foro sí se le piden las dos decisiones', async () => {
+  const { client, formatos } = clienteDeCorreccion();
+
+  const result = await proveedor(client).grade(correccion('forum'));
+
+  assert.match(formatos[0] ?? '', /noEsDuda/);
+  assert.match(formatos[0] ?? '', /escalate/);
+  assert.equal(result.noEsDuda, true);
+  assert.equal(result.escalate, true);
 });

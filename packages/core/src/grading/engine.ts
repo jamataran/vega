@@ -1,3 +1,4 @@
+import { stat } from 'node:fs/promises';
 import { AUTONOMY_MODE_LABEL, hasStudentFile, LOW_CONFIDENCE_THRESHOLD } from '@vega/shared';
 import type {
   ActivityKind,
@@ -78,7 +79,13 @@ export type ReviewReason =
    * confianza global no da para tanto. Es el aviso que evita que el modo
    * autónomo publique justo lo que no debía.
    */
-  | 'autonomy_below_threshold';
+  | 'autonomy_below_threshold'
+  /**
+   * El original no cabía en la petición y la corrección se ha hecho sólo sobre
+   * la transcripción. No es un fallo: es que el corrector no ha visto el
+   * escaneo, y eso el profesor tiene que saberlo antes de firmar.
+   */
+  | 'original_omitido';
 
 export interface ReviewFlag {
   /** Apartado afectado, o `null` si el aviso es de la entrega entera. */
@@ -219,6 +226,16 @@ export async function gradeSubmission(input: GradeSubmissionInput): Promise<Grad
 
   const resolvedContext = resolveContext(input.context);
 
+  /**
+   * ¿Cabe el original en la petición de corrección?
+   *
+   * La transcripción se puede repartir en varias peticiones porque cada una lee
+   * un tramo; la corrección no, porque necesita el examen entero delante a la
+   * vez. Cuando ni siquiera normalizado cabe, se manda sin él en vez de
+   * estrellarse contra el `413` después de haber pagado las dos lecturas.
+   */
+  const omittedOriginal = await measureOmittedOriginal(input.pages);
+
   const graded = await input.provider.grade({
     submissionId: input.submissionId,
     activityKind: input.activityKind,
@@ -233,7 +250,12 @@ export async function gradeSubmission(input: GradeSubmissionInput): Promise<Grad
             passCount: transcription.passCount,
             confidence: transcription.confidence,
           },
-    document: [...input.pages],
+    // El original **entero** viaja con la corrección, y ahí no hay troceado que
+    // valga: o cabe en una petición o no va. Si no cabe, se corrige sobre la
+    // transcripción y se dice, que es una degradación explícita del principio
+    // de que «el original manda» y no un silencio.
+    document: omittedOriginal === null ? [...input.pages] : [],
+    ...(omittedOriginal === null ? {} : { documentOmitted: omittedOriginal }),
     textContent: input.textContent ?? null,
     context: resolvedContext.segments,
     material: renderActivityMaterial(input.context),
@@ -286,7 +308,11 @@ export async function gradeSubmission(input: GradeSubmissionInput): Promise<Grad
   // persiste y se enseña en la ficha son los avisos de verificación, y una
   // página sin contraste es una razón para que el profesor abra el original.
   const readingReview = reviewPartialReading(partialReadingPages(flags));
-  const mechanicalReview = [...mechanical.review, ...readingReview];
+  const mechanicalReview = [
+    ...mechanical.review,
+    ...readingReview,
+    ...reviewOmittedOriginal(omittedOriginal),
+  ];
   const verification: CorrectionVerification = {
     coherent: mechanicalReview.length === 0 && (aiVerification?.coherent ?? true),
     confidence: aiVerification?.confidence ?? null,
@@ -355,8 +381,11 @@ export async function gradeSubmission(input: GradeSubmissionInput): Promise<Grad
       model: graded.model,
       maxScore: input.graded ? input.maxScore : null,
       verification,
-      escalate: graded.escalate ?? false,
-      noEsDuda: graded.noEsDuda ?? false,
+      // Escalar y «no es una duda» son decisiones de foro. Una entrega con
+      // fichero nunca las lleva, diga lo que diga el proveedor: aparcar un
+      // simulacro porque «no es una duda» es tirar una corrección pagada.
+      escalate: input.activityKind === 'forum' && (graded.escalate ?? false),
+      noEsDuda: input.activityKind === 'forum' && (graded.noEsDuda ?? false),
     },
     score,
     resolvedContext,
@@ -501,6 +530,189 @@ function mergeReadings(
 }
 
 /**
+ * Presupuesto en bruto de una petición al modelo.
+ *
+ * La API admite 32 MB por petición contando todo el payload, y base64 añade un
+ * tercio: 20 MiB en bruto son ~26,7 MiB codificados, y encima viajan el prompt,
+ * el contexto de la actividad y los materiales adjuntos. El margen es
+ * deliberadamente ancho porque el límite no se puede consultar y pasarse cuesta
+ * una petición perdida.
+ */
+export const REQUEST_RAW_BUDGET = 20 * 1024 * 1024;
+
+/**
+ * Peticiones simultáneas por lectura.
+ *
+ * **Dos, no cuatro, y el motivo es la memoria del contenedor.** Las dos
+ * lecturas ya corren en paralelo, así que este número se multiplica por dos: con
+ * cuatro habría ocho cuerpos de petición vivos a la vez, cada uno con su base64
+ * —un tercio más que el original— dentro de un contenedor de 1 GB cuyo
+ * dimensionado está justificado por escrito sobre la premisa de que «el pico no
+ * son veinticinco entregas sino una». Un OOM no falla limpiamente: mata el
+ * proceso a mitad del lote y deja entregas atascadas hasta el siguiente
+ * arranque.
+ *
+ * Con el original normalizado casi siempre hay un solo grupo y este tope no
+ * llega a notarse. Sin tope, una entrega de trescientas páginas dispararía
+ * trescientas peticiones a la vez y el `429` costaría más que la espera.
+ */
+const MAX_CONCURRENT_REQUESTS = 2;
+
+/**
+ * Tamaño en bruto de un bloque, esté en memoria o en disco.
+ *
+ * Lo que no se puede medir cuenta **cero**, no infinito. Es deliberado: el
+ * presupuesto sólo puede actuar sobre evidencia, y tratar lo desconocido como
+ * enorme trocearía al máximo —una petición por bloque— justo cuando no hay
+ * ningún motivo para creer que hace falta. Eso multiplica peticiones y coste
+ * para protegerse de un problema que quizá no existe. Las rutas que no se pueden
+ * medir son las del proveedor simulado, donde no hay nada que proteger.
+ */
+async function sourceBytes(source: PageSource): Promise<number> {
+  if (source.bytes !== undefined) return source.bytes.byteLength;
+  if (source.path === undefined) return 0;
+  try {
+    return (await stat(source.path)).size;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Agrupa bloques consecutivos en peticiones que quepan en el presupuesto.
+ *
+ * **Consecutivos y en orden**: el prompt le dice al modelo qué páginas lleva
+ * cada petición, y mezclar bloques salteados haría que numerase mal. Un bloque
+ * que por sí solo se pasa del presupuesto va en su propia petición: aquí ya no
+ * se puede partir más —eso es trabajo del troceado del PDF— y mandarlo solo, y
+ * que falle con un mensaje claro, es mejor que arrastrar a otros con él.
+ */
+export async function planTranscriptionRequests(
+  sources: readonly PageSource[],
+  budget = REQUEST_RAW_BUDGET,
+): Promise<PageSource[][]> {
+  if (sources.length === 0) return [];
+  const tamanos = await Promise.all(sources.map(sourceBytes));
+
+  const grupos: PageSource[][] = [];
+  let actual: PageSource[] = [];
+  let acumulado = 0;
+
+  for (const [indice, source] of sources.entries()) {
+    const bytes = tamanos[indice] ?? 0;
+    if (actual.length > 0 && acumulado + bytes > budget) {
+      grupos.push(actual);
+      actual = [];
+      acumulado = 0;
+    }
+    actual.push(source);
+    acumulado += bytes;
+  }
+  if (actual.length > 0) grupos.push(actual);
+  return grupos;
+}
+
+/**
+ * Cuánto pesa el original y si hay que dejarlo fuera de la corrección.
+ *
+ * Devuelve `null` cuando cabe, que es el caso normal: con el original
+ * normalizado, catorce folios fotografiados pasan de 94 MB a unos 13. Sólo
+ * cuando no hay poppler, o el PDF no se ha podido rasterizar, se llega a
+ * omitirlo.
+ */
+async function measureOmittedOriginal(
+  pages: readonly PageSource[],
+): Promise<{ bytes: number; pages: number } | null> {
+  if (pages.length === 0) return null;
+  const tamanos = await Promise.all(pages.map(sourceBytes));
+  const total = tamanos.reduce((suma, bytes) => suma + bytes, 0);
+  if (total <= REQUEST_RAW_BUDGET) return null;
+  return { bytes: total, pages: pagesOf(pages).length };
+}
+
+/** Ejecuta las tareas con un tope de concurrencia, conservando el orden. */
+async function runLimited<T>(tasks: readonly (() => Promise<T>)[], limit: number): Promise<T[]> {
+  const results: T[] = new Array(tasks.length) as T[];
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, tasks.length) }, async () => {
+    for (;;) {
+      const index = next;
+      next += 1;
+      if (index >= tasks.length) return;
+      results[index] = await tasks[index]!();
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+/**
+ * Une las lecturas parciales de una misma pasada en una sola.
+ *
+ * Cada petición ha leído un tramo distinto del mismo examen, así que las
+ * páginas se concatenan y se ordenan; la confianza es la **mínima**, no la
+ * media, porque una petición que ha leído mal arrastra a toda la lectura y
+ * promediarla la escondería.
+ */
+/**
+ * Lo que devuelve un grupo que ha fallado: nada leído y confianza cero.
+ *
+ * El `usage` va a cero porque la petición no llegó a completarse, y el modelo
+ * vacío es la marca de «esto no respondió»: `joinReadings` toma el de un grupo
+ * que sí lo hizo.
+ */
+const FAILED_GROUP: TranscribeResult = {
+  pages: [],
+  flags: [],
+  confidence: 0,
+  model: '',
+  usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, cacheCreationTokens: 0, costCents: 0 },
+};
+
+/**
+ * La relectura es una mejora, no un requisito: si falla entera, se conserva lo
+ * que trajo la primera pasada y decide `assertReadable` con las dos lecturas
+ * delante. Dejar que el error suba descartaría también la otra lectura, que
+ * está completa y ya pagada.
+ */
+async function retryOrKeep(
+  fallback: TranscribeResult,
+  signal: AbortSignal | undefined,
+  attempt: () => Promise<TranscribeResult>,
+): Promise<TranscribeResult> {
+  try {
+    return await attempt();
+  } catch (error) {
+    // Una cancelación no es un fallo de la relectura: si el lote se ha parado o
+    // ha vencido su plazo, tiene que parar de verdad y no seguir corrigiendo.
+    if (signal?.aborted === true) throw error;
+    return fallback;
+  }
+}
+
+function joinReadings(parts: readonly TranscribeResult[]): TranscribeResult {
+  // Si **ningún** grupo respondió, no hay lectura parcial que salvar y el error
+  // sí tiene que subir: `assertReadable` no puede decidir sobre la nada, y
+  // seguir devolvería una transcripción vacía como si fuera buena.
+  const modelo = parts.find((part) => part.model !== '')?.model;
+  if (modelo === undefined) {
+    throw new Error(
+      'Ninguna de las peticiones de esta lectura ha respondido; no hay transcripción que unir.',
+    );
+  }
+  return {
+    pages: parts.flatMap((part) => part.pages).sort((a, b) => a.page - b.page),
+    flags: parts.flatMap((part) => part.flags),
+    // La **mínima**, no la media: un grupo que ha leído mal arrastra a toda la
+    // lectura y promediarlo lo escondería. Los grupos que fallaron no cuentan:
+    // su ausencia ya la recoge `assessPageAssembly` como páginas que faltan.
+    confidence: Math.min(...parts.filter((part) => part.model !== '').map((part) => part.confidence)),
+    model: modelo,
+    usage: parts.map((part) => part.usage).reduce(sumUsage, FAILED_GROUP.usage),
+  };
+}
+
+/**
  * Una lectura completa, con **un** reintento dirigido si la primera pasada no
  * trajo todas las páginas.
  *
@@ -520,29 +732,78 @@ export async function readWithRetry(
 ): Promise<TranscribeResult> {
   const withManifest = manifested(sources);
   const totalPages = pagesOf(sources).length;
-  const first = await provider.transcribe(
-    {
-      ...base,
-      reading,
-      pages: [...sources],
-      ...(withManifest ? { manifest: { totalPages } } : {}),
-    },
-    { signal },
-  );
+
+  // Un original que no cabe en una petición se reparte en varias, y la lectura
+  // es la unión. Con el original normalizado esto casi siempre da un solo
+  // grupo; existe para el día en que no haya poppler o llegue un PDF de
+  // trescientas páginas.
+  const grupos = await planTranscriptionRequests(sources);
+  const first =
+    grupos.length === 1
+      ? await provider.transcribe(
+          {
+            ...base,
+            reading,
+            pages: [...sources],
+            ...(withManifest ? { manifest: { totalPages } } : {}),
+          },
+          { signal },
+        )
+      : joinReadings(
+          await runLimited(
+            grupos.map((grupo) => async () => {
+              signal?.throwIfAborted();
+              try {
+                return await provider.transcribe(
+                  { ...base, reading, pages: grupo, manifest: { totalPages } },
+                  { signal },
+                );
+              } catch (error) {
+                // Un grupo que falla **no tira los que ya se han pagado**. Se
+                // devuelve vacío: `assessPageAssembly` verá esas páginas como
+                // ausentes, el reintento dirigido las volverá a pedir y, si
+                // tampoco llegan, decidirá `assertReadable` con las dos lecturas
+                // delante, que es exactamente para lo que existe. Propagar la
+                // excepción descartaría los grupos correctos de esta lectura y
+                // los de la otra.
+                if (signal?.aborted === true) throw error;
+                return FAILED_GROUP;
+              }
+            }),
+            MAX_CONCURRENT_REQUESTS,
+          ),
+        );
+
   const assessed = assessPageAssembly(first, sources);
   if (assessed.toReread.length === 0) return assessed.reading;
 
   signal?.throwIfAborted();
   const chunks = chunksCovering(sources, assessed.toReread);
-  const retry = await provider.transcribe(
-    {
-      ...base,
-      reading,
-      pages: chunks,
-      manifest: { totalPages, retryOf: [...assessed.toReread] },
-    },
-    { signal },
-  );
+
+  // La relectura pasa por el **mismo** presupuesto que la primera pasada. Sin
+  // esto, releer cinco páginas sueltas de un original sin normalizar rejuntaba
+  // sus bloques —40 MB en una petición— y volvía a dar el 413 que todo esto
+  // existe para evitar; y ese error, al no estar capturado, subía hasta el
+  // `Promise.all` de las dos lecturas y descartaba también la otra, completa y
+  // ya pagada.
+  const retry = await retryOrKeep(assessed.reading, signal, async () =>
+    joinReadings(
+    await runLimited(
+      (await planTranscriptionRequests(chunks)).map((grupo) => async () => {
+        signal?.throwIfAborted();
+        try {
+          return await provider.transcribe(
+            { ...base, reading, pages: grupo, manifest: { totalPages, retryOf: [...assessed.toReread] } },
+            { signal },
+          );
+        } catch (error) {
+          if (signal?.aborted === true) throw error;
+          return FAILED_GROUP;
+        }
+      }),
+      MAX_CONCURRENT_REQUESTS,
+    ),
+  ));
   const merged = mergeReadings(assessed.reading, assessPageAssembly(retry, chunks).reading, assessed.toReread);
   return assessPageAssembly(merged, sources).reading;
 }
@@ -587,6 +848,27 @@ function reviewPartialReading(pages: readonly number[]): ReviewFlag[] {
             'tras releerla. Revísala con el original delante.'
           : `Las dos lecturas no coinciden en las páginas ${listed}: sólo una las ha transcrito, incluso ` +
             'tras releerlas. Revísalas con el original delante.',
+    },
+  ];
+}
+
+/**
+ * El aviso de que el corrector no ha visto el original.
+ *
+ * Va con cifras a propósito: «94 MB en 14 páginas» le dice al profesor por qué
+ * ha pasado y qué mirar, mientras que «el original no cabía» no le dice nada.
+ */
+function reviewOmittedOriginal(omitted: { bytes: number; pages: number } | null): ReviewFlag[] {
+  if (omitted === null) return [];
+  const mb = Math.round(omitted.bytes / (1024 * 1024));
+  return [
+    {
+      label: null,
+      reason: 'original_omitido',
+      detail:
+        `El corrector no ha visto el original (${mb} MB en ${omitted.pages} ` +
+        `${omitted.pages === 1 ? 'página' : 'páginas'}): la corrección se apoya sólo en la ` +
+        'transcripción. Revísala con el escaneo delante.',
     },
   ];
 }

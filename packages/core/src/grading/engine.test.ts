@@ -16,6 +16,7 @@ import {
   gradeSubmission,
   normalizePoints,
   overallConfidence,
+  planTranscriptionRequests,
 } from './engine.js';
 
 const SUBMISSION = '55555555-5555-4555-8555-555555555555';
@@ -747,4 +748,104 @@ test('un duplicado vacío se ignora y un duplicado con texto fuerza la relectura
   // La página inventada se va, y sus marcas con ella.
   assert.ok(!dudoso.reading.pages.some((page) => page.page === 7));
   assert.deepEqual(dudoso.reading.flags, []);
+});
+
+// ── Decisiones de foro que no son de una entrega ────────────────────────────
+
+test('una entrega con fichero nunca se aparca por «no es una duda» ni escala', async () => {
+  // Producción, 25-08-2026: el modelo contestó `noEsDuda: true` a un simulacro
+  // de tema —que no es una duda— y el lote lo aparcó tirando la corrección.
+  const provider = stubProvider(
+    { pages: [{ page: 1, latex: 'Tema 8.', imageUrl: '/a.png' }] },
+    { noEsDuda: true, escalate: true, confidence: 0.9 },
+  );
+
+  const result = await gradeSubmission({
+    provider,
+    submissionId: SUBMISSION,
+    studentRef: 'alumno-0003',
+    activityKind: 'assignment',
+    pages: [{ page: 1, path: 'examen.pdf' }],
+    context: { global: '', activityKind: '', activity: '' },
+    pointsAllocation: [],
+    graded: true,
+    maxScore: 10,
+  });
+
+  assert.equal(result.correction.noEsDuda, false);
+  assert.equal(result.correction.escalate, false);
+});
+
+test('en un foro esas decisiones sí se respetan', async () => {
+  const provider = stubProvider({}, { noEsDuda: true, escalate: true, confidence: 0.9 });
+
+  const result = await gradeSubmission({
+    provider,
+    submissionId: SUBMISSION,
+    studentRef: 'alumno-0003',
+    activityKind: 'forum',
+    pages: [],
+    textContent: 'Gracias, ya lo entendí.',
+    context: { global: '', activityKind: '', activity: '' },
+    pointsAllocation: [],
+    graded: false,
+    maxScore: null,
+  });
+
+  assert.equal(result.correction.noEsDuda, true);
+  assert.equal(result.correction.escalate, true);
+});
+
+// ── Reparto de la lectura en varias peticiones ──────────────────────────────
+
+test('los bloques se agrupan bajo el presupuesto sin dejar ningún grupo vacío', async () => {
+  const bloque = (page: number, kb: number) => ({
+    page,
+    pageNumbers: [page],
+    bytes: new Uint8Array(kb * 1024),
+  });
+  const grupos = await planTranscriptionRequests(
+    [bloque(1, 600), bloque(2, 600), bloque(3, 600)],
+    1024 * 1024,
+  );
+
+  assert.deepEqual(
+    grupos.map((grupo) => grupo.map((b) => b.page)),
+    [[1], [2], [3]],
+    'con 600 KB por bloque y 1 MB de presupuesto, no caben dos juntos',
+  );
+  assert.ok(grupos.every((grupo) => grupo.length > 0));
+});
+
+test('con presupuesto de sobra hay una sola petición', async () => {
+  const grupos = await planTranscriptionRequests(
+    [1, 2, 3, 4].map((page) => ({ page, pageNumbers: [page], bytes: new Uint8Array(1024) })),
+    20 * 1024 * 1024,
+  );
+  assert.equal(grupos.length, 1);
+  assert.equal(grupos[0]?.length, 4);
+});
+
+test('los grupos conservan el orden y cubren todos los bloques', async () => {
+  const bloques = [1, 2, 3, 4, 5].map((page) => ({
+    page,
+    pageNumbers: [page],
+    bytes: new Uint8Array(400 * 1024),
+  }));
+  const grupos = await planTranscriptionRequests(bloques, 1024 * 1024);
+  assert.deepEqual(
+    grupos.flatMap((grupo) => grupo.map((b) => b.page)),
+    [1, 2, 3, 4, 5],
+    'mezclar bloques salteados haría que el modelo numerase mal',
+  );
+});
+
+test('lo que no se puede medir cuenta cero y no trocea de más', async () => {
+  // Es el caso del proveedor simulado: rutas que no existen en disco. Tratarlas
+  // como enormes multiplicaría las peticiones sin ningún motivo.
+  const grupos = await planTranscriptionRequests(
+    [1, 2, 3].map((page) => ({ page, pageNumbers: [page], path: `/no/existe/${page}.pdf` })),
+    1024,
+  );
+  assert.equal(grupos.length, 1);
 });

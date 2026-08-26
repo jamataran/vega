@@ -301,6 +301,22 @@ Debilidades secundarias que el mismo caso deja ver:
 
 ---
 
+## 3 bis. Incidencia aparecida al desplegar el PR 1 (25-08): entrega aparcada como «no es una duda»
+
+Con `v1.0.3` en producción, `bd6b7660` se transcribió entera a la primera (13 + 13 páginas, sin
+relectura: el PR 1 funciona) y se corrigió (16 apartados, 5,8 min), pero acabó **aparcada** con
+«La respuesta con contexto confirma que no es una duda». `GradingAnswer` exigía `escalate` y
+`noEsDuda` —decisiones de foro— en **todas** las correcciones; ningún prompt de corrección los
+menciona; a un simulacro de tema el modelo contestó `noEsDuda: true` (literalmente cierto), y
+`processOne` (`batch.ts:977`) aparcaba sin mirar el tipo de actividad, descartando la corrección.
+Otra entrega del mismo día (`493b9400`) recibió `false` y se corrigió: no determinista.
+
+Es la misma familia que §3.2 (un campo en el esquema que el prompt no gobierna), en la otra
+dirección. **Hotfix (PR 1b, rama `fix/no-es-duda-solo-foros`)**: `ForumGradingAnswer` extiende
+`GradingAnswer` sólo para foros (a una entrega con fichero el esquema ya no le ofrece esos campos);
+el motor fuerza `escalate`/`noEsDuda` a `false` fuera de un foro; y el lote sólo aparca por ese
+motivo si `activity.kind === 'forum'`. Pruebas en `engine.test.ts` y `anthropic.test.ts`.
+
 ## 4. Plan de implementación
 
 Tres PR independientes contra `main`, en este orden (del más barato al que toca la imagen). Cada

@@ -47,6 +47,12 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
 
+      # `pdftoppm` (poppler-utils) lo usa la normalización de escaneos pesados.
+      # Sin él, sus pruebas se saltan solas y el fallo pasaría desapercibido
+      # hasta producción, que es justo donde importa.
+      - name: Instalar poppler-utils
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends poppler-utils
+
       - name: Instalar dependencias
         run: pnpm install --frozen-lockfile
 

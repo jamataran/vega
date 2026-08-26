@@ -77,6 +77,46 @@ export class FileStore {
   }
 
   /**
+   * Ficheros **derivados** de una entrega: los que Vega fabrica a partir del
+   * original y puede volver a fabricar.
+   *
+   * Cuelgan de `submissions/<id>/.derived/` y no de la raíz de la entrega para
+   * que se distingan de un vistazo del fichero que entregó el alumno, que es la
+   * prueba de lo que entregó y no se toca nunca. `removeSubmissionFiles` ya se
+   * lleva el directorio entero, así que borrar una entrega los borra con ella.
+   *
+   * El punto del nombre no es cosmético: `safeFilename` deja pasar «derived»
+   * tal cual, así que un alumno que subiera un fichero con ese nombre dejaría un
+   * fichero donde después hay que crear un directorio.
+   *
+   * Hoy sólo hay uno: `engine.pdf`, el original rasterizado que se manda al
+   * modelo cuando el escaneo es demasiado pesado. Se cachea porque un reproceso
+   * no tiene por qué volver a pagar la conversión.
+   */
+  derivedPathOf(submissionId: string, name: string): string {
+    return join('submissions', submissionId, '.derived', safeFilename(name));
+  }
+
+  async saveDerived(submissionId: string, name: string, bytes: Uint8Array): Promise<string> {
+    const storagePath = this.derivedPathOf(submissionId, name);
+    const absolute = this.absolutePathOf(storagePath);
+    await mkdir(dirname(absolute), { recursive: true });
+    await writeFile(absolute, bytes);
+    return storagePath;
+  }
+
+  async readDerived(submissionId: string, name: string): Promise<Buffer | null> {
+    try {
+      return await this.read(this.derivedPathOf(submissionId, name));
+    } catch (error) {
+      // Que no exista es lo normal: se pide antes de fabricarlo. Cualquier otro
+      // fallo —permisos, disco— sí tiene que verse.
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw error;
+    }
+  }
+
+  /**
    * ¿Se puede escribir de verdad en el almacén?
    *
    * Se comprueba escribiendo, no mirando permisos: en un contenedor el fallo
@@ -96,6 +136,17 @@ export class FileStore {
     } catch (error) {
       return { writable: false, reason: (error as Error).message };
     }
+  }
+
+  /**
+   * Borra los derivados de una entrega, dejando el original intacto.
+   *
+   * Se llama al guardar un original nuevo: lo que se fabricó a partir del
+   * anterior ya no le corresponde.
+   */
+  async removeDerived(submissionId: string): Promise<void> {
+    const absolute = this.absolutePathOf(join('submissions', submissionId, '.derived'));
+    await rm(absolute, { recursive: true, force: true });
   }
 
   /** Borra lo guardado de una entrega. No falla si no había nada. */

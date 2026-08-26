@@ -517,6 +517,18 @@ async function downloadInto(
   try {
     const stored = await store.saveSubmissionFile(submissionId, filename, bytes);
 
+    // **Un original nuevo invalida sus derivados.** `saveSubmissionFile`
+    // sobrescribe a propósito, así que tras una redescarga —una descarga
+    // truncada que se repite, un alumno que reentrega— el `engine.pdf`
+    // rasterizado del original anterior seguiría en disco y el motor lo
+    // reutilizaría: se corregiría el examen viejo creyendo que es el nuevo.
+    await store.removeDerived(submissionId).catch((error: unknown) =>
+      log.warn(
+        { submissionId, err: error },
+        'No se han podido borrar los derivados del original anterior',
+      ),
+    );
+
     await ctx.db
       .update(schema.submissions)
       .set({
