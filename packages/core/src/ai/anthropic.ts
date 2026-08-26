@@ -680,13 +680,27 @@ async function withTooLargeMessage<T>(
 export function asRequestTooLarge(error: unknown, bytes: number, pages: number): AiResponseError | null {
   const status = (error as { status?: unknown }).status;
   if (status !== 413) return null;
+
+  // Sin original adjunto, el tamaño no viene del escaneo sino del contexto de
+  // la actividad: los `.tex` de solución y rúbrica de todos los temas
+  // ofertados. Culpar a `pdftoppm` ahí mandaría al profesor a mirar donde no
+  // es, y decirle «0 MB en 0 páginas» sería directamente falso.
+  if (bytes === 0 || pages === 0) {
+    return new AiResponseError(
+      'request_too_large',
+      'La petición supera los 32 MB que admite la API de Anthropic sin llevar siquiera el examen ' +
+        'adjunto: lo que no cabe es el contexto de la actividad. Revisa el tamaño de los ficheros ' +
+        'de contexto que tiene cargados.',
+    );
+  }
+
   const mb = Math.round(bytes / (1024 * 1024));
   return new AiResponseError(
     'request_too_large',
-    `La petición supera los 32 MB que admite la API de Anthropic: el original ocupa ${mb} MB en ` +
-      `${pages} ${pages === 1 ? 'página' : 'páginas'}. Vega normaliza los escaneos pesados antes de ` +
-      'enviarlos; si ves esto, comprueba en Ajustes → Estado del sistema que `pdftoppm` está ' +
-      'disponible en el servidor.',
+    `La petición supera los 32 MB que admite la API de Anthropic: lo adjunto ocupa ${mb} MB en ` +
+      `${pages} ${pages === 1 ? 'bloque' : 'bloques'}. Vega rasteriza los escaneos pesados antes de ` +
+      'enviarlos, así que esto sólo debería ocurrir si `pdftoppm` no está disponible en el ' +
+      'servidor: míralo en el log de arranque del API.',
   );
 }
 

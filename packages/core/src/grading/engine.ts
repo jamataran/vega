@@ -669,6 +669,27 @@ const FAILED_GROUP: TranscribeResult = {
   usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, cacheCreationTokens: 0, costCents: 0 },
 };
 
+/**
+ * La relectura es una mejora, no un requisito: si falla entera, se conserva lo
+ * que trajo la primera pasada y decide `assertReadable` con las dos lecturas
+ * delante. Dejar que el error suba descartaría también la otra lectura, que
+ * está completa y ya pagada.
+ */
+async function retryOrKeep(
+  fallback: TranscribeResult,
+  signal: AbortSignal | undefined,
+  attempt: () => Promise<TranscribeResult>,
+): Promise<TranscribeResult> {
+  try {
+    return await attempt();
+  } catch (error) {
+    // Una cancelación no es un fallo de la relectura: si el lote se ha parado o
+    // ha vencido su plazo, tiene que parar de verdad y no seguir corrigiendo.
+    if (signal?.aborted === true) throw error;
+    return fallback;
+  }
+}
+
 function joinReadings(parts: readonly TranscribeResult[]): TranscribeResult {
   // Si **ningún** grupo respondió, no hay lectura parcial que salvar y el error
   // sí tiene que subir: `assertReadable` no puede decidir sobre la nada, y
@@ -758,15 +779,31 @@ export async function readWithRetry(
 
   signal?.throwIfAborted();
   const chunks = chunksCovering(sources, assessed.toReread);
-  const retry = await provider.transcribe(
-    {
-      ...base,
-      reading,
-      pages: chunks,
-      manifest: { totalPages, retryOf: [...assessed.toReread] },
-    },
-    { signal },
-  );
+
+  // La relectura pasa por el **mismo** presupuesto que la primera pasada. Sin
+  // esto, releer cinco páginas sueltas de un original sin normalizar rejuntaba
+  // sus bloques —40 MB en una petición— y volvía a dar el 413 que todo esto
+  // existe para evitar; y ese error, al no estar capturado, subía hasta el
+  // `Promise.all` de las dos lecturas y descartaba también la otra, completa y
+  // ya pagada.
+  const retry = await retryOrKeep(assessed.reading, signal, async () =>
+    joinReadings(
+    await runLimited(
+      (await planTranscriptionRequests(chunks)).map((grupo) => async () => {
+        signal?.throwIfAborted();
+        try {
+          return await provider.transcribe(
+            { ...base, reading, pages: grupo, manifest: { totalPages, retryOf: [...assessed.toReread] } },
+            { signal },
+          );
+        } catch (error) {
+          if (signal?.aborted === true) throw error;
+          return FAILED_GROUP;
+        }
+      }),
+      MAX_CONCURRENT_REQUESTS,
+    ),
+  ));
   const merged = mergeReadings(assessed.reading, assessPageAssembly(retry, chunks).reading, assessed.toReread);
   return assessPageAssembly(merged, sources).reading;
 }

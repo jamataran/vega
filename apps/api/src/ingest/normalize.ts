@@ -67,7 +67,14 @@ let disponible: Promise<boolean> | undefined;
 export function pdftoppmAvailable(): Promise<boolean> {
   disponible ??= run('pdftoppm', ['-v'], { timeout: 10_000 })
     .then(() => true)
-    .catch(() => false);
+    .catch((error: NodeJS.ErrnoException) => {
+      // Sólo se recuerda que **no está**. Un fallo transitorio —el sistema sin
+      // descriptores libres, un timeout con la máquina saturada— no puede dejar
+      // marcado «no hay poppler» para toda la vida del contenedor y degradar en
+      // silencio todas las entregas siguientes.
+      if (error.code !== 'ENOENT') disponible = undefined;
+      return false;
+    });
   return disponible;
 }
 
@@ -89,6 +96,12 @@ export interface NormalizeOptions {
    */
   readonly tmpRoot?: string;
   readonly onWarn?: (message: string, error?: unknown) => void;
+  /**
+   * Cancelación del lote. Sin ella, «Parar» y el vencimiento del plazo no
+   * llegaban al proceso hijo: `pdftoppm` seguía rasterizando cien páginas
+   * después de que nadie esperase ya el resultado.
+   */
+  readonly signal?: AbortSignal;
 }
 
 /**
@@ -125,8 +138,13 @@ export async function normalizeForEngine(
 
     await run(
       'pdftoppm',
-      ['-r', String(RASTER_DPI), '-jpeg', '-jpegopt', `quality=${JPEG_QUALITY}`, entrada, join(temporal, 'pagina')],
-      { timeout: NORMALIZE_TIMEOUT_MS },
+      // `-q` calla los avisos de sintaxis. Sin él, un PDF con objetos rotos
+      // —los escáneres los generan a diario— emite una línea por objeto, y con
+      // el `maxBuffer` de 1 MiB que trae `execFile` por defecto eso mata el
+      // proceso y tira una rasterización que ya había terminado bien. El
+      // margen de 8 MiB cubre lo que se cuele pese a `-q`.
+      ['-q', '-r', String(RASTER_DPI), '-jpeg', '-jpegopt', `quality=${JPEG_QUALITY}`, entrada, join(temporal, 'pagina')],
+      { timeout: NORMALIZE_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024, signal: options.signal },
     );
 
     // `pdftoppm` numera con relleno variable según el total: `pagina-1.jpg` con

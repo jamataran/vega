@@ -928,7 +928,7 @@ async function processOne(
   }
 
   const pages: PageSource[] = withFile
-    ? await pagesOf(ctx, submission, pagesPerChunk, provider.name === 'mock', log)
+    ? await pagesOf(ctx, submission, pagesPerChunk, provider.name === 'mock', log, signal)
     : [];
   const [persistedTranscription] = submission.status === 'grading'
     ? await db
@@ -1039,11 +1039,24 @@ async function processOne(
 
   const now = new Date();
 
-  const publication = autonomyDecision(
-    activity.autonomy,
-    result.confidence,
-    result.transcription?.flags.length ?? 0,
-  );
+  /**
+   * Una corrección hecha **sin ver el original** no se publica sola. Jamás.
+   *
+   * `autonomyDecision` mira la confianza y las marcas del OCR, y ninguna de las
+   * dos se entera de que el corrector no ha tenido el escaneo delante: la
+   * transcripción puede salir limpia y la confianza alta, y la nota se
+   * publicaría en Moodle antes de que nadie leyera el aviso que dice «revísala
+   * con el escaneo delante». Sería exactamente al revés de lo que promete ese
+   * aviso, y contra el ADR 0015: el original manda.
+   */
+  const sinOriginal = graded.review.some((flag) => flag.reason === 'original_omitido');
+  const publication = sinOriginal
+    ? 'review'
+    : autonomyDecision(
+        activity.autonomy,
+        result.confidence,
+        result.transcription?.flags.length ?? 0,
+      );
 
   signal.throwIfAborted();
   const persisted = await db.transaction(async (tx) => {
@@ -1238,6 +1251,7 @@ export async function pagesOf(
   pagesPerChunk = 4,
   allowSynthetic = false,
   log: Logger = SILENT,
+  signal?: AbortSignal,
 ): Promise<PageSource[]> {
   if (submission.storagePath !== null) {
     const store = new FileStore(ctx.config.STORAGE_ROOT);
@@ -1256,7 +1270,7 @@ export async function pagesOf(
     }
 
     const original = await store.read(submission.storagePath);
-    const paraElMotor = await engineBytes(store, submission, original, mediaType, log);
+    const paraElMotor = await engineBytes(store, submission, original, mediaType, log, signal);
     const bytes = paraElMotor ?? original;
 
     if (paraElMotor === null && mediaType !== 'application/pdf') {
@@ -1319,6 +1333,7 @@ async function engineBytes(
   original: Buffer,
   mediaType: string,
   log: Logger,
+  signal: AbortSignal | undefined,
 ): Promise<Uint8Array | null> {
   const cacheado = await store.readDerived(submission.id, ENGINE_PDF);
   if (cacheado !== null) {
@@ -1334,6 +1349,7 @@ async function engineBytes(
     // sitio para un original de 94 MB más sus páginas rasterizadas.
     tmpRoot: store.absolutePathOf('tmp'),
     onWarn: (message, error) => log.warn({ submissionId: submission.id, err: error }, message),
+    ...(signal ? { signal } : {}),
   });
   if (normalizado === null) return null;
 
