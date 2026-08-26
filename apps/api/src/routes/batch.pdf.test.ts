@@ -44,3 +44,50 @@ test('un PDF de 16 páginas produce cuatro bloques reales con manifiesto exacto'
   assert.deepEqual(result.transcription?.pages.map((page) => page.page),
     Array.from({ length: 16 }, (_unused, index) => index + 1));
 });
+
+// ── Presupuesto de bytes por bloque ─────────────────────────────────────────
+//
+// El troceado por páginas nunca acotó el tamaño de la petición: ése fue el
+// `413` de producción del 23-08-2026. Ahora corta también por bytes.
+
+test('con presupuesto ajustado, el bloque baja a una página y el manifiesto sigue cubriendo 1..N', async () => {
+  const pdf = await syntheticPdf(6);
+  // Un presupuesto por debajo del tamaño medio de página fuerza el mínimo.
+  const chunks = await splitPdfIntoPageSources(pdf, {
+    pagesPerChunk: 4,
+    maxChunkBytes: Math.floor(pdf.byteLength / 6),
+  });
+
+  assert.equal(chunks.length, 6, 'una página por bloque');
+  assert.deepEqual(
+    chunks.flatMap((chunk) => chunk.pageNumbers ?? []),
+    [1, 2, 3, 4, 5, 6],
+    'ninguna página se pierde ni se duplica al cortar por bytes',
+  );
+});
+
+test('un presupuesto holgado no cambia nada: manda el tope de páginas', async () => {
+  const chunks = await splitPdfIntoPageSources(await syntheticPdf(8), {
+    pagesPerChunk: 4,
+    maxChunkBytes: 100 * 1024 * 1024,
+  });
+  assert.equal(chunks.length, 2);
+  assert.deepEqual(chunks.map((chunk) => chunk.pageNumbers), [[1, 2, 3, 4], [5, 6, 7, 8]]);
+});
+
+test('el presupuesto nunca deja un bloque vacío, por pequeño que sea', async () => {
+  const chunks = await splitPdfIntoPageSources(await syntheticPdf(3), {
+    pagesPerChunk: 4,
+    maxChunkBytes: 1,
+  });
+  assert.equal(chunks.length, 3);
+  assert.ok(
+    chunks.every((chunk) => (chunk.pageNumbers ?? []).length >= 1),
+    'un bloque sin páginas rompería el manifiesto',
+  );
+});
+
+test('la forma antigua —un número suelto— sigue valiendo', async () => {
+  const chunks = await splitPdfIntoPageSources(await syntheticPdf(4), 2);
+  assert.equal(chunks.length, 2);
+});

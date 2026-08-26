@@ -79,7 +79,17 @@ ENV NODE_ENV=production \
 
 # tini como PID 1: reparte SIGTERM al proceso Node y siega zombies, de modo que
 # `docker stop` / redespliegue de Portainer cierren limpio y no a los 10s.
-RUN apk add --no-cache tini \
+#
+# poppler-utils trae `pdftoppm`, con el que se rasterizan los escaneos pesados
+# antes de mandarlos al modelo: un simulacro fotografiado con el móvil pesa
+# ~7 MB por folio y catorce folios no caben en los 32 MB por petición que admite
+# la API. Son ~30 MB de imagen y es un paquete del sistema, no un módulo nativo
+# de Node, así que no reintroduce la dependencia que evita el ADR 0001.
+#
+# Su ausencia **degrada, no rompe**: sin él se manda el original tal cual, el
+# presupuesto de bytes reparte la lectura en varias peticiones y la corrección
+# avisa de que no ha visto el escaneo. Ajustes → Estado del sistema lo dice.
+RUN apk add --no-cache tini poppler-utils \
  && addgroup -S vega \
  && adduser -S -G vega -h /app vega
 

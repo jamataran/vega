@@ -127,6 +127,12 @@ export const GradeInput = z.object({
   /** Original visual: autoridad ante cualquier discrepancia de lectura. */
   document: z.array(PageSource),
   /**
+   * Presente sólo cuando el original **no se adjunta** porque no cabe en la
+   * petición. Lleva las cifras para poder decírselo al modelo y al profesor con
+   * números, no con un «no ha cabido».
+   */
+  documentOmitted: z.object({ bytes: z.number(), pages: z.number() }).nullish(),
+  /**
    * Lo que el alumno ha escrito cuando no hay fichero: sus mensajes del foro ya
    * concatenados. `null` en actividades con entrega.
    */

@@ -24,6 +24,7 @@ import { schema } from '../db/client.js';
 import { toActivity, toBatchRun, toCorrection, toSubmission, toTranscription } from '../db/mappers.js';
 import { conflict, notFound, parseOrThrow } from '../http/errors.js';
 import { ingestAll, ingestCutoff, type IngestReport } from '../ingest/run.js';
+import { normalizeForEngine } from '../ingest/normalize.js';
 import { connectorForUser } from '../lms/factory.js';
 import { publishToLms, recordPublication } from '../publish/publish.js';
 import { queuePage } from '../queue/page.js';
@@ -63,6 +64,34 @@ const BATCH_RUN_LOCK_KEY = 0x7645_6743; // "vEgC"
 
 /** Por debajo de aquí, una corrección no se publica sola. */
 const AUTONOMY_CONFIDENCE_THRESHOLD = 0.75;
+
+/**
+ * Cuándo merece la pena rasterizar el original antes de mandarlo al modelo.
+ *
+ * La API admite 32 MB por petición contando todo el payload, y en base64 el
+ * original ocupa un tercio más. Un escaneo de móvil pesa ~7 MB por folio: con
+ * catorce folios son 94 MB y la lectura falla con `413` antes de mirar nada
+ * (ocurrió el 23-08-2026 con tres entregas reales). Un escaneo de escáner de
+ * verdad ronda los 500 KB por página y no hay nada que arreglar.
+ *
+ * Se miran las dos cosas porque fallan por caminos distintos: un PDF enorme de
+ * muchas páginas ligeras y uno de pocas páginas gigantes.
+ */
+const ENGINE_MAX_ORIGINAL_BYTES = 20 * 1024 * 1024;
+const ENGINE_MAX_BYTES_PER_PAGE = 1.5 * 1024 * 1024;
+
+/**
+ * Presupuesto en bruto de una petición al modelo.
+ *
+ * 20 MiB en bruto son ~26,7 MiB en base64, y encima van el prompt, el contexto
+ * de la actividad y los materiales adjuntos. Deja margen frente a los 32 MB sin
+ * afinar al milímetro, que es lo que hay que hacer con un límite que no se
+ * puede consultar.
+ */
+export const REQUEST_RAW_BUDGET = 20 * 1024 * 1024;
+
+/** Nombre del derivado que se manda al motor. Ver `FileStore.saveDerived`. */
+const ENGINE_PDF = 'engine.pdf';
 
 // ── Rutas ───────────────────────────────────────────────────────────────────
 
@@ -473,6 +502,7 @@ export async function runBatch(
           run.id,
           controller.signal,
           triggeredBy,
+          log,
         );
         processed += 1;
         if (outcome.autoPublished) autoPublished += 1;
@@ -814,6 +844,7 @@ async function processOne(
   batchRunId: string,
   signal: AbortSignal,
   fallbackPublisherId: string | null,
+  log: Logger,
 ): Promise<{ autoPublished: boolean }> {
   const { db } = ctx;
   const withFile = hasStudentFile(activity.kind);
@@ -897,7 +928,7 @@ async function processOne(
   }
 
   const pages: PageSource[] = withFile
-    ? await pagesOf(ctx, submission, pagesPerChunk, provider.name === 'mock')
+    ? await pagesOf(ctx, submission, pagesPerChunk, provider.name === 'mock', log)
     : [];
   const [persistedTranscription] = submission.status === 'grading'
     ? await db
@@ -1206,13 +1237,35 @@ export async function pagesOf(
   submission: SubmissionRow,
   pagesPerChunk = 4,
   allowSynthetic = false,
+  log: Logger = SILENT,
 ): Promise<PageSource[]> {
   if (submission.storagePath !== null) {
     const store = new FileStore(ctx.config.STORAGE_ROOT);
     const mediaType = pageMediaType(submission.mediaType);
-    const path = store.absolutePathOf(submission.storagePath);
-    if (mediaType !== 'application/pdf') return [{ page: 1, pageNumbers: [1], mediaType, path }];
-    return splitPdfIntoPageSources(await store.read(submission.storagePath), pagesPerChunk);
+
+    // Se decide con `sizeBytes`, que ya está en la fila, **antes** de leer el
+    // fichero: leer 94 MB de disco para descubrir que no hacía falta tocarlos
+    // es justo el trabajo que se está intentando quitar.
+    if (!worthNormalizing(submission)) {
+      const path = store.absolutePathOf(submission.storagePath);
+      if (mediaType !== 'application/pdf') return [{ page: 1, pageNumbers: [1], mediaType, path }];
+      return splitPdfIntoPageSources(await store.read(submission.storagePath), {
+        pagesPerChunk,
+        maxChunkBytes: REQUEST_RAW_BUDGET,
+      });
+    }
+
+    const original = await store.read(submission.storagePath);
+    const paraElMotor = await engineBytes(store, submission, original, mediaType, log);
+    const bytes = paraElMotor ?? original;
+
+    if (paraElMotor === null && mediaType !== 'application/pdf') {
+      // Una imagen que pesa y que no se ha podido normalizar viaja como imagen,
+      // igual que antes: `pdf-lib` no sabría abrirla.
+      return [{ page: 1, pageNumbers: [1], mediaType, path: store.absolutePathOf(submission.storagePath) }];
+    }
+
+    return splitPdfIntoPageSources(bytes, { pagesPerChunk, maxChunkBytes: REQUEST_RAW_BUDGET });
   }
 
   // Entregas sembradas por `pnpm db:demo`: no hay fichero en ninguna parte y la
@@ -1229,21 +1282,118 @@ export async function pagesOf(
   }));
 }
 
+/**
+ * El PDF que se le manda al motor, que no siempre es el que entregó el alumno.
+ *
+ * Devuelve `null` cuando hay que seguir con el original: o no pesa lo bastante
+ * como para que compense, o no se ha podido normalizar. Nunca lanza: un fallo
+ * al rasterizar degrada la petición, no tumba la corrección.
+ *
+ * **El original no se toca.** `storage_path`, `/api/submissions/:id/original` y
+ * las imágenes de la transcripción siguen apuntando al fichero que subió el
+ * alumno: es la prueba de lo que entregó y es lo que el profesor abre para
+ * revisar. Lo que se guarda aparte, en `derived/engine.pdf`, es una copia
+ * ligera para el modelo.
+ *
+ * Se hace aquí y no en la ingesta a propósito: así cubre también las entregas
+ * que ya están descargadas —las tres que se quedaron en `error` con el 413— sin
+ * necesidad de reingerirlas ni de migrar nada.
+ */
+/**
+ * ¿Merece la pena rasterizar esta entrega?
+ *
+ * `page_count` es 0 en toda fila cuyo recuento falló y en las anteriores a la
+ * descarga, así que **no se puede dividir por él a ciegas**: con 0 páginas
+ * cualquier fichero de más de 1,5 MB entraría a rasterizar sin motivo. Sin
+ * recuento fiable sólo manda el tamaño total, que siempre es cierto.
+ */
+function worthNormalizing(submission: SubmissionRow): boolean {
+  const bytes = submission.sizeBytes;
+  if (bytes > ENGINE_MAX_ORIGINAL_BYTES) return true;
+  return submission.pageCount > 0 && bytes / submission.pageCount > ENGINE_MAX_BYTES_PER_PAGE;
+}
+
+async function engineBytes(
+  store: FileStore,
+  submission: SubmissionRow,
+  original: Buffer,
+  mediaType: string,
+  log: Logger,
+): Promise<Uint8Array | null> {
+  const cacheado = await store.readDerived(submission.id, ENGINE_PDF);
+  if (cacheado !== null) {
+    log.info(
+      { submissionId: submission.id, bytes: cacheado.byteLength },
+      'Se reutiliza el original normalizado de un proceso anterior',
+    );
+    return cacheado;
+  }
+
+  const normalizado = await normalizeForEngine(original, mediaType, {
+    // El mismo volumen que el almacén: el `/tmp` de un contenedor no tiene
+    // sitio para un original de 94 MB más sus páginas rasterizadas.
+    tmpRoot: store.absolutePathOf('tmp'),
+    onWarn: (message, error) => log.warn({ submissionId: submission.id, err: error }, message),
+  });
+  if (normalizado === null) return null;
+
+  // Guardar el derivado es una optimización para el próximo reproceso, no un
+  // requisito: un volumen lleno o de sólo lectura no puede convertir una
+  // normalización correcta en una entrega fallida.
+  await store
+    .saveDerived(submission.id, ENGINE_PDF, normalizado.bytes)
+    .catch((error: unknown) =>
+      log.warn(
+        { submissionId: submission.id, err: error },
+        'No se ha podido guardar el original normalizado; se usa en memoria y se rehará la próxima vez',
+      ),
+    );
+
+  log.info(
+    {
+      submissionId: submission.id,
+      original: original.byteLength,
+      normalizado: normalizado.bytes.byteLength,
+      paginas: normalizado.pages,
+    },
+    'Original normalizado para el motor',
+  );
+  return normalizado.bytes;
+}
+
 /** Parte un PDF sin rasterizar y conserva un manifiesto exacto de páginas. */
 export async function splitPdfIntoPageSources(
   bytes: Uint8Array,
-  pagesPerChunk = 4,
+  options: number | { pagesPerChunk?: number; maxChunkBytes?: number } = 4,
 ): Promise<PageSource[]> {
+  const { pagesPerChunk = 4, maxChunkBytes } =
+    typeof options === 'number' ? { pagesPerChunk: options, maxChunkBytes: undefined } : options;
   if (!Number.isInteger(pagesPerChunk) || pagesPerChunk <= 0) {
     throw new Error('ai.pagesPerChunk debe ser un entero positivo.');
   }
   const source = await PDFDocument.load(bytes);
   const total = source.getPageCount();
   if (total === 0) throw new Error('El PDF no contiene páginas.');
+
+  /**
+   * Cuántas páginas caben en un bloque sin pasarse del presupuesto.
+   *
+   * Se estima por página media —bytes totales entre páginas— en lugar de medir
+   * cada una: los tamaños de un mismo escaneo son homogéneos, y medir de verdad
+   * obligaría a serializar cada página por separado, que es justo el trabajo que
+   * se está intentando evitar. Nunca baja de una página: un bloque vacío haría
+   * que el manifiesto dejara de cubrir 1..N.
+   */
+  const porBytes =
+    maxChunkBytes === undefined || maxChunkBytes <= 0
+      ? pagesPerChunk
+      : Math.max(1, Math.floor(maxChunkBytes / Math.max(1, Math.ceil(bytes.byteLength / total))));
+  const porBloque = Math.max(1, Math.min(pagesPerChunk, porBytes));
+
   const chunks: PageSource[] = [];
-  for (let start = 0; start < total; start += pagesPerChunk) {
+  for (let start = 0; start < total; start += porBloque) {
     const pageNumbers = Array.from(
-      { length: Math.min(pagesPerChunk, total - start) },
+      { length: Math.min(porBloque, total - start) },
       (_unused, offset) => start + offset + 1,
     );
     const chunk = await PDFDocument.create();

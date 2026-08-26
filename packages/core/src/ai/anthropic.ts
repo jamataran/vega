@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import Anthropic from '@anthropic-ai/sdk';
 import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
 import { z } from 'zod/v4';
@@ -349,7 +349,8 @@ export class AnthropicAiProvider implements AiProvider {
     // TODO(vega): sin verificar contra la API real — límites de tamaño de
     // petición (32 MB) y de páginas por PDF; un simulacro largo escaneado a
     // 300 ppp puede pasarse y habrá que trocearlo.
-    const response = await withStopRetry(
+    const enviados = await totalBytes(input.pages);
+    const response = await withTooLargeMessage(enviados, input.pages.length, () => withStopRetry(
       (maxTokens) =>
         withDeadline(this.#longCallTimeoutMs, (signal) => this.#client.messages.stream({
         model,
@@ -376,7 +377,7 @@ export class AnthropicAiProvider implements AiProvider {
       // garantiza un suelo alto aunque el ajuste de la instalación sea menor.
       Math.max(this.#maxTokens, TRANSCRIPTION_MIN_TOKENS),
       maxOutputFor(model),
-    );
+    ));
 
     const answer = response.parsed_output;
     if (answer === null) throw new AiResponseError('invalid_output', 'La transcripción no contiene una salida estructurada.');
@@ -412,9 +413,21 @@ export class AnthropicAiProvider implements AiProvider {
 
     // Una entrega llega transcrita; un foro llega como texto del alumno. Es la
     // única diferencia real entre corregir lo uno y lo otro.
+    // Cuando el original no se adjunta, el modelo tiene que saberlo: si no, da
+    // por hecho que lo tiene delante y afirma cosas sobre la caligrafía, los
+    // márgenes o lo que «se ve» en el escaneo. Decirlo explícitamente convierte
+    // una alucinación en una limitación declarada.
+    const sinOriginal =
+      input.documentOmitted == null
+        ? ''
+        : `\n\nNO SE ADJUNTA EL ORIGINAL: pesa ${Math.round(input.documentOmitted.bytes / (1024 * 1024))} MB ` +
+          `en ${input.documentOmitted.pages} páginas y no cabe en una petición. Corrige **sólo** sobre la ` +
+          'transcripción y sus marcas. No afirmes nada sobre la presentación, la caligrafía ni el aspecto ' +
+          'del escaneo, porque no los has visto.';
+
     const work =
       input.transcription !== null
-        ? `Transcripción del examen del alumno:\n\n${input.transcription.pages
+        ? `Transcripción del examen del alumno:${sinOriginal}\n\n${input.transcription.pages
             .map((page) => `% --- Página ${page.page} ---\n${page.latex}`)
             .join('\n\n')}\n\nCorrige apartado por apartado siguiendo el reparto de puntos.`
         : `Intervención del alumno en el foro:\n\n${input.textContent ?? '(sin texto)'}\n\n${
@@ -462,7 +475,7 @@ export class AnthropicAiProvider implements AiProvider {
     // `xhigh` exige max_tokens ≥ 64k; si el modelo no lo admite se corrige con
     // `high`, que sigue siendo razonamiento extendido.
     const effort = clampEffort(model, 'xhigh');
-    const response = await withStopRetry(
+    const response = await withTooLargeMessage(await totalBytes(input.document), input.document.length, () => withStopRetry(
       (maxTokens) =>
         withDeadline(this.#longCallTimeoutMs, (signal) => this.#client.messages.stream({
         model,
@@ -477,7 +490,7 @@ export class AnthropicAiProvider implements AiProvider {
         }, { signal }).finalMessage(), options?.signal),
       Math.max(this.#maxTokens, 32_000, minTokensFor(effort)),
       maxOutputFor(model),
-    );
+    ));
 
     const answer = response.parsed_output;
     if (answer === null) throw new AiResponseError('invalid_output', 'La corrección no contiene una salida estructurada.');
@@ -614,13 +627,67 @@ export class AnthropicAiProvider implements AiProvider {
 
 // ── Utilidades ──────────────────────────────────────────────────────────────
 
-export type AiResponseErrorCode = 'refusal' | 'max_tokens' | 'invalid_output';
+export type AiResponseErrorCode = 'refusal' | 'max_tokens' | 'invalid_output' | 'request_too_large';
 
 export class AiResponseError extends Error {
   constructor(readonly code: AiResponseErrorCode, message: string) {
     super(message);
     this.name = 'AiResponseError';
   }
+}
+
+/**
+ * Traduce el `413` de la API a algo que el profesor pueda leer.
+ *
+ * Hasta ahora la cola enseñaba el JSON crudo —`413 {"error":{"type":
+ * "request_too_large"…`— que no dice ni qué entrega es, ni por qué, ni qué
+ * hacer. Y el dato que falta es justo el que lo explica: cuánto pesaba.
+ *
+ * No se reintenta: la petición no va a encoger sola.
+ */
+/** Bytes en bruto de lo que se va a adjuntar, para poder contarlo en el mensaje. */
+async function totalBytes(pages: readonly PageSource[]): Promise<number> {
+  const tamanos = await Promise.all(
+    pages.map(async (page) => {
+      if (page.bytes !== undefined) return page.bytes.byteLength;
+      if (page.path === undefined) return 0;
+      try {
+        return (await stat(page.path)).size;
+      } catch {
+        return 0;
+      }
+    }),
+  );
+  return tamanos.reduce((suma, bytes) => suma + bytes, 0);
+}
+
+/**
+ * Ejecuta la llamada y, si la API responde `413`, la convierte en un error con
+ * un mensaje que se pueda leer. Cualquier otro error pasa tal cual.
+ */
+async function withTooLargeMessage<T>(
+  bytes: number,
+  pages: number,
+  operation: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    throw asRequestTooLarge(error, bytes, pages) ?? error;
+  }
+}
+
+export function asRequestTooLarge(error: unknown, bytes: number, pages: number): AiResponseError | null {
+  const status = (error as { status?: unknown }).status;
+  if (status !== 413) return null;
+  const mb = Math.round(bytes / (1024 * 1024));
+  return new AiResponseError(
+    'request_too_large',
+    `La petición supera los 32 MB que admite la API de Anthropic: el original ocupa ${mb} MB en ` +
+      `${pages} ${pages === 1 ? 'página' : 'páginas'}. Vega normaliza los escaneos pesados antes de ` +
+      'enviarlos; si ves esto, comprueba en Ajustes → Estado del sistema que `pdftoppm` está ' +
+      'disponible en el servidor.',
+  );
 }
 
 function positiveTimeout(value: number | undefined, fallback: number): number {
